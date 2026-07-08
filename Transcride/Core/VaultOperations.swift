@@ -37,8 +37,9 @@ struct VaultOperations: Sendable {
 
     // MARK: - Entries
 
-    /// Renames an entry: writes the new title into `transcript.md` frontmatter
-    /// (creating the file if the folder has none) and renames the folder to
+    /// Renames an entry: writes the new title into the transcript's frontmatter
+    /// (creating `transcript.md` if the folder has none), renames the transcript
+    /// file to `<Title>.md`, and renames the folder to
     /// `transcride-<timestamp>-<slug>`. The timestamp prefix never changes.
     @discardableResult
     func renameEntry(at relPath: RelativePath, toTitle rawTitle: String) throws -> RelativePath {
@@ -52,8 +53,9 @@ struct VaultOperations: Sendable {
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespaces)
 
-        // 1. Title into frontmatter.
-        let transcriptURL = entryURL.appending(path: VaultScanner.transcriptFileName)
+        // 1. Title into the frontmatter of whichever markdown file the entry has.
+        let transcriptURL = TranscriptFile.url(inEntry: entryURL)
+            ?? entryURL.appending(path: TranscriptFile.defaultName)
         var doc: FrontmatterDocument
         if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
             doc = FrontmatterDocument.parse(text)
@@ -64,7 +66,16 @@ struct VaultOperations: Sendable {
         doc.title = title.isEmpty ? nil : title
         try AtomicFile.write(doc.serialized(), to: transcriptURL)
 
-        // 2. Slug onto the folder name.
+        // 2. Rename the transcript file to match the title.
+        let newFileName = TranscriptFile.fileName(forTitle: doc.title)
+        if newFileName != transcriptURL.lastPathComponent {
+            let newFileURL = entryURL.appending(path: newFileName)
+            if !fm.fileExists(atPath: newFileURL.path) {
+                try fm.moveItem(at: transcriptURL, to: newFileURL)
+            }
+        }
+
+        // 3. Slug onto the folder name.
         let slug = Slug.make(from: title)
         let newFolderName = folderName.with(slug: slug.isEmpty ? nil : slug)
         guard newFolderName.string != folderName.string else { return relPath }

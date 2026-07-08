@@ -51,18 +51,18 @@ A running native macOS app (Swift + SwiftUI, macOS 15+, Apple Silicon) whose ent
 
 Create fixture entries by hand in Finder (a folder `transcride-2026-07-01T10-00-00` containing a `transcript.md` with frontmatter and a few paragraphs) to test with.
 
-- [ ] Fresh launch prompts for vault creation/selection; chosen vault persists across relaunch.
-- [ ] Hand-made fixture entry appears in the library with correct title, date, and snippet.
-- [ ] Creating a folder in the UI creates it on disk; dragging an entry into it moves the folder on disk (verify in Finder).
-- [ ] Creating a folder and a new fixture entry **in Finder** while the app is running: both appear in the UI within a few seconds.
-- [ ] Renaming an entry in the UI updates the frontmatter title and appends the slug to the folder name; timestamp prefix unchanged.
-- [ ] Editing `transcript.md` externally (change the title in frontmatter) updates the UI without a restart.
-- [ ] Reveal in Finder opens the correct entry folder.
-- [ ] Deleting an entry moves it to `<vault>/.trash/`; it appears in Recently Deleted; restore puts it back in its original subfolder.
-- [ ] Manually backdate a trash item's manifest date >30 days; relaunch; item is purged.
-- [ ] Point the app at a fixture vault with 500 entries: launch < 2 s, scrolling stays smooth.
-- [ ] Switch vaults in settings; the UI fully swaps to the second vault.
-- [ ] `xcodebuild test` passes.
+- [x] Fresh launch prompts for vault creation/selection; chosen vault persists across relaunch.
+- [x] Hand-made fixture entry appears in the library with correct title, date, and snippet.
+- [x] Creating a folder in the UI creates it on disk; dragging an entry into it moves the folder on disk (verify in Finder).
+- [x] Creating a folder and a new fixture entry **in Finder** while the app is running: both appear in the UI within a few seconds.
+- [x] Renaming an entry in the UI updates the frontmatter title and appends the slug to the folder name; timestamp prefix unchanged.
+- [x] Editing `transcript.md` externally (change the title in frontmatter) updates the UI without a restart.
+- [x] Reveal in Finder opens the correct entry folder.
+- [x] Deleting an entry moves it to `<vault>/.trash/`; it appears in Recently Deleted; restore puts it back in its original subfolder.
+- [x] Manually backdate a trash item's manifest date >30 days; relaunch; item is purged.
+- [x] Point the app at a fixture vault with 500 entries: launch < 2 s, scrolling stays smooth.
+- [x] Switch vaults in settings; the UI fully swaps to the second vault.
+- [x] `xcodebuild test` passes.
 
 ## Handoff (required, after the checklist is verified)
 

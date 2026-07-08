@@ -3,10 +3,14 @@ import SwiftUI
 struct EntryListView: View {
     @Environment(AppModel.self) private var model
 
-    @State private var renamingEntryID: String?
+    // Alert payloads are separate from the isPresented Bools: SwiftUI clears
+    // the presentation binding before the button action runs, so actions must
+    // never read state tied to isPresented.
+    @State private var showRenamePrompt = false
+    @State private var renamingEntry: Entry?
     @State private var renameDraft = ""
+    @State private var showDeletePrompt = false
     @State private var deletingEntry: Entry?
-    @FocusState private var renameFieldFocused: Bool
 
     private var folder: FolderNode? { model.selectedFolder }
 
@@ -34,12 +38,21 @@ struct EntryListView: View {
             }
         }
         .navigationTitle(folder.map(folderTitle) ?? "Entries")
+        .alert("Rename Entry", isPresented: $showRenamePrompt) {
+            TextField("Title", text: $renameDraft)
+            Button("Rename") {
+                if let entry = renamingEntry {
+                    let title = renameDraft
+                    Task { await model.renameEntry(entry, toTitle: title) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The title is saved into the entry’s frontmatter and appended to its folder name as a slug.")
+        }
         .confirmationDialog(
             "Move “\(deletingEntry?.displayTitle ?? "")” to Recently Deleted?",
-            isPresented: Binding(
-                get: { deletingEntry != nil },
-                set: { if !$0 { deletingEntry = nil } }
-            ),
+            isPresented: $showDeletePrompt,
             titleVisibility: .visible
         ) {
             Button("Move to Recently Deleted", role: .destructive) {
@@ -62,28 +75,20 @@ struct EntryListView: View {
     @ViewBuilder
     private func entryRow(_ entry: Entry) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            if renamingEntryID == entry.id {
-                TextField("Title", text: $renameDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($renameFieldFocused)
-                    .onSubmit { commitRename(entry) }
-                    .onExitCommand { renamingEntryID = nil }
-            } else {
-                HStack {
-                    Text(entry.displayTitle)
-                        .font(.headline)
-                        .lineLimit(1)
-                    if entry.favorite {
-                        Image(systemName: "star.fill")
-                            .font(.caption)
-                            .foregroundStyle(.yellow)
-                    }
-                    Spacer()
-                    if let duration = entry.duration {
-                        Text(Self.formatDuration(duration))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
+            HStack {
+                Text(entry.displayTitle)
+                    .font(.headline)
+                    .lineLimit(1)
+                if entry.favorite {
+                    Image(systemName: "star.fill")
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
+                }
+                Spacer()
+                if let duration = entry.duration {
+                    Text(Self.formatDuration(duration))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
             HStack {
@@ -115,7 +120,10 @@ struct EntryListView: View {
             moveToMenu(entry)
             Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
             Divider()
-            Button("Delete", role: .destructive) { deletingEntry = entry }
+            Button("Delete", role: .destructive) {
+                deletingEntry = entry
+                showDeletePrompt = true
+            }
         }
     }
 
@@ -143,14 +151,8 @@ struct EntryListView: View {
 
     private func beginRename(_ entry: Entry) {
         renameDraft = entry.title ?? entry.displayTitle
-        renamingEntryID = entry.id
-        renameFieldFocused = true
-    }
-
-    private func commitRename(_ entry: Entry) {
-        let title = renameDraft
-        renamingEntryID = nil
-        Task { await model.renameEntry(entry, toTitle: title) }
+        renamingEntry = entry
+        showRenamePrompt = true
     }
 
     static func formatDuration(_ seconds: Double) -> String {

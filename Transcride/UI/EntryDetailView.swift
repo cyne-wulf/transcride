@@ -1,11 +1,13 @@
 import SwiftUI
 
-/// Milestone-1 placeholder detail view: frontmatter metadata plus the raw
-/// `transcript.md` body, rendered read-only.
+/// Milestone-1 placeholder detail view. The transcript body is the first-class
+/// content; entry metadata is tucked behind "Show Info" (right-click or the
+/// toolbar ⓘ button).
 struct EntryDetailView: View {
     @Environment(AppModel.self) private var model
 
     @State private var document: FrontmatterDocument?
+    @State private var showingInfo = false
 
     var body: some View {
         Group {
@@ -32,37 +34,56 @@ struct EntryDetailView: View {
     @ViewBuilder
     private func entryDetail(_ entry: Entry) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(entry.displayTitle)
-                        .font(.title.bold())
-                    Text(entry.created.formatted(date: .complete, time: .shortened))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(.title2.bold())
+                    HStack(spacing: 8) {
+                        Text(entry.created.formatted(date: .abbreviated, time: .shortened))
+                        if let duration = entry.duration {
+                            Text("·")
+                            Text(EntryListView.formatDuration(duration))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-
-                metadataGrid(entry)
-
-                Divider()
 
                 if let document, !document.body.isEmpty {
                     Text(document.body)
                         .font(.body)
+                        .lineSpacing(3)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else if entry.hasTranscript {
                     Text("This entry’s transcript has no text yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("No transcript.md in this entry yet — transcription arrives in a later milestone.")
+                    Text("No transcript file in this entry yet — transcription arrives in a later milestone.")
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(24)
             .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button("Show Info") { showingInfo = true }
+                Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
+            }
         }
         .toolbar {
+            ToolbarItem {
+                Button {
+                    showingInfo.toggle()
+                } label: {
+                    Label("Show Info", systemImage: "info.circle")
+                }
+                .help("Show Info")
+                .popover(isPresented: $showingInfo, arrowEdge: .bottom) {
+                    infoPopover(entry)
+                }
+            }
             ToolbarItem {
                 Button {
                     model.revealInFinder(relativePath: entry.relativePath)
@@ -74,34 +95,39 @@ struct EntryDetailView: View {
         }
     }
 
+    // MARK: - Info popover
+
     @ViewBuilder
-    private func metadataGrid(_ entry: Entry) -> some View {
+    private func infoPopover(_ entry: Entry) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            infoRow("Created", entry.created.formatted(date: .complete, time: .standard))
             if let duration = entry.duration {
-                metadataRow("Duration", EntryListView.formatDuration(duration))
+                infoRow("Duration", EntryListView.formatDuration(duration))
             }
-            metadataRow("Audio", entry.hasAudio ? "Yes" : (entry.audioDeleted ? "Deleted" : "None"))
+            infoRow("Audio", entry.hasAudio ? "Yes" : (entry.audioDeleted ? "Deleted" : "None"))
             if let source = document?.source {
-                metadataRow("Source", source)
+                infoRow("Source", source)
             }
             if let engine = document?.engine {
-                metadataRow("Engine", engine)
+                infoRow("Engine", engine)
             }
-            if entry.favorite {
-                metadataRow("Favorite", "Yes")
-            }
-            metadataRow("Folder", entry.parentRelativePath.isEmpty ? "Vault Root" : entry.parentRelativePath)
+            infoRow("Favorite", entry.favorite ? "Yes" : "No")
+            infoRow("Folder", entry.parentRelativePath.isEmpty ? "Vault Root" : entry.parentRelativePath)
+            infoRow("Entry ID", entry.folderName.string)
         }
         .font(.callout)
+        .padding(16)
+        .frame(minWidth: 280, alignment: .leading)
     }
 
     @ViewBuilder
-    private func metadataRow(_ label: String, _ value: String) -> some View {
+    private func infoRow(_ label: String, _ value: String) -> some View {
         GridRow {
             Text(label)
                 .foregroundStyle(.secondary)
                 .gridColumnAlignment(.trailing)
             Text(value)
+                .textSelection(.enabled)
         }
     }
 }

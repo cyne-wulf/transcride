@@ -8,8 +8,6 @@ struct VaultScanner {
     static let audioExtensions: Set<String> = [
         "m4a", "mp3", "wav", "aac", "flac", "aiff", "aif", "ogg", "opus", "caf", "mp4", "mov",
     ]
-    static let transcriptFileName = "transcript.md"
-
     private struct CachedEntry {
         var folderModified: Date
         var transcriptModified: Date?
@@ -61,8 +59,10 @@ struct VaultScanner {
         at url: URL, relativePath: RelativePath, folderName: EntryFolderName
     ) -> Entry {
         let folderModified = modificationDate(of: url) ?? .distantPast
-        let transcriptURL = url.appending(path: Self.transcriptFileName)
-        let transcriptModified = modificationDate(of: transcriptURL)
+        let fileNames = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+        let transcriptFileName = TranscriptFile.find(in: fileNames)
+        let transcriptURL = transcriptFileName.map { url.appending(path: $0) }
+        let transcriptModified = transcriptURL.flatMap(modificationDate)
 
         if let cached = cache[relativePath],
            cached.folderModified == folderModified,
@@ -78,7 +78,7 @@ struct VaultScanner {
         var audioDeleted = false
         var hasTranscript = false
 
-        if transcriptModified != nil,
+        if let transcriptURL, transcriptModified != nil,
            let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
             hasTranscript = true
             let doc = FrontmatterDocument.parse(text)
@@ -90,11 +90,8 @@ struct VaultScanner {
             snippet = Self.snippet(fromBody: doc.body)
         }
 
-        let contents = (try? FileManager.default.contentsOfDirectory(
-            at: url, includingPropertiesForKeys: nil
-        )) ?? []
-        let hasAudio = contents.contains {
-            Self.audioExtensions.contains($0.pathExtension.lowercased())
+        let hasAudio = fileNames.contains {
+            Self.audioExtensions.contains(($0 as NSString).pathExtension.lowercased())
         }
 
         let entry = Entry(
@@ -107,7 +104,8 @@ struct VaultScanner {
             favorite: favorite,
             audioDeleted: audioDeleted,
             hasAudio: hasAudio,
-            hasTranscript: hasTranscript
+            hasTranscript: hasTranscript,
+            transcriptFileName: hasTranscript ? transcriptFileName : nil
         )
         cache[relativePath] = CachedEntry(
             folderModified: folderModified,

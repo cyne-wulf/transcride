@@ -50,7 +50,7 @@ struct VaultScannerTests {
         #expect(snapshot.root.totalEntryCount == 2)
     }
 
-    @Test func renameEntryUpdatesFrontmatterAndFolderName() throws {
+    @Test func renameEntryUpdatesFrontmatterFolderAndFileName() throws {
         let root = try makeVault()
         defer { try? FileManager.default.removeItem(at: root) }
         let ops = VaultOperations(vaultRoot: root)
@@ -61,13 +61,45 @@ struct VaultScannerTests {
         )
         #expect(newPath == "transcride-2026-07-01T10-00-00-renamed-the-sequel")
 
+        // The transcript file itself is renamed to the (sanitized) title.
+        let entryURL = root.appendingRelativePath(newPath)
+        #expect(!FileManager.default.fileExists(atPath: entryURL.appending(path: "transcript.md").path))
         let text = try String(
-            contentsOf: root.appendingRelativePath(newPath).appending(path: "transcript.md"),
+            contentsOf: entryURL.appending(path: "Renamed- The Sequel!.md"),
             encoding: .utf8
         )
         let doc = FrontmatterDocument.parse(text)
         #expect(doc.title == "Renamed: The Sequel!")
         #expect(doc.body.contains("Hello from the root entry body."))
+
+        // A second rename finds the retitled file and renames it again.
+        let finalPath = try ops.renameEntry(at: newPath, toTitle: "Third Name")
+        let finalURL = root.appendingRelativePath(finalPath)
+        let doc2 = FrontmatterDocument.parse(try String(
+            contentsOf: finalURL.appending(path: "Third Name.md"), encoding: .utf8
+        ))
+        #expect(doc2.title == "Third Name")
+        #expect(doc2.body.contains("Hello from the root entry body."))
+    }
+
+    @Test func scannerDiscoversCustomNamedTranscript() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entry = root.appending(path: "transcride-2026-07-03T08-00-00")
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        try AtomicFile.write(
+            "---\ntitle: \"Hand Named\"\n---\nBody here.\n",
+            to: entry.appending(path: "My Own Name.md")
+        )
+
+        var scanner = VaultScanner()
+        let snapshot = scanner.scan(root: root)
+        let found = try #require(snapshot.root.entries.first {
+            $0.relativePath == "transcride-2026-07-03T08-00-00"
+        })
+        #expect(found.title == "Hand Named")
+        #expect(found.transcriptFileName == "My Own Name.md")
+        #expect(found.snippet.contains("Body here."))
     }
 
     @Test func moveEntryBetweenFolders() throws {

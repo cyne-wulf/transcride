@@ -37,6 +37,9 @@ struct Entry: Identifiable, Hashable, Sendable {
     var audioDeleted: Bool
     var hasAudio: Bool
     var hasTranscript: Bool
+    /// Name of the entry's markdown file (`transcript.md` until titled, then
+    /// `<Title>.md`); nil when the entry has no transcript yet.
+    var transcriptFileName: String?
 
     var id: String { relativePath }
     var parentRelativePath: RelativePath { relativePath.parentRelativePath }

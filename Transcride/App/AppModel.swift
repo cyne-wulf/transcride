@@ -66,6 +66,7 @@ final class AppModel {
         if isSecurityScoped, url.startAccessingSecurityScopedResource() {
             scopedURL = url
         }
+        DebugLog.append("openVault path=\(url.path) scoped=\(scopedURL != nil)")
         if saveBookmark {
             do {
                 try VaultBookmark.save(url)
@@ -145,13 +146,13 @@ final class AppModel {
     // MARK: - Intents (folders)
 
     func createFolder(named name: String, inFolder parent: RelativePath) async {
-        await perform { service in
+        await perform("createFolder \(name) in [\(parent)]") { service in
             _ = try await service.createFolder(named: name, inFolder: parent)
         }
     }
 
     func renameFolder(at relPath: RelativePath, to newName: String) async {
-        await perform { service in
+        await perform("renameFolder [\(relPath)] -> \(newName)") { service in
             let newPath = try await service.renameFolder(at: relPath, to: newName)
             await MainActor.run {
                 if self.sidebarSelection == .folder(relPath) {
@@ -164,7 +165,7 @@ final class AppModel {
     // MARK: - Intents (entries)
 
     func renameEntry(_ entry: Entry, toTitle title: String) async {
-        await perform { service in
+        await perform("renameEntry [\(entry.relativePath)] -> \(title)") { service in
             let newPath = try await service.renameEntry(at: entry.relativePath, toTitle: title)
             await MainActor.run {
                 if self.selectedEntryID == entry.relativePath {
@@ -175,7 +176,7 @@ final class AppModel {
     }
 
     func moveItem(atRelativePath relPath: RelativePath, toFolder destFolder: RelativePath) async {
-        await perform { service in
+        await perform("moveItem [\(relPath)] -> [\(destFolder)]") { service in
             let newPath = try await service.moveItem(at: relPath, toFolder: destFolder)
             await MainActor.run {
                 if self.selectedEntryID == relPath {
@@ -186,7 +187,7 @@ final class AppModel {
     }
 
     func deleteItem(atRelativePath relPath: RelativePath) async {
-        await perform { service in
+        await perform("deleteItem [\(relPath)]") { service in
             try await service.trashItem(atRelativePath: relPath)
             await MainActor.run {
                 if self.selectedEntryID == relPath { self.selectedEntryID = nil }
@@ -200,13 +201,13 @@ final class AppModel {
     // MARK: - Intents (trash)
 
     func restoreTrashItem(_ item: TrashItem) async {
-        await perform { service in
+        await perform("restore [\(item.trashedName)]") { service in
             _ = try await service.restore(item)
         }
     }
 
     func deleteTrashItemPermanently(_ item: TrashItem) async {
-        await perform { service in
+        await perform("deletePermanently [\(item.trashedName)]") { service in
             try await service.deletePermanently(item)
         }
     }
@@ -231,11 +232,16 @@ final class AppModel {
         await service?.readTranscript(atEntryPath: entry.relativePath)
     }
 
-    private func perform(_ work: (VaultService) async throws -> Void) async {
-        guard let service else { return }
+    private func perform(_ label: String, _ work: (VaultService) async throws -> Void) async {
+        guard let service else {
+            DebugLog.append("\(label): NO SERVICE")
+            return
+        }
         do {
             try await work(service)
+            DebugLog.append("\(label): ok")
         } catch {
+            DebugLog.append("\(label): FAILED \(error)")
             errorMessage = error.localizedDescription
         }
         await refresh()

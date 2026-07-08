@@ -3,11 +3,17 @@ import SwiftUI
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
-    @State private var newFolderParent: RelativePath?
+    // Alert payloads live in separate state from the isPresented Bools:
+    // SwiftUI clears the presentation binding before running the button
+    // action, so an action must never read state tied to isPresented.
+    @State private var showNewFolderPrompt = false
+    @State private var newFolderParent: RelativePath = ""
     @State private var newFolderName = ""
-    @State private var renamingFolderPath: RelativePath?
+    @State private var showRenamePrompt = false
+    @State private var renamingFolderPath: RelativePath = ""
     @State private var renameFolderName = ""
-    @State private var deletingFolderPath: RelativePath?
+    @State private var showDeletePrompt = false
+    @State private var deletingFolderPath: RelativePath = ""
 
     var body: some View {
         @Bindable var model = model
@@ -29,6 +35,9 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            vaultFooter
+        }
         .toolbar {
             ToolbarItem {
                 Button {
@@ -39,41 +48,78 @@ struct SidebarView: View {
                 .help("New Folder")
             }
         }
-        .alert("New Folder", isPresented: newFolderPromptShown) {
+        .alert("New Folder", isPresented: $showNewFolderPrompt) {
             TextField("Name", text: $newFolderName)
             Button("Create") {
-                let parent = newFolderParent ?? ""
+                let parent = newFolderParent
                 let name = newFolderName
                 Task { await model.createFolder(named: name, inFolder: parent) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Create a folder inside “\(folderDisplayName(newFolderParent ?? ""))”.")
+            Text("Create a folder inside “\(folderDisplayName(newFolderParent))”.")
         }
-        .alert("Rename Folder", isPresented: renamePromptShown) {
+        .alert("Rename Folder", isPresented: $showRenamePrompt) {
             TextField("Name", text: $renameFolderName)
             Button("Rename") {
-                if let path = renamingFolderPath {
-                    let name = renameFolderName
-                    Task { await model.renameFolder(at: path, to: name) }
-                }
+                let path = renamingFolderPath
+                let name = renameFolderName
+                Task { await model.renameFolder(at: path, to: name) }
             }
             Button("Cancel", role: .cancel) {}
         }
         .confirmationDialog(
-            "Move “\(deletingFolderPath?.lastComponent ?? "")” to Recently Deleted?",
-            isPresented: deletePromptShown,
+            "Move “\(deletingFolderPath.lastComponent)” to Recently Deleted?",
+            isPresented: $showDeletePrompt,
             titleVisibility: .visible
         ) {
             Button("Move to Recently Deleted", role: .destructive) {
-                if let path = deletingFolderPath {
-                    Task { await model.deleteItem(atRelativePath: path) }
-                }
+                let path = deletingFolderPath
+                Task { await model.deleteItem(atRelativePath: path) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The folder and everything inside it can be restored from Recently Deleted for 30 days.")
         }
+    }
+
+    // MARK: - Vault footer
+
+    /// Bottom-of-sidebar vault switcher (Obsidian-style): shows the current
+    /// vault's name and opens a menu to switch, create, or reveal vaults.
+    private var vaultFooter: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Menu {
+                Button("Open Another Vault…") { model.chooseExistingVault() }
+                Button("Create New Vault…") { model.createNewVault() }
+                if let url = model.vaultURL {
+                    Divider()
+                    Button("Reveal Vault in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "externaldrive")
+                        .foregroundStyle(.secondary)
+                    Text(model.vaultURL?.lastPathComponent ?? "No Vault")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("Current vault: \(model.vaultURL?.path ?? "none"). Click to switch.")
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(.bar)
     }
 
     // MARK: - Rows
@@ -96,12 +142,16 @@ struct SidebarView: View {
                     Button("Rename…") {
                         renameFolderName = node.name
                         renamingFolderPath = node.relativePath
+                        showRenamePrompt = true
                     }
                 }
                 Button("Reveal in Finder") { model.revealInFinder(relativePath: node.relativePath) }
                 if !isRoot {
                     Divider()
-                    Button("Delete", role: .destructive) { deletingFolderPath = node.relativePath }
+                    Button("Delete", role: .destructive) {
+                        deletingFolderPath = node.relativePath
+                        showDeletePrompt = true
+                    }
                 }
             }
     }
@@ -120,26 +170,6 @@ struct SidebarView: View {
     private func beginNewFolder(in parent: RelativePath) {
         newFolderName = ""
         newFolderParent = parent
-    }
-
-    private var newFolderPromptShown: Binding<Bool> {
-        Binding(
-            get: { newFolderParent != nil },
-            set: { if !$0 { newFolderParent = nil } }
-        )
-    }
-
-    private var renamePromptShown: Binding<Bool> {
-        Binding(
-            get: { renamingFolderPath != nil },
-            set: { if !$0 { renamingFolderPath = nil } }
-        )
-    }
-
-    private var deletePromptShown: Binding<Bool> {
-        Binding(
-            get: { deletingFolderPath != nil },
-            set: { if !$0 { deletingFolderPath = nil } }
-        )
+        showNewFolderPrompt = true
     }
 }

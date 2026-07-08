@@ -21,9 +21,8 @@ actor VaultService {
     }
 
     func readTranscript(atEntryPath relPath: RelativePath) -> FrontmatterDocument? {
-        let url = rootURL.appendingRelativePath(relPath)
-            .appending(path: VaultScanner.transcriptFileName)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        guard let url = TranscriptFile.url(inEntry: rootURL.appendingRelativePath(relPath)),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         return FrontmatterDocument.parse(text)
     }
 

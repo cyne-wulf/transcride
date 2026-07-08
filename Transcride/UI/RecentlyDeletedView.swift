@@ -3,6 +3,9 @@ import SwiftUI
 struct RecentlyDeletedView: View {
     @Environment(AppModel.self) private var model
 
+    // Payload separate from isPresented — SwiftUI clears the presentation
+    // binding before running dialog button actions.
+    @State private var showDeletePrompt = false
     @State private var permanentlyDeleting: TrashItem?
 
     var body: some View {
@@ -25,10 +28,7 @@ struct RecentlyDeletedView: View {
         .navigationTitle("Recently Deleted")
         .confirmationDialog(
             "Permanently delete “\(permanentlyDeleting?.displayName ?? "")”?",
-            isPresented: Binding(
-                get: { permanentlyDeleting != nil },
-                set: { if !$0 { permanentlyDeleting = nil } }
-            ),
+            isPresented: $showDeletePrompt,
             titleVisibility: .visible
         ) {
             Button("Delete Permanently", role: .destructive) {
@@ -61,6 +61,7 @@ struct RecentlyDeletedView: View {
             }
             Button(role: .destructive) {
                 permanentlyDeleting = item
+                showDeletePrompt = true
             } label: {
                 Image(systemName: "trash")
             }
@@ -71,7 +72,10 @@ struct RecentlyDeletedView: View {
             Button("Restore") { Task { await model.restoreTrashItem(item) } }
             Button("Reveal in Finder") { model.revealTrashItemInFinder(item) }
             Divider()
-            Button("Delete Permanently…", role: .destructive) { permanentlyDeleting = item }
+            Button("Delete Permanently…", role: .destructive) {
+                permanentlyDeleting = item
+                showDeletePrompt = true
+            }
         }
     }
 
