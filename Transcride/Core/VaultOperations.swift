@@ -1,0 +1,109 @@
+import Foundation
+
+/// File-system mutations on a vault: create/rename folders, rename/move
+/// entries. All paths are vault-relative. Frontmatter writes go through
+/// `AtomicFile`; folder renames/moves are single `rename(2)`-backed moves.
+struct VaultOperations: Sendable {
+    let vaultRoot: URL
+
+    private var fm: FileManager { FileManager.default }
+
+    // MARK: - Folders
+
+    @discardableResult
+    func createFolder(named name: String, inFolder parent: RelativePath) throws -> RelativePath {
+        try validateName(name)
+        let relPath = parent.appendingComponent(name)
+        let url = vaultRoot.appendingRelativePath(relPath)
+        guard !fm.fileExists(atPath: url.path) else {
+            throw VaultError.alreadyExists(name)
+        }
+        try fm.createDirectory(at: url, withIntermediateDirectories: false)
+        return relPath
+    }
+
+    @discardableResult
+    func renameFolder(at relPath: RelativePath, to newName: String) throws -> RelativePath {
+        try validateName(newName)
+        let newRelPath = relPath.parentRelativePath.appendingComponent(newName)
+        guard newRelPath != relPath else { return relPath }
+        let sourceURL = vaultRoot.appendingRelativePath(relPath)
+        let destURL = vaultRoot.appendingRelativePath(newRelPath)
+        guard fm.fileExists(atPath: sourceURL.path) else { throw VaultError.notFound(relPath) }
+        guard !fm.fileExists(atPath: destURL.path) else { throw VaultError.alreadyExists(newName) }
+        try fm.moveItem(at: sourceURL, to: destURL)
+        return newRelPath
+    }
+
+    // MARK: - Entries
+
+    /// Renames an entry: writes the new title into `transcript.md` frontmatter
+    /// (creating the file if the folder has none) and renames the folder to
+    /// `transcride-<timestamp>-<slug>`. The timestamp prefix never changes.
+    @discardableResult
+    func renameEntry(at relPath: RelativePath, toTitle rawTitle: String) throws -> RelativePath {
+        guard let folderName = EntryFolderName(parsing: relPath.lastComponent) else {
+            throw VaultError.notFound(relPath)
+        }
+        let entryURL = vaultRoot.appendingRelativePath(relPath)
+        guard fm.fileExists(atPath: entryURL.path) else { throw VaultError.notFound(relPath) }
+
+        let title = rawTitle
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+
+        // 1. Title into frontmatter.
+        let transcriptURL = entryURL.appending(path: VaultScanner.transcriptFileName)
+        var doc: FrontmatterDocument
+        if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
+            doc = FrontmatterDocument.parse(text)
+        } else {
+            doc = FrontmatterDocument(fields: [], body: "")
+            doc.created = folderName.date
+        }
+        doc.title = title.isEmpty ? nil : title
+        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+
+        // 2. Slug onto the folder name.
+        let slug = Slug.make(from: title)
+        let newFolderName = folderName.with(slug: slug.isEmpty ? nil : slug)
+        guard newFolderName.string != folderName.string else { return relPath }
+
+        let newRelPath = relPath.parentRelativePath.appendingComponent(newFolderName.string)
+        let destURL = vaultRoot.appendingRelativePath(newRelPath)
+        guard !fm.fileExists(atPath: destURL.path) else {
+            throw VaultError.alreadyExists(newFolderName.string)
+        }
+        try fm.moveItem(at: entryURL, to: destURL)
+        return newRelPath
+    }
+
+    /// Moves an entry (or folder) into another folder. Returns the new path.
+    @discardableResult
+    func moveItem(at relPath: RelativePath, toFolder destFolder: RelativePath) throws -> RelativePath {
+        let name = relPath.lastComponent
+        let newRelPath = destFolder.appendingComponent(name)
+        guard newRelPath != relPath else { return relPath }
+
+        let sourceURL = vaultRoot.appendingRelativePath(relPath)
+        let destURL = vaultRoot.appendingRelativePath(newRelPath)
+        guard fm.fileExists(atPath: sourceURL.path) else { throw VaultError.notFound(relPath) }
+        guard !fm.fileExists(atPath: destURL.path) else { throw VaultError.alreadyExists(name) }
+        // Refuse to move a folder into itself or a descendant.
+        if newRelPath == relPath || newRelPath.hasPrefix(relPath + "/") {
+            throw VaultError.invalidName(destFolder)
+        }
+        try fm.moveItem(at: sourceURL, to: destURL)
+        return newRelPath
+    }
+
+    // MARK: - Validation
+
+    private func validateName(_ name: String) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed == name,
+              !name.contains("/"), !name.contains(":"), !name.hasPrefix(".") else {
+            throw VaultError.invalidName(name)
+        }
+    }
+}

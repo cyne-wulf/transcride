@@ -1,0 +1,51 @@
+name: Transcride
+options:
+  bundleIdPrefix: com.ashandevine
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+targets:
+  Transcride:
+    type: application
+    platform: macOS
+    sources:
+      - Transcride
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcride
+        PRODUCT_NAME: Transcride
+        CODE_SIGN_ENTITLEMENTS: Transcride/Transcride.entitlements
+        ENABLE_HARDENED_RUNTIME: NO
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+  TranscrideTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - TranscrideTests
+      - Transcride/Core
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcrideTests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Transcride:
+    build:
+      targets:
+        Transcride: all
+        TranscrideTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - TranscrideTests

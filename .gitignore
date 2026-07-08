@@ -15,3 +15,6 @@ xcuserdata/
 # Test vaults and fixtures with audio (generate locally, don't commit)
 TestVault*/
 fixtures/audio/
+
+# XcodeGen output (generated from project.yml)
+Transcride.xcodeproj/

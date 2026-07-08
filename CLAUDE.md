@@ -14,4 +14,10 @@ Native macOS (Swift + SwiftUI, macOS 15+, Apple Silicon) voice recorder + transc
 
 ## Build
 
-- Xcode project does not exist yet — Milestone 1 sets up scaffolding. Prefer XcodeGen (project defined in `project.yml`) so the project file stays agent-editable. Build and test via `xcodebuild` CLI. Record the exact commands here once they exist.
+- Project is defined in `project.yml` (XcodeGen). `Transcride.xcodeproj` is generated — never edit it by hand; edit `project.yml` and regenerate. New source files under `Transcride/` / `TranscrideTests/` are picked up by regenerating.
+- Commands:
+  - `xcodegen generate` — regenerate the project (required after adding/removing files)
+  - `xcodebuild -project Transcride.xcodeproj -scheme Transcride -destination 'platform=macOS,arch=arm64' build`
+  - `xcodebuild -project Transcride.xcodeproj -scheme Transcride -destination 'platform=macOS,arch=arm64' test`
+  - `Scripts/make-fixture-vault.sh [count] [dir]` — generate a fixture vault (default 500 entries into `TestVault-500/`, gitignored)
+- Test target compiles `Transcride/Core` sources directly (no app host); app-layer/UI code lives in `Transcride/App` and `Transcride/UI` and is not unit-tested.
