@@ -11,6 +11,15 @@ struct TranscrideApp: App {
                 .task { await model.start() }
         }
         .windowToolbarStyle(.unified)
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Import Audio…") {
+                    model.importViaPanel()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(model.phase != .ready)
+            }
+        }
 
         Settings {
             SettingsView()

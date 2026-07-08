@@ -19,13 +19,28 @@ final class AppModel {
         case ready
     }
 
+    /// UserDefaults keys shared between services and @AppStorage in the UI.
+    enum PreferenceKey {
+        static let recordingQuality = "recordingQuality"
+        static let preferredMicUID = "preferredMicUID"
+    }
+
     private(set) var phase: Phase = .launching
     private(set) var vaultURL: URL?
     private(set) var snapshot: VaultSnapshot?
     private(set) var trashItems: [TrashItem] = []
 
+    let recorder = RecorderService()
+    let player = PlayerService()
+    let inputDevices = AudioInputDevices()
+
     var sidebarSelection: SidebarSelection? = .folder("")
-    var selectedEntryID: String?
+    var selectedEntryID: String? {
+        didSet {
+            // PLY: switching entries stops playback; returning doesn't resume.
+            if selectedEntryID != oldValue { player.unload() }
+        }
+    }
     var errorMessage: String?
 
     private var service: VaultService?
@@ -56,6 +71,10 @@ final class AppModel {
 
     /// Opens `url` as the vault, replacing any current vault.
     func openVault(at url: URL, isSecurityScoped: Bool, saveBookmark: Bool) async {
+        if recorder.isActive {
+            _ = await recorder.stop() // finalize into the old vault first
+        }
+        player.unload()
         watcher?.stop()
         watcher = nil
         if let scopedURL {
@@ -196,6 +215,116 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    // MARK: - Intents (recording)
+
+    /// Folder new recordings/imports land in: the selected folder, or the
+    /// vault root when none / Recently Deleted is selected.
+    private var newEntryTargetFolder: RelativePath {
+        if case .folder(let relPath)? = sidebarSelection { return relPath }
+        return ""
+    }
+
+    func startRecording() async {
+        guard let service, let vaultURL, !recorder.isActive else { return }
+        guard await RecorderService.ensureMicPermission() else {
+            errorMessage = """
+            Transcride needs microphone access to record. \
+            Enable it in System Settings → Privacy & Security → Microphone, then try again.
+            """
+            return
+        }
+        let quality = RecordingQuality(
+            rawValue: UserDefaults.standard.string(forKey: PreferenceKey.recordingQuality) ?? ""
+        ) ?? .compressed
+        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
+
+        let folder = newEntryTargetFolder
+        var createdPath: RelativePath?
+        do {
+            let relPath = try await service.createEntryFolder(inFolder: folder, date: .now)
+            createdPath = relPath
+            try recorder.start(
+                entryURL: vaultURL.appendingRelativePath(relPath),
+                relativePath: relPath,
+                quality: quality,
+                preferredMicUID: micUID
+            )
+            await refresh()
+        } catch {
+            DebugLog.append("startRecording FAILED \(error)")
+            if let createdPath {
+                try? await service.removeEmptyEntryFolder(at: createdPath)
+            }
+            errorMessage = "Recording could not start: \(error.localizedDescription)"
+        }
+    }
+
+    func stopRecording() async {
+        guard let relPath = await recorder.stop() else { return }
+        await refresh()
+        selectedEntryID = relPath
+        TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
+    }
+
+    // MARK: - Intents (import)
+
+    func importViaPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Audio"
+        panel.message = "Each file becomes a new entry; the originals are not touched."
+        panel.prompt = "Import"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = AudioImportFormat.supportedExtensions
+            .compactMap { UTType(filenameExtension: $0) }
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        Task { await importFiles(panel.urls) }
+    }
+
+    /// Imports each file into its own entry. Per-file failures don't block the
+    /// rest of the batch; they're reported together at the end.
+    func importFiles(_ urls: [URL]) async {
+        guard let service else { return }
+        let folder = newEntryTargetFolder
+        var failures: [String] = []
+        var lastImported: RelativePath?
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let relPath = try await service.importAudioFile(from: url, toFolder: folder)
+                lastImported = relPath
+                TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .imported)
+                DebugLog.append("import ok [\(relPath)] from \(url.lastPathComponent)")
+            } catch {
+                DebugLog.append("import FAILED \(url.lastPathComponent): \(error)")
+                failures.append(error.localizedDescription)
+            }
+        }
+        await refresh()
+        if let lastImported { selectedEntryID = lastImported }
+        if !failures.isEmpty {
+            let imported = urls.count - failures.count
+            errorMessage = (imported > 0 ? "\(imported) of \(urls.count) files were imported. " : "")
+                + "These failed:\n" + failures.joined(separator: "\n")
+        }
+    }
+
+    // MARK: - Playback helpers
+
+    func audioURL(for entry: Entry) -> URL? {
+        guard let vaultURL, let audioFileName = entry.audioFileName else { return nil }
+        return vaultURL.appendingRelativePath(entry.relativePath).appending(path: audioFileName)
+    }
+
+    func waveform(for entry: Entry) async throws -> WaveformData? {
+        guard let service, let audioFileName = entry.audioFileName else { return nil }
+        return try await service.waveform(
+            forEntryAt: entry.relativePath, audioFileName: audioFileName
+        )
     }
 
     // MARK: - Intents (trash)

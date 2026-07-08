@@ -59,7 +59,10 @@ struct VaultScanner {
         at url: URL, relativePath: RelativePath, folderName: EntryFolderName
     ) -> Entry {
         let folderModified = modificationDate(of: url) ?? .distantPast
-        let fileNames = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+        // Hidden files (in-progress recordings, atomic-write temps) are invisible
+        // to the library: they must not count as transcript or audio.
+        let fileNames = ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
         let transcriptFileName = TranscriptFile.find(in: fileNames)
         let transcriptURL = transcriptFileName.map { url.appending(path: $0) }
         let transcriptModified = transcriptURL.flatMap(modificationDate)
@@ -90,10 +93,6 @@ struct VaultScanner {
             snippet = Self.snippet(fromBody: doc.body)
         }
 
-        let hasAudio = fileNames.contains {
-            Self.audioExtensions.contains(($0 as NSString).pathExtension.lowercased())
-        }
-
         let entry = Entry(
             relativePath: relativePath,
             folderName: folderName,
@@ -103,7 +102,7 @@ struct VaultScanner {
             snippet: snippet,
             favorite: favorite,
             audioDeleted: audioDeleted,
-            hasAudio: hasAudio,
+            audioFileName: Self.audioFile(in: fileNames),
             hasTranscript: hasTranscript,
             transcriptFileName: hasTranscript ? transcriptFileName : nil
         )
@@ -113,6 +112,20 @@ struct VaultScanner {
             entry: entry
         )
         return entry
+    }
+
+    /// Picks the entry's audio file: prefers the canonical `audio.*`, else the
+    /// first audio-extension file by name.
+    static func audioFile(in fileNames: [String]) -> String? {
+        let audio = fileNames.filter {
+            audioExtensions.contains(($0 as NSString).pathExtension.lowercased())
+        }
+        if let canonical = audio.first(where: {
+            ($0 as NSString).deletingPathExtension.lowercased() == "audio"
+        }) {
+            return canonical
+        }
+        return audio.min { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     private func modificationDate(of url: URL) -> Date? {

@@ -2,9 +2,28 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage(AppModel.PreferenceKey.recordingQuality) private var recordingQuality =
+        RecordingQuality.compressed.rawValue
+    @AppStorage(AppModel.PreferenceKey.preferredMicUID) private var preferredMicUID = ""
 
     var body: some View {
         Form {
+            Section("Recording") {
+                Picker("Microphone", selection: $preferredMicUID) {
+                    Text("System Default").tag("")
+                    ForEach(model.inputDevices.devices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
+                }
+                Picker("Quality", selection: $recordingQuality) {
+                    ForEach(RecordingQuality.allCases) { quality in
+                        Text(quality.label).tag(quality.rawValue)
+                    }
+                }
+                Text("Applies to new recordings. Compressed is small and fine for speech; lossless keeps the microphone signal bit-perfect.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Vault") {
                 LabeledContent("Location") {
                     Text(model.vaultURL?.path ?? "No vault selected")

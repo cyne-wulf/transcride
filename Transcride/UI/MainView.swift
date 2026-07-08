@@ -22,5 +22,20 @@ struct MainView: View {
             EntryDetailView()
         }
         .navigationTitle(model.vaultURL?.lastPathComponent ?? "Transcride")
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            RecorderBar()
+        }
+        // Drag-and-drop import: anywhere on the window makes a new entry per file.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !urls.isEmpty else { return false }
+            Task { await model.importFiles(urls) }
+            return true
+        }
+        .overlay {
+            if model.recorder.isZenMode {
+                ZenModeView()
+            }
+        }
+        .toolbar(model.recorder.isZenMode ? .hidden : .automatic, for: .windowToolbar)
     }
 }

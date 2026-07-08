@@ -27,6 +27,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Transcride records voice memos with your microphone. Audio is stored only in your local vault."
   TranscrideTests:
     type: bundle.unit-test
     platform: macOS

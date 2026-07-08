@@ -35,7 +35,9 @@ struct Entry: Identifiable, Hashable, Sendable {
     var snippet: String
     var favorite: Bool
     var audioDeleted: Bool
-    var hasAudio: Bool
+    /// Name of the entry's audio file (prefers `audio.*`, else first by name);
+    /// nil when the entry has no visible audio file.
+    var audioFileName: String?
     var hasTranscript: Bool
     /// Name of the entry's markdown file (`transcript.md` until titled, then
     /// `<Title>.md`); nil when the entry has no transcript yet.
@@ -43,6 +45,7 @@ struct Entry: Identifiable, Hashable, Sendable {
 
     var id: String { relativePath }
     var parentRelativePath: RelativePath { relativePath.parentRelativePath }
+    var hasAudio: Bool { audioFileName != nil }
 
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
