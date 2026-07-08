@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcresult
+xcuserdata/
+*.xcuserstate
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Test vaults and fixtures with audio (generate locally, don't commit)
+TestVault*/
+fixtures/audio/
