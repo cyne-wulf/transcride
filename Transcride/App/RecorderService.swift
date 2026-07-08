@@ -146,7 +146,11 @@ final class RecorderService {
                 self?.applySinkUpdate(elapsed: elapsed, peaksTail: peaksTail, error: error)
             }
         }
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in
+        // The tap block runs on an AVFAudio realtime queue. It must be
+        // @Sendable so it's nonisolated — a plain closure formed in this
+        // @MainActor method carries a runtime main-actor check and traps
+        // the moment the first buffer arrives off-main.
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable buffer, _ in
             sink.process(buffer)
         }
 

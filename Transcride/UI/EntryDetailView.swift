@@ -222,7 +222,6 @@ private struct PlaybackSection: View {
                     .font(.system(size: 34))
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.space, modifiers: [])
             .help(player.isPlaying ? "Pause (Space)" : "Play (Space)")
 
             Button {

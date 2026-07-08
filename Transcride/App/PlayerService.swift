@@ -8,7 +8,7 @@ import Observation
 @MainActor
 @Observable
 final class PlayerService {
-    static let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    static let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 
     private(set) var url: URL?
     private(set) var isPlaying = false

@@ -13,6 +13,18 @@ struct TranscrideApp: App {
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(after: .newItem) {
+                Button(model.recorder.isActive ? "Stop Recording" : "Start Recording") {
+                    Task {
+                        if model.recorder.isActive {
+                            await model.stopRecording()
+                        } else {
+                            await model.startRecording()
+                        }
+                    }
+                }
+                .keyboardShortcut(.space, modifiers: [.shift])
+                .disabled(model.phase != .ready || model.recorder.state == .finalizing)
+
                 Button("Import Audio…") {
                     model.importViaPanel()
                 }

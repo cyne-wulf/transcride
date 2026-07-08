@@ -62,6 +62,7 @@ final class AppModel {
 
     func start() async {
         guard phase == .launching else { return }
+        installKeyMonitor()
         if let url = VaultBookmark.resolve() {
             await openVault(at: url, isSecurityScoped: true, saveBookmark: false)
         } else {
@@ -215,6 +216,64 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    // MARK: - Keyboard (Space / Shift+Space)
+
+    /// One local key monitor instead of per-view `.keyboardShortcut`s:
+    /// SwiftUI shortcuts on plain-space are unreliable across focus states,
+    /// and menu key equivalents steal keys from text editing. The monitor
+    /// runs before both, so it can defer to text input first.
+    private func installKeyMonitor() {
+        // NSEvent isn't Sendable; hand only key code + modifiers across.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let keyCode = event.keyCode
+            let modifierFlags = event.modifierFlags
+            let consumed = MainActor.assumeIsolated {
+                self?.handleKeyDown(keyCode: keyCode, modifierFlags: modifierFlags) ?? false
+            }
+            return consumed ? nil : event
+        }
+    }
+
+    private let spaceKeyCode: UInt16 = 49
+
+    /// Returns true when the event was consumed.
+    private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        guard keyCode == spaceKeyCode, phase == .ready else { return false }
+        let modifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Field editors (TextField, search) and TextEditor are all NSTextView.
+        let focusedTextView = NSApp.keyWindow?.firstResponder as? NSTextView
+
+        if modifiers == .shift {
+            if let focusedTextView {
+                // Typing wins: Shift+Space while writing inserts a space
+                // instead of reaching the Start/Stop Recording menu item.
+                focusedTextView.insertText(" ", replacementRange: focusedTextView.selectedRange())
+                return true
+            }
+            return false // falls through to the File-menu item
+        }
+        if modifiers.isEmpty, focusedTextView == nil {
+            // While recording, Space is the pause/resume control; playback
+            // only gets Space when the recorder is idle.
+            switch recorder.state {
+            case .recording:
+                recorder.pause()
+                return true
+            case .paused:
+                recorder.resume()
+                return true
+            case .finalizing:
+                return false
+            case .idle:
+                if player.url != nil {
+                    player.togglePlayPause()
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     // MARK: - Intents (recording)
