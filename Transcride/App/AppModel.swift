@@ -255,7 +255,7 @@ final class AppModel {
         }
     }
 
-    // MARK: - Keyboard (Space / Shift+Space / Shift+Delete)
+    // MARK: - Keyboard (Z / Space / Shift+Space / Shift+Delete)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -275,6 +275,7 @@ final class AppModel {
 
     private let spaceKeyCode: UInt16 = 49
     private let deleteKeyCode: UInt16 = 51
+    private let zenKeyCode: UInt16 = 6
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
@@ -282,6 +283,14 @@ final class AppModel {
         let modifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
         // Field editors (TextField, search) and TextEditor are all NSTextView.
         let focusedTextView = NSApp.keyWindow?.firstResponder as? NSTextView
+
+        if keyCode == zenKeyCode {
+            // Plain Z enters Zen from anywhere except text input. Once Zen is
+            // active, Escape remains the deliberate exit control.
+            guard modifiers.isEmpty, focusedTextView == nil else { return false }
+            recorder.isZenMode = true
+            return true
+        }
 
         if keyCode == deleteKeyCode {
             // Shift+Delete: straight to Recently Deleted, no confirmation —
@@ -384,7 +393,7 @@ final class AppModel {
     /// always in Zen mode, by preference in the main window. Safe to call
     /// again mid-recording (entering Zen, flipping the toggle on).
     func updateLiveTranscription() {
-        guard recorder.isActive, liveTranscriber.status == .idle else { return }
+        guard recorder.isActive, !liveTranscriber.isSessionActive else { return }
         let wanted = recorder.isZenMode
             || UserDefaults.standard.bool(forKey: LiveTranscriber.enabledKey)
         guard wanted else { return }
@@ -393,6 +402,19 @@ final class AppModel {
             return
         }
         recorder.liveTee.set(liveTranscriber.begin())
+    }
+
+    /// Prepares the heavier streaming model before recording begins. Zen
+    /// calls this on entry so its first short memo can display words live.
+    func prepareLiveTranscription() {
+        let wanted = recorder.isZenMode
+            || UserDefaults.standard.bool(forKey: LiveTranscriber.enabledKey)
+        guard wanted else { return }
+        guard modelManager.state(forModelInfoID: ModelCatalog.parakeetV3.id).isDownloaded else {
+            liveTranscriber.markModelMissing()
+            return
+        }
+        liveTranscriber.prepare()
     }
 
     private func stopLiveTranscription() {

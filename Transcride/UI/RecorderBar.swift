@@ -60,7 +60,10 @@ struct RecorderBar: View {
             .toggleStyle(.checkbox)
             .foregroundStyle(.secondary)
             .onChange(of: liveTranscription) {
-                if liveTranscription { model.updateLiveTranscription() }
+                if liveTranscription {
+                    model.prepareLiveTranscription()
+                    model.updateLiveTranscription()
+                }
             }
             .help("Show words as you speak while recording (Parakeet, on-device)")
     }
@@ -164,6 +167,6 @@ struct RecorderBar: View {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
         }
         .buttonStyle(.borderless)
-        .help("Zen Mode — a distraction-free recording view")
+        .help("Zen Mode (Z) — a distraction-free recording view")
     }
 }

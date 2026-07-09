@@ -9,7 +9,10 @@ struct ZenLiveTranscriptView: View {
     var body: some View {
         switch transcriber.status {
         case .idle:
-            EmptyView()
+            Text("Live transcription ready")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("zen-live-transcript-ready")
         case .preparing(let fraction):
             VStack(spacing: 8) {
                 if let fraction, fraction > 0, fraction < 1 {
@@ -22,17 +25,20 @@ struct ZenLiveTranscriptView: View {
                 Text(preparingLabel(fraction))
                     .foregroundStyle(.secondary)
             }
+            .accessibilityIdentifier("zen-live-transcript-preparing")
         case .unavailable(let message):
             Text(message)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 480)
+                .accessibilityIdentifier("zen-live-transcript-unavailable")
         case .listening:
             if transcriber.transcript.isEmpty {
                 Text("Listening…")
                     .font(.title3)
                     .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("zen-live-transcript-listening")
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -42,13 +48,20 @@ struct ZenLiveTranscriptView: View {
                             .font(.title3)
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Color.clear.frame(height: 1).id("live-end")
+                        Color.clear.frame(height: 1).id("zen-live-end")
                     }
-                    .onChange(of: transcriber.transcript) {
-                        proxy.scrollTo("live-end", anchor: .bottom)
+                    .defaultScrollAnchor(.bottom)
+                    // Run after the new text has participated in layout.
+                    // `onChange` fired in the same update transaction and
+                    // often scrolled using the previous content height.
+                    .task(id: transcriber.transcript) {
+                        try? await Task.sleep(for: .milliseconds(20))
+                        guard !Task.isCancelled else { return }
+                        proxy.scrollTo("zen-live-end", anchor: .bottom)
                     }
                 }
                 .frame(maxWidth: 640, maxHeight: 200)
+                .accessibilityIdentifier("zen-live-transcript-text")
             }
         }
     }

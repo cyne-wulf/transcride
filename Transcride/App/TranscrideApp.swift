@@ -31,11 +31,19 @@ struct TranscrideApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .shift])
                 .disabled(model.phase != .ready)
             }
+
+            KeyboardShortcutsCommands()
         }
 
         Settings {
             SettingsView()
                 .environment(model)
         }
+
+        Window("Keyboard Shortcuts", id: KeyboardShortcutsCommands.windowID) {
+            KeyboardShortcutsView()
+        }
+        .defaultSize(width: 560, height: 520)
+        .windowResizability(.contentSize)
     }
 }

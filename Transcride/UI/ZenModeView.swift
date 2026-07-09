@@ -11,37 +11,47 @@ struct ZenModeView: View {
     private var recorder: RecorderService { model.recorder }
 
     var body: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-                .ignoresSafeArea()
+        GeometryReader { geometry in
+            let compact = geometry.size.height < 650
 
-            VStack(spacing: 36) {
-                Spacer()
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                    .ignoresSafeArea()
 
-                Text(formatElapsed(recorder.elapsed))
-                    .font(.system(size: 56, weight: .light).monospacedDigit())
-                    .foregroundStyle(recorder.state == .idle ? .secondary : .primary)
+                VStack(spacing: compact ? 16 : 24) {
+                    Spacer(minLength: compact ? 0 : 12)
 
-                LiveWaveformView(peaks: recorder.livePeaks)
-                    .frame(height: 120)
-                    .frame(maxWidth: 640)
-                    .opacity(recorder.state == .recording ? 1 : 0.35)
+                    Text(formatElapsed(recorder.elapsed))
+                        .font(.system(
+                            size: compact ? 48 : 56,
+                            weight: .light
+                        ).monospacedDigit())
+                        .foregroundStyle(recorder.state == .idle ? .secondary : .primary)
 
-                // Live transcription is the Zen default: words appear as
-                // you speak (the batch transcript still lands after stop).
-                ZenLiveTranscriptView(transcriber: model.liveTranscriber)
+                    LiveWaveformView(peaks: recorder.livePeaks)
+                        .frame(height: compact ? 80 : 120)
+                        .frame(maxWidth: 640)
+                        .opacity(recorder.state == .recording ? 1 : 0.35)
 
-                controls
-                    .frame(height: 64)
+                    // Reserve a real layout region for live text. Without an
+                    // explicit height, this ScrollView was the first child
+                    // SwiftUI collapsed in the app's compact window size.
+                    ZenLiveTranscriptView(transcriber: model.liveTranscriber)
+                        .frame(maxWidth: 640)
+                        .frame(height: compact ? 120 : 180)
 
-                Spacer()
+                    controls
+                        .frame(height: 64)
 
-                Text(escHint)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 16)
+                    Spacer(minLength: 0)
+
+                    Text(escHint)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.bottom, compact ? 4 : 16)
+                }
+                .padding(compact ? 20 : 32)
             }
-            .padding(32)
         }
         .focusable()
         .focusEffectDisabled()
@@ -53,6 +63,7 @@ struct ZenModeView: View {
         .onExitCommand { exitIfStopped() }
         .onAppear {
             focused = true
+            model.prepareLiveTranscription()
             model.updateLiveTranscription() // entering Zen mid-recording goes live too
         }
     }
