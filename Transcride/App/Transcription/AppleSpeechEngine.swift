@@ -27,6 +27,8 @@ actor AppleSpeechEngine: TranscriptionEngine {
 
     func downloadedByteSize() -> Int64? { nil }
 
+    func modelDirectory() -> URL? { nil } // system-managed assets
+
     // MARK: - Transcription
 
     func transcribe(

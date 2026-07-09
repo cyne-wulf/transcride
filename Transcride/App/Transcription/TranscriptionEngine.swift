@@ -11,6 +11,9 @@ protocol TranscriptionEngine: Sendable {
     func deleteModel() async throws
     /// Bytes the downloaded model occupies on disk, nil when not downloaded.
     func downloadedByteSize() async -> Int64?
+    /// On-disk model folder for "Show in Finder", nil when not downloaded or
+    /// system-managed (Apple Speech).
+    func modelDirectory() async -> URL?
 
     /// Transcribes one audio file into word-timed segments. `progress` is
     /// called with 0…1 fractions on an arbitrary queue.
@@ -39,6 +42,10 @@ enum ModelCatalog {
         supportsDiarization: false
     )
 
+    // Vocabulary biasing stays off for the turbo variant: its distilled
+    // decoder can't handle `<|startofprev|>` prompt conditioning and emits
+    // an immediate end-of-text (reproduced against WhisperKit 1.0.0). The
+    // correction backstop covers it instead; Whisper Small biases natively.
     static let whisperLargeV3Turbo = TranscriptionModelInfo(
         id: "whisperkit-large-v3-turbo",
         displayName: "Whisper Large v3 Turbo",
@@ -47,7 +54,7 @@ enum ModelCatalog {
         languagesDescription: "≈99 languages, auto-detected",
         languageCodes: [],
         downloadSizeBytes: 650_000_000,
-        supportsVocabularyBiasing: true,
+        supportsVocabularyBiasing: false,
         supportsDiarization: false
     )
 

@@ -90,4 +90,15 @@ struct SegmentBuilderTests {
     @Test func emptyInputMakesNoSegments() {
         #expect(SegmentBuilder.segments(from: []).isEmpty)
     }
+
+    @Test func stripsDecoderControlTokens() {
+        // Real Whisper large-v3-turbo failure output from verification — a
+        // collapsed decode must strip to nothing, never reach a note.
+        let collapsed = "<|startoftranscript|><|en|><|transcribe|><|0.00|><|endoftext|>"
+        #expect(SegmentBuilder.strippingSpecialTokens(collapsed) == "")
+        #expect(SegmentBuilder.strippingSpecialTokens(
+            "<|0.00|> This is a test.<|7.06|>"
+        ) == "This is a test.")
+        #expect(SegmentBuilder.strippingSpecialTokens("plain words") == "plain words")
+    }
 }

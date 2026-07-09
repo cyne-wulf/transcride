@@ -191,15 +191,15 @@ enum VocabularyCorrector {
         return result
     }
 
-    /// Soundex-style key over a normalized string: first character kept,
-    /// consonants mapped to sound classes, vowels/h/w/y dropped, repeats
-    /// collapsed. No length cap — long words must agree along their whole
-    /// consonant skeleton.
+    /// Soundex-style key over a normalized string: consonants mapped to sound
+    /// classes, vowels/h/w/y dropped (the leading character keeps a neutral
+    /// "0" so "Oshan"/"Ashan" agree), repeats collapsed. No length cap — long
+    /// words must agree along their whole consonant skeleton.
     static func phoneticKey(_ normalized: String) -> String {
-        guard let first = normalized.first else { return "" }
-        var key = String(first)
+        guard !normalized.isEmpty else { return "" }
+        var key = ""
         var lastCode: Character?
-        for char in normalized.dropFirst() {
+        for (offset, char) in normalized.enumerated() {
             let code: Character?
             switch char {
             case "b", "f", "p", "v": code = "1"
@@ -208,7 +208,7 @@ enum VocabularyCorrector {
             case "l": code = "4"
             case "m", "n": code = "5"
             case "r": code = "6"
-            case "a", "e", "i", "o", "u", "h", "w", "y": code = nil
+            case "a", "e", "i", "o", "u", "h", "w", "y": code = offset == 0 ? "0" : nil
             default: code = char // digits, non-ASCII: keep as-is
             }
             if let code {

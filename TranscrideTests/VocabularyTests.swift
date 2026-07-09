@@ -123,4 +123,34 @@ struct VocabularyCorrectorTests {
         #expect(VocabularyCorrector.editDistance("abc", "abc", limit: 2) == 0)
         #expect(VocabularyCorrector.editDistance("abcdef", "xyzdef", limit: 2) == 3)
     }
+
+    @Test func vowelOnsetMissesAreCorrected() {
+        // Real Parakeet output from verification: "Oshan" for "Ashan" — one
+        // substitution, identical consonant skeleton. The leading vowel must
+        // not block the phonetic gate.
+        #expect(VocabularyCorrector.phoneticKey("oshan") == VocabularyCorrector.phoneticKey("ashan"))
+        var t = transcript(["like", "Oshan", "Divine,", "and"])
+        let count = VocabularyCorrector.apply(terms: vocabulary, to: &t)
+        #expect(count == 1)
+        #expect(t.segments[0].words[1].text == "Ashan")
+        #expect(t.segments[0].words[1].correctedFrom == "Oshan")
+    }
+
+    @Test func realWorldEngineMissesStayConservative() {
+        // Also from verification runs: sound-alike but 3 edits away — too far
+        // to correct safely, and real words never get rewritten into names.
+        var t = transcript(["ocean", "waves", "and", "Erikeet", "or", "Mythish"])
+        let before = t
+        VocabularyCorrector.apply(terms: ["Ashan", "Airakeet", "Mitesh"], to: &t)
+        #expect(t == before)
+    }
+
+    @Test func realWorldTrailingPunctuationMiss() {
+        // Apple Speech emitted "Parik," for "Parikh," — corrected with the
+        // comma preserved.
+        var t = transcript(["Mitesh", "Parik,", "and"])
+        VocabularyCorrector.apply(terms: ["Parikh"], to: &t)
+        #expect(t.segments[0].words[1].text == "Parikh,")
+        #expect(t.segments[0].words[1].correctedFrom == "Parik,")
+    }
 }

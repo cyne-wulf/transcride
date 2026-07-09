@@ -109,4 +109,9 @@ final class ModelManager {
         }
         await refreshModel(id)
     }
+
+    /// On-disk folder of a downloaded model, for "Show in Finder".
+    func modelDirectory(forModelInfoID id: String) async -> URL? {
+        await EngineRegistry.shared.engine(forModelInfoID: id)?.modelDirectory()
+    }
 }

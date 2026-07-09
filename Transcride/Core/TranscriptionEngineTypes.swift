@@ -83,6 +83,13 @@ enum SegmentBuilder {
     static let pauseBreak: TimeInterval = 1.2
     static let maxWordsPerSegment = 60
 
+    /// Removes decoder control tokens (`<|en|>`, `<|endoftext|>`, …) that some
+    /// engines leak into segment text — they must never reach a transcript.
+    static func strippingSpecialTokens(_ text: String) -> String {
+        text.replacing(/<\|[^<>|]*\|>/, with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func segments(from words: [TranscriptOriginal.Word]) -> [TranscriptOriginal.Segment] {
         var segments: [TranscriptOriginal.Segment] = []
         var current: [TranscriptOriginal.Word] = []

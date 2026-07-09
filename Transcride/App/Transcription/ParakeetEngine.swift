@@ -53,6 +53,10 @@ actor ParakeetEngine: TranscriptionEngine {
         return FileManager.default.directoryByteSize(of: cacheDirectory)
     }
 
+    func modelDirectory() async -> URL? {
+        await isDownloaded() ? cacheDirectory : nil
+    }
+
     // MARK: - Transcription
 
     func transcribe(

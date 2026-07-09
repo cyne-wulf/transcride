@@ -90,6 +90,18 @@ private struct ModelRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Button {
+                    Task {
+                        if let url = await model.modelManager.modelDirectory(forModelInfoID: info.id) {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                    }
+                } label: {
+                    Image(systemName: "magnifyingglass.circle")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Show in Finder")
                 Button("Delete", role: .destructive) {
                     Task { await model.modelManager.delete(info.id) }
                 }

@@ -101,6 +101,10 @@ actor WhisperKitEngine: TranscriptionEngine {
         return FileManager.default.directoryByteSize(of: modelFolder)
     }
 
+    func modelDirectory() -> URL? {
+        isDownloaded() ? modelFolder : nil
+    }
+
     // MARK: - Transcription
 
     func transcribe(
@@ -125,8 +129,9 @@ actor WhisperKitEngine: TranscriptionEngine {
         }
 
         // Native vocabulary biasing (VOC-2): terms go in as the decoder
-        // prompt, nudging Whisper toward those spellings.
-        if !options.vocabulary.isEmpty, let tokenizer = pipe.tokenizer {
+        // prompt, nudging Whisper toward those spellings. Only for variants
+        // whose decoder tolerates prompt conditioning (see ModelCatalog).
+        if info.supportsVocabularyBiasing, !options.vocabulary.isEmpty, let tokenizer = pipe.tokenizer {
             let promptText = " " + options.vocabulary.joined(separator: ", ") + "."
             let tokens = tokenizer.encode(text: promptText)
                 .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
@@ -155,7 +160,13 @@ actor WhisperKitEngine: TranscriptionEngine {
         try Task.checkCancellation()
         progress(1.0)
 
-        return Self.segments(from: results)
+        let segments = Self.segments(from: results)
+        guard !segments.isEmpty else {
+            throw TranscriptionError.engineFailure(
+                "The model produced no transcription for this audio."
+            )
+        }
+        return segments
     }
 
     private func loadedPipe() async throws -> WhisperKit {
@@ -195,7 +206,9 @@ actor WhisperKitEngine: TranscriptionEngine {
                         )
                     }
                 } else {
-                    let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Segment text (unlike word timings) carries decoder
+                    // control tokens — strip them before the fallback word.
+                    let text = SegmentBuilder.strippingSpecialTokens(segment.text)
                     words = text.isEmpty ? [] : [TranscriptOriginal.Word(
                         text: text, start: Double(segment.start), end: Double(segment.end)
                     )]
