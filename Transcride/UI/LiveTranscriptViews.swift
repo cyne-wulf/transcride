@@ -11,8 +11,14 @@ struct ZenLiveTranscriptView: View {
         case .idle:
             EmptyView()
         case .preparing(let fraction):
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
+            VStack(spacing: 8) {
+                if let fraction, fraction > 0, fraction < 1 {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 240)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
                 Text(preparingLabel(fraction))
                     .foregroundStyle(.secondary)
             }
@@ -82,9 +88,18 @@ struct LiveTranscriptStrip: View {
         switch transcriber.status {
         case .idle:
             EmptyView()
-        case .preparing:
+        case .preparing(let fraction):
             Text("Preparing live transcription…")
                 .foregroundStyle(.secondary)
+                .layoutPriority(1)
+            if let fraction, fraction > 0, fraction < 1 {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+                    .frame(maxWidth: 160)
+            } else {
+                ProgressView().controlSize(.small)
+            }
         case .unavailable(let message):
             Text(message)
                 .foregroundStyle(.secondary)
