@@ -40,6 +40,10 @@ final class AppModel {
     /// Bumped whenever a transcription lands so the detail view re-reads
     /// `transcript.md` (the FSEvents watcher ignores our own writes).
     private(set) var transcriptRevision = 0
+    /// Bumped only for filesystem-watcher events. List refreshes caused by an
+    /// in-app autosave must not reload the active editor, because an earlier
+    /// debounced save may finish while newer keystrokes are still unsaved.
+    private(set) var externalVaultRevision = 0
 
     var sidebarSelection: SidebarSelection? = .folder("")
     var selectedEntryID: String? {
@@ -49,6 +53,9 @@ final class AppModel {
         }
     }
     var errorMessage: String?
+    /// Informational notice kept separate from errors so a protected edited
+    /// layer does not look like a failed retranscription.
+    var transcriptNoticeMessage: String?
 
     private var service: VaultService?
     private var watcher: FSEventsWatcher?
@@ -123,6 +130,7 @@ final class AppModel {
 
         watcher = FSEventsWatcher(url: url) { [weak self] in
             Task { @MainActor [weak self] in
+                self?.externalVaultRevision &+= 1
                 await self?.refresh()
             }
         }
@@ -283,11 +291,14 @@ final class AppModel {
         let modifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
         // Field editors (TextField, search) and TextEditor are all NSTextView.
         let focusedTextView = NSApp.keyWindow?.firstResponder as? NSTextView
+        // A selectable read-only transcript should not suppress transport
+        // shortcuts. Only an actual editor or field editor owns typing keys.
+        let editingTextView = focusedTextView?.isEditable == true ? focusedTextView : nil
 
         if keyCode == zenKeyCode {
             // Plain Z enters Zen from anywhere except text input. Once Zen is
             // active, Escape remains the deliberate exit control.
-            guard modifiers.isEmpty, focusedTextView == nil else { return false }
+            guard modifiers.isEmpty, editingTextView == nil else { return false }
             recorder.isZenMode = true
             return true
         }
@@ -295,7 +306,7 @@ final class AppModel {
         if keyCode == deleteKeyCode {
             // Shift+Delete: straight to Recently Deleted, no confirmation —
             // it's restorable for 30 days, so there's nothing to warn about.
-            guard modifiers == .shift, focusedTextView == nil,
+            guard modifiers == .shift, editingTextView == nil,
                   let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath
             else { return false }
             Task { await deleteItem(atRelativePath: entry.relativePath) }
@@ -304,7 +315,7 @@ final class AppModel {
 
         guard keyCode == spaceKeyCode else { return false }
         if modifiers == .shift {
-            if let focusedTextView {
+            if let focusedTextView = editingTextView {
                 // Typing wins: Shift+Space while writing inserts a space
                 // instead of reaching the Start/Stop Recording menu item.
                 focusedTextView.insertText(" ", replacementRange: focusedTextView.selectedRange())
@@ -312,7 +323,7 @@ final class AppModel {
             }
             return false // falls through to the File-menu item
         }
-        if modifiers.isEmpty, focusedTextView == nil {
+        if modifiers.isEmpty, editingTextView == nil {
             // While recording, Space is the pause/resume control; playback
             // only gets Space when the recorder is idle.
             switch recorder.state {
@@ -426,6 +437,9 @@ final class AppModel {
     /// the detail view know its transcript changed on disk.
     private func entryTranscribed(originalPath: RelativePath, outcome: TranscriptionApplier.Outcome) {
         transcriptRevision += 1
+        if outcome.markdownLeftAlone {
+            transcriptNoticeMessage = "The Original transcript was refreshed. Your Edited transcript was left untouched."
+        }
         if selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
             selectedEntryID = outcome.entryRelativePath
         }
@@ -523,6 +537,33 @@ final class AppModel {
 
     func readTranscript(for entry: Entry) async -> FrontmatterDocument? {
         await service?.readTranscript(atEntryPath: entry.relativePath)
+    }
+
+    func readTranscriptContent(for entry: Entry) async -> EntryTranscriptContent? {
+        await service?.readTranscriptContent(atEntryPath: entry.relativePath)
+    }
+
+    /// Saves the editable markdown body without triggering a full vault scan
+    /// on every keystroke. The editor debounces calls; the write itself is
+    /// atomic and the service preserves frontmatter.
+    func saveTranscriptBody(
+        _ body: String,
+        markHandEdited: Bool,
+        for entry: Entry
+    ) async -> FrontmatterDocument? {
+        guard let service else { return nil }
+        do {
+            let saved = try await service.saveTranscriptBody(
+                body,
+                markHandEdited: markHandEdited,
+                atEntryPath: entry.relativePath
+            )
+            await refresh()
+            return saved
+        } catch {
+            errorMessage = "Could not save the transcript: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     // MARK: - Vocabulary (VOC-1)

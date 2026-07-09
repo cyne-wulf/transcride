@@ -7,6 +7,8 @@ struct EntryDetailView: View {
     @Environment(AppModel.self) private var model
 
     @State private var document: FrontmatterDocument?
+    @State private var original: TranscriptOriginal?
+    @State private var loadedEntryPath: RelativePath?
     @State private var showingInfo = false
     @State private var showingRetranscribe = false
 
@@ -15,7 +17,19 @@ struct EntryDetailView: View {
             if let entry = model.selectedEntry {
                 entryDetail(entry)
                     .task(id: taskKey(for: entry)) {
-                        document = await model.readTranscript(for: entry)
+                        if loadedEntryPath != entry.relativePath {
+                            document = nil
+                            original = nil
+                            loadedEntryPath = nil
+                            model.player.setTranscriptForSilenceSkipping(nil)
+                        }
+                        guard let content = await model.readTranscriptContent(for: entry),
+                              !Task.isCancelled,
+                              model.selectedEntryID == entry.relativePath else { return }
+                        document = content.edited
+                        original = content.original
+                        loadedEntryPath = entry.relativePath
+                        model.player.setTranscriptForSilenceSkipping(content.original)
                     }
             } else {
                 ContentUnavailableView(
@@ -27,16 +41,17 @@ struct EntryDetailView: View {
         }
     }
 
-    /// Reload when a different entry is selected, the file changes on disk,
-    /// or a transcription lands (transcriptRevision — our own writes are
-    /// invisible to the FSEvents watcher).
+    /// Reload for entry/title changes, external vault writes, or a landed
+    /// transcription. Deliberately exclude `entry.snippet`: autosave refreshes
+    /// that list preview, and reloading the editor from an earlier debounced
+    /// save could otherwise overwrite newer unsaved keystrokes.
     private func taskKey(for entry: Entry) -> String {
-        "\(entry.relativePath)|\(entry.title ?? "")|\(entry.snippet)|\(model.transcriptRevision)"
+        "\(entry.relativePath)|\(entry.title ?? "")|external:\(model.externalVaultRevision)|transcription:\(model.transcriptRevision)"
     }
 
     @ViewBuilder
     private func entryDetail(_ entry: Entry) -> some View {
-        ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.displayTitle)
@@ -61,29 +76,42 @@ struct EntryDetailView: View {
                    let queueItem = queue.items.first(where: { $0.entryRelativePath == entry.relativePath }) {
                     transcriptionStatus(queueItem, queue: queue)
                 }
-
-                if let document, !document.body.isEmpty {
-                    Text(document.body)
-                        .font(.body)
-                        .lineSpacing(3)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else if entry.hasTranscript {
-                    Text("This entry’s transcript has no text yet — check the transcription queue in the toolbar.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("No transcript file in this entry yet.")
-                        .foregroundStyle(.secondary)
-                }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
             .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-            .contextMenu {
-                Button("Show Info") { showingInfo = true }
-                Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
+
+            if loadedEntryPath == entry.relativePath, document != nil || original != nil {
+                TranscriptWorkbenchView(entry: entry, original: original, document: $document)
+                    .frame(maxWidth: 820, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+            } else if loadedEntryPath != entry.relativePath {
+                ProgressView("Loading transcript…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if entry.hasTranscript {
+                ContentUnavailableView(
+                    "Transcript Is Empty",
+                    systemImage: "text.document",
+                    description: Text("Check the transcription queue in the toolbar.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView(
+                    "No Transcript",
+                    systemImage: "text.badge.xmark",
+                    description: Text("This entry does not have a transcript file yet.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Show Info") { showingInfo = true }
+            Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
         }
         .toolbar {
             if entry.hasAudio {
@@ -294,6 +322,17 @@ private struct PlaybackSection: View {
             }
 
             Spacer()
+
+            Toggle(isOn: Binding(
+                get: { player.skipSilence },
+                set: { player.skipSilence = $0 }
+            )) {
+                Label("Skip Silence", systemImage: "forward.end.fill")
+                    .font(.system(size: 11 * controlScale, weight: .medium))
+            }
+            .toggleStyle(.button)
+            .controlSize(.small)
+            .help("Jump pauses longer than \(SilenceGap.defaultThreshold, specifier: "%.1f") seconds")
 
             speedMenu
 

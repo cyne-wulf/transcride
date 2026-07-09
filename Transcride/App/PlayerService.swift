@@ -9,12 +9,19 @@ import Observation
 @Observable
 final class PlayerService {
     static let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+    static let skipSilencePreferenceKey = "skipSilence"
 
     private(set) var url: URL?
     private(set) var isPlaying = false
     private(set) var currentTime: Double = 0
     private(set) var duration: Double = 0
     private(set) var loadFailed = false
+    /// Incremented by user-driven seeks (word clicks, waveform scrubs and
+    /// transport skips). Transcript views use it to resume auto-follow.
+    private(set) var seekRevision = 0
+    var skipSilence: Bool {
+        didSet { UserDefaults.standard.set(skipSilence, forKey: Self.skipSilencePreferenceKey) }
+    }
     var speed: Float = 1.0 {
         didSet {
             if isPlaying { player?.rate = speed }
@@ -24,6 +31,11 @@ final class PlayerService {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var silenceGaps: [SilenceGap] = []
+
+    init() {
+        skipSilence = UserDefaults.standard.bool(forKey: Self.skipSilencePreferenceKey)
+    }
 
     var progress: Double {
         duration > 0 ? min(1, max(0, currentTime / duration)) : 0
@@ -35,7 +47,11 @@ final class PlayerService {
     /// reports its own.
     func load(url: URL, knownDuration: Double?) {
         guard url != self.url else { return }
+        // The detail task may load transcript timing just before the playback
+        // task loads its asset. Keep those prepared gaps across this reset.
+        let preparedSilenceGaps = silenceGaps
         unload()
+        silenceGaps = preparedSilenceGaps
         self.url = url
 
         let item = AVPlayerItem(url: url)
@@ -60,7 +76,13 @@ final class PlayerService {
             Task { @MainActor [weak self] in
                 guard let self, self.player === player else { return }
                 let seconds = time.seconds
-                if seconds.isFinite { self.currentTime = seconds }
+                guard seconds.isFinite else { return }
+                self.currentTime = seconds
+                if self.isPlaying, self.skipSilence,
+                   let destination = SilenceGap.skipDestination(at: seconds, in: self.silenceGaps),
+                   destination - seconds > 0.01 {
+                    self.seekInternally(to: destination)
+                }
             }
         }
         endObserver = NotificationCenter.default.addObserver(
@@ -83,6 +105,7 @@ final class PlayerService {
         duration = 0
         loadFailed = false
         speed = 1.0
+        silenceGaps = []
     }
 
     // MARK: - Transport
@@ -111,6 +134,17 @@ final class PlayerService {
     }
 
     func seek(to seconds: Double) {
+        seekRevision &+= 1
+        seekInternally(to: seconds)
+    }
+
+    /// Installs timing gaps for the currently loaded entry. Passing nil (or a
+    /// transcript with fewer than two words) simply disables gap jumping.
+    func setTranscriptForSilenceSkipping(_ transcript: TranscriptOriginal?) {
+        silenceGaps = transcript.map { SilenceGap.compute(from: $0) } ?? []
+    }
+
+    private func seekInternally(to seconds: Double) {
         guard let player else { return }
         let clamped = min(max(0, seconds), duration > 0 ? duration : seconds)
         currentTime = clamped

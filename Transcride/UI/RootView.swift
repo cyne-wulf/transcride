@@ -27,5 +27,16 @@ struct RootView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .alert(
+            "Original Transcript Updated",
+            isPresented: Binding(
+                get: { model.transcriptNoticeMessage != nil },
+                set: { if !$0 { model.transcriptNoticeMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.transcriptNoticeMessage ?? "")
+        }
     }
 }

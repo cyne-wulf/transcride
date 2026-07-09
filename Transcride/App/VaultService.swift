@@ -1,5 +1,10 @@
 import Foundation
 
+struct EntryTranscriptContent: Sendable {
+    var edited: FrontmatterDocument?
+    var original: TranscriptOriginal?
+}
+
 /// Background actor owning all vault file I/O so the main thread never touches
 /// the disk. Wraps the scanner (with its cache), mutation operations, and trash.
 actor VaultService {
@@ -24,6 +29,42 @@ actor VaultService {
         guard let url = TranscriptFile.url(inEntry: rootURL.appendingRelativePath(relPath)),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         return FrontmatterDocument.parse(text)
+    }
+
+    func readTranscriptContent(atEntryPath relPath: RelativePath) -> EntryTranscriptContent {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        let edited: FrontmatterDocument?
+        if let url = TranscriptFile.url(inEntry: entryURL),
+           let text = try? String(contentsOf: url, encoding: .utf8) {
+            edited = FrontmatterDocument.parse(text)
+        } else {
+            edited = nil
+        }
+        return EntryTranscriptContent(
+            edited: edited,
+            original: TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
+        )
+    }
+
+    /// Re-reads frontmatter at save time, replaces only the body, and writes
+    /// atomically. This keeps metadata and unknown YAML fields intact even
+    /// when another in-app operation updated them after the editor opened.
+    func saveTranscriptBody(
+        _ body: String,
+        markHandEdited: Bool,
+        atEntryPath relPath: RelativePath
+    ) throws -> FrontmatterDocument {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        guard let transcriptURL = TranscriptFile.url(inEntry: entryURL) else {
+            throw VaultError.notFound("Transcript for \(relPath)")
+        }
+        var editable = try TranscriptEditDocument.load(from: transcriptURL)
+        editable.replaceBody(body)
+        // If the user edited and then undid back to the starting text before
+        // the debounce fired, the real edit still forked this layer.
+        if markHandEdited { editable.markHandEdited() }
+        try editable.save(to: transcriptURL)
+        return editable.document
     }
 
     /// Loads the entry's `waveform.json`, generating (and caching) it from the
