@@ -5,7 +5,7 @@ import SwiftUI
 /// a filling progress ring around the item count — so it can't be mistaken
 /// for the entry-level Retranscribe action (which keeps the circular-arrows
 /// symbol). Each popover row shows the entry, model, and state, with retry on
-/// failures and remove on anything not running.
+/// failures and remove/cancel on every row.
 struct TranscriptionQueueButton: View {
     @Environment(AppModel.self) private var model
     let queue: TranscriptionQueue
@@ -122,16 +122,14 @@ private struct TranscriptionQueuePopover: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if item.state != .running {
-                Button {
-                    queue.remove(itemID: item.id)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Remove from queue")
+            Button {
+                queue.remove(itemID: item.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .help(item.state == .running ? "Cancel transcription" : "Remove from queue")
         }
     }
 

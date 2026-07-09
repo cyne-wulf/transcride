@@ -18,6 +18,12 @@ final class TranscriptionQueue {
     private let vaultRoot: URL
     private let service: VaultService
     private var worker: Task<Void, Never>?
+    /// The in-flight item's work, cancellable independently of the worker
+    /// loop (eviction cancels one item; `shutdown` cancels everything).
+    private var runningItemTask: (itemID: String, task: Task<Void, Error>)?
+    /// Running items whose entry was deleted mid-flight: dropped when their
+    /// run ends instead of being re-queued or marked failed.
+    private var evictedRunningIDs: Set<String> = []
 
     init(vaultRoot: URL, service: VaultService) {
         self.vaultRoot = vaultRoot
@@ -31,6 +37,7 @@ final class TranscriptionQueue {
     func shutdown() {
         worker?.cancel()
         worker = nil
+        runningItemTask?.task.cancel()
     }
 
     // MARK: - Intents
@@ -61,13 +68,49 @@ final class TranscriptionQueue {
         ensureWorker()
     }
 
-    /// Removes a waiting or failed item; a running item can't be removed.
+    /// Removes an item. A running item's in-flight work is cancelled and the
+    /// item dropped once it winds down — never re-queued (that path is
+    /// reserved for `shutdown`) and never applied to the entry.
     func remove(itemID: String) {
-        guard let index = items.firstIndex(where: { $0.id == itemID }),
-              items[index].state != .running else { return }
-        items.remove(at: index)
-        progressByItemID[itemID] = nil
-        persist()
+        guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
+        if items[index].state == .running {
+            evictedRunningIDs.insert(itemID)
+            if runningItemTask?.itemID == itemID { runningItemTask?.task.cancel() }
+        } else {
+            items.remove(at: index)
+            progressByItemID[itemID] = nil
+            persist()
+        }
+    }
+
+    /// Drops every item for a deleted entry — or anything beneath a deleted
+    /// folder. Running work is cancelled, not re-queued: the entry is gone.
+    func evictItems(underPath relPath: RelativePath) {
+        let affected = items.filter {
+            $0.entryRelativePath == relPath
+                || $0.entryRelativePath.hasPrefix(relPath + "/")
+        }
+        for item in affected {
+            remove(itemID: item.id)
+        }
+    }
+
+    /// Follows an entry rename or move so queued duplicates (e.g. a second
+    /// item enqueued before an auto-title rename landed) don't go stale.
+    func repointItems(from oldPath: RelativePath, to newPath: RelativePath) {
+        guard oldPath != newPath else { return }
+        var changed = false
+        for index in items.indices {
+            let path = items[index].entryRelativePath
+            if path == oldPath {
+                items[index].entryRelativePath = newPath
+                changed = true
+            } else if path.hasPrefix(oldPath + "/") {
+                items[index].entryRelativePath = newPath + path.dropFirst(oldPath.count)
+                changed = true
+            }
+        }
+        if changed { persist() }
     }
 
     // MARK: - Worker
@@ -93,18 +136,44 @@ final class TranscriptionQueue {
         persist()
         progressByItemID[item.id] = 0
 
+        // The item's work gets its own task so `remove`/`evictItems` can
+        // cancel one item without tearing down the worker loop.
+        let task = Task { try await self.run(item) }
+        runningItemTask = (item.id, task)
+        var interrupted = false
+        var failure: String?
         do {
-            try await run(item)
-            items.removeAll { $0.id == item.id }
+            try await task.value
         } catch is CancellationError {
-            markWaiting(item.id)
+            interrupted = true
         } catch TranscriptionError.cancelled {
-            markWaiting(item.id)
+            interrupted = true
+        } catch let error as VaultError {
+            if case .notFound = error {
+                // The entry vanished mid-flight (deleted); nothing left to do.
+                DebugLog.append("queue dropped [\(item.entryRelativePath)]: entry no longer exists")
+            } else {
+                failure = error.localizedDescription
+            }
         } catch {
+            failure = error.localizedDescription
+        }
+        runningItemTask = nil
+
+        if evictedRunningIDs.remove(item.id) != nil {
+            // Cancelled by the user or evicted by a delete: drop the item
+            // however its run ended.
+            items.removeAll { $0.id == item.id }
+            DebugLog.append("queue cancelled [\(item.entryRelativePath)] mid-run")
+        } else if interrupted {
+            markWaiting(item.id) // shutdown — re-runs next launch/open
+        } else if let failure {
             if let itemIndex = items.firstIndex(where: { $0.id == item.id }) {
                 items[itemIndex].state = .failed
-                items[itemIndex].errorMessage = error.localizedDescription
+                items[itemIndex].errorMessage = failure
             }
+        } else {
+            items.removeAll { $0.id == item.id } // success, or notFound drop
         }
         progressByItemID[item.id] = nil
         persist()
@@ -168,6 +237,9 @@ final class TranscriptionQueue {
                 + (outcome.markdownLeftAlone ? ", md left alone (hand-edited)" : "")
         )
         onEntryTranscribed?(item.entryRelativePath, outcome)
+        if outcome.entryRelativePath != item.entryRelativePath {
+            repointItems(from: item.entryRelativePath, to: outcome.entryRelativePath)
+        }
     }
 
     private func markWaiting(_ itemID: String) {

@@ -203,6 +203,7 @@ final class AppModel {
         await perform("renameEntry [\(entry.relativePath)] -> \(title)") { service in
             let newPath = try await service.renameEntry(at: entry.relativePath, toTitle: title)
             await MainActor.run {
+                self.transcriptionQueue?.repointItems(from: entry.relativePath, to: newPath)
                 if self.selectedEntryID == entry.relativePath {
                     self.selectedEntryID = newPath
                 }
@@ -214,6 +215,7 @@ final class AppModel {
         await perform("moveItem [\(relPath)] -> [\(destFolder)]") { service in
             let newPath = try await service.moveItem(at: relPath, toFolder: destFolder)
             await MainActor.run {
+                self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
                 if self.selectedEntryID == relPath {
                     self.selectedEntryID = newPath
                 }
@@ -235,6 +237,7 @@ final class AppModel {
         await perform("deleteItem [\(relPath)]") { service in
             try await service.trashItem(atRelativePath: relPath)
             await MainActor.run {
+                self.transcriptionQueue?.evictItems(underPath: relPath)
                 if self.selectedEntryID == relPath { self.selectedEntryID = nil }
                 if self.sidebarSelection == .folder(relPath) {
                     self.sidebarSelection = .folder(relPath.parentRelativePath)
