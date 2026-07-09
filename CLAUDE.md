@@ -4,7 +4,7 @@ Native macOS (Swift + SwiftUI, macOS 15+, Apple Silicon) voice recorder + transc
 
 ## Milestone workflow — hard rules
 
-- **Current milestone: 2 (not started; milestone 1 verified 2026-07-08).** Update this line only when the human confirms a milestone's full checklist.
+- **Current milestone: 3 (not started; milestone 2 verified 2026-07-09).** Update this line only when the human confirms a milestone's full checklist.
 - Work follows the milestone docs PRD-1.md … PRD-5.md, in order. Before any work, read the current milestone doc; for milestones 2+, also read its `PRD-<N>-start-here.md` handoff (written at the end of the previous milestone).
 - **Never begin milestone N+1 until the human has confirmed every checklist item of milestone N.**
 - Stay inside the current milestone's In/Out scope. Every Out item names the milestone where it belongs — defer it there.
