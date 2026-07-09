@@ -57,6 +57,11 @@ final class RecorderService {
 
     nonisolated static let partialFileName = ".recording.caf"
 
+    /// Side-channel copy of the input for live transcription. The recording
+    /// path never depends on it: the sink writes first, then the tee relays
+    /// the same buffer (or drops it silently when no handler is attached).
+    nonisolated let liveTee = LiveAudioTee()
+
     private(set) var state: State = .idle
     /// Recorded audio time in seconds (excludes pauses).
     private(set) var elapsed: Double = 0
@@ -150,8 +155,10 @@ final class RecorderService {
         // @Sendable so it's nonisolated — a plain closure formed in this
         // @MainActor method carries a runtime main-actor check and traps
         // the moment the first buffer arrives off-main.
+        let liveTee = self.liveTee
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable buffer, _ in
             sink.process(buffer)
+            liveTee.send(buffer)
         }
 
         engine.prepare()
@@ -316,6 +323,27 @@ enum RecorderError: LocalizedError {
         case .exportUnavailable:
             return "The recording could not be converted to M4A."
         }
+    }
+}
+
+/// Lock-guarded relay from the audio tap to an optional live-transcription
+/// handler. Attach/detach happens on the main actor while `send` runs on the
+/// audio thread; with no handler attached, `send` is a cheap no-op.
+final class LiveAudioTee: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (AVAudioPCMBuffer) -> Void)?
+
+    func set(_ newHandler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {
+        lock.lock()
+        handler = newHandler
+        lock.unlock()
+    }
+
+    func send(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        let handler = self.handler
+        lock.unlock()
+        handler?(buffer)
     }
 }
 

@@ -27,6 +27,10 @@ struct ZenModeView: View {
                     .frame(maxWidth: 640)
                     .opacity(recorder.state == .recording ? 1 : 0.35)
 
+                // Live transcription is the Zen default: words appear as
+                // you speak (the batch transcript still lands after stop).
+                ZenLiveTranscriptView(transcriber: model.liveTranscriber)
+
                 controls
                     .frame(height: 64)
 
@@ -47,7 +51,10 @@ struct ZenModeView: View {
             return .handled
         }
         .onExitCommand { exitIfStopped() }
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            model.updateLiveTranscription() // entering Zen mid-recording goes live too
+        }
     }
 
     private var escHint: String {

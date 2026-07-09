@@ -34,6 +34,7 @@ final class AppModel {
     let player = PlayerService()
     let inputDevices = AudioInputDevices()
     let modelManager = ModelManager()
+    let liveTranscriber = LiveTranscriber()
 
     private(set) var transcriptionQueue: TranscriptionQueue?
     /// Bumped whenever a transcription lands so the detail view re-reads
@@ -80,6 +81,7 @@ final class AppModel {
     /// Opens `url` as the vault, replacing any current vault.
     func openVault(at url: URL, isSecurityScoped: Bool, saveBookmark: Bool) async {
         if recorder.isActive {
+            stopLiveTranscription()
             _ = await recorder.stop() // finalize into the old vault first
         }
         player.unload()
@@ -357,6 +359,7 @@ final class AppModel {
                 quality: quality,
                 preferredMicUID: micUID
             )
+            updateLiveTranscription()
             await refresh()
         } catch {
             DebugLog.append("startRecording FAILED \(error)")
@@ -368,10 +371,33 @@ final class AppModel {
     }
 
     func stopRecording() async {
+        stopLiveTranscription()
         guard let relPath = await recorder.stop() else { return }
         await refresh()
         selectedEntryID = relPath
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
+    }
+
+    // MARK: - Live transcription (M3 addendum)
+
+    /// Attaches live transcription to the running recording when wanted —
+    /// always in Zen mode, by preference in the main window. Safe to call
+    /// again mid-recording (entering Zen, flipping the toggle on).
+    func updateLiveTranscription() {
+        guard recorder.isActive, liveTranscriber.status == .idle else { return }
+        let wanted = recorder.isZenMode
+            || UserDefaults.standard.bool(forKey: LiveTranscriber.enabledKey)
+        guard wanted else { return }
+        guard modelManager.state(forModelInfoID: ModelCatalog.parakeetV3.id).isDownloaded else {
+            liveTranscriber.markModelMissing()
+            return
+        }
+        recorder.liveTee.set(liveTranscriber.begin())
+    }
+
+    private func stopLiveTranscription() {
+        recorder.liveTee.set(nil)
+        liveTranscriber.end()
     }
 
     /// A transcription landed: refresh, follow an auto-title rename, and let

@@ -31,7 +31,12 @@ struct MainView: View {
         }
         .navigationTitle(model.vaultURL?.lastPathComponent ?? "Transcride")
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            RecorderBar()
+            VStack(spacing: 0) {
+                if !model.recorder.isZenMode {
+                    LiveTranscriptStrip(transcriber: model.liveTranscriber)
+                }
+                RecorderBar()
+            }
         }
         // Drag-and-drop import: anywhere on the window makes a new entry per file.
         .dropDestination(for: URL.self) { urls, _ in

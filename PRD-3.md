@@ -12,6 +12,10 @@ Every recording and import now becomes text automatically, locally. This milesto
 
 **Out:** word-highlight playback sync and click-to-seek (M4), editing (M4), search (M4), diarization (M5 — but the data schema and engine capability flag are defined now).
 
+### Addendum (added during M3 verification): live transcription mode
+
+User-approved scope addition, shipped with M3. **Live display + batch final:** while recording, words appear on screen as they are spoken (FluidAudio Parakeet EOU 120M streaming model, 160 ms chunks, lazily downloaded ~450 MB into the FluidAudio cache); when the recording stops, the normal seam → queue → batch pipeline still produces the authoritative `transcript.original.json` — the live text is display-only and never written to the vault. Live transcription is the **default in Zen mode** (no selector there) and an **opt-in toggle in the main window's recorder bar** (`liveTranscriptionEnabled`). It requires the Parakeet default model to be downloaded (otherwise a hint shows and recording proceeds without it), and any live-path failure degrades to a status note — it can never affect the recording itself.
+
 ## Requirements
 
 ### Engine abstraction (ENG-3, ENG-4)

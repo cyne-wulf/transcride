@@ -6,6 +6,7 @@ import SwiftUI
 struct RecorderBar: View {
     @Environment(AppModel.self) private var model
     @AppStorage(AppModel.PreferenceKey.preferredMicUID) private var preferredMicUID = ""
+    @AppStorage(LiveTranscriber.enabledKey) private var liveTranscription = false
 
     private var recorder: RecorderService { model.recorder }
 
@@ -48,7 +49,20 @@ struct RecorderBar: View {
         recordButton
         micPicker
         Spacer()
+        liveToggle
         zenButton
+    }
+
+    /// M3 addendum: opt-in live transcription for main-window recordings
+    /// (Zen mode is always live and ignores this).
+    private var liveToggle: some View {
+        Toggle("Live transcription", isOn: $liveTranscription)
+            .toggleStyle(.checkbox)
+            .foregroundStyle(.secondary)
+            .onChange(of: liveTranscription) {
+                if liveTranscription { model.updateLiveTranscription() }
+            }
+            .help("Show words as you speak while recording (Parakeet, on-device)")
     }
 
     private var recordButton: some View {

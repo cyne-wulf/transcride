@@ -21,7 +21,7 @@ Complete v1. This milestone delivers the app's signature move — **delete the a
 
 **In:** delete-audio-keep-note, audio in Recently Deleted, trim, speaker diarization + renaming, favorites/duplicate/sort, search filters, vocabulary re-apply, export entry to folder, share audio, storage overview, settings completion, keyboard shortcuts pass.
 
-**Out (declared done-for-v1 without them):** replace re-record (AUD-4), Enhance Recording (AUD-5), tags, diff view, bulk export, global hotkey, cloud engines, live transcription, sync.
+**Out (declared done-for-v1 without them):** replace re-record (AUD-4), Enhance Recording (AUD-5), tags, diff view, bulk export, global hotkey, cloud engines, sync. (Live transcription was originally out for v1 but shipped early as an M3 addendum — see PRD-3.)
 
 ## Requirements
 
