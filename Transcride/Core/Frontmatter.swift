@@ -165,6 +165,15 @@ extension FrontmatterDocument {
         set { setValue(newValue, for: "engine") }
     }
 
+    /// An explicit fork marker for the editable layer. Absence is distinct
+    /// from false: entries do not show an Original/Edited badge until the
+    /// first real edit. Clearing the fork removes the key rather than writing
+    /// `false`, preserving that distinction.
+    var handEdited: Bool {
+        get { Self.bool(value(for: "hand_edited")) }
+        set { setValue(newValue ? "true" : nil, for: "hand_edited") }
+    }
+
     private static func bool(_ value: String?) -> Bool {
         guard let value else { return false }
         return ["true", "yes", "1", "on"].contains(value.lowercased())

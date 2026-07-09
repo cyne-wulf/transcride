@@ -57,8 +57,7 @@ struct TranscriptionApplier: Sendable {
             doc.created = EntryFolderName(parsing: relPath.lastComponent)?.date
         }
 
-        let regenerable = TranscriptMarkdown.isStubBody(doc.body)
-            || previousOriginal.map { TranscriptMarkdown.isGeneratedBody(doc.body, from: $0) } == true
+        let regenerable = !TranscriptEditDocument.isForked(doc, comparedTo: previousOriginal)
         var markdownLeftAlone = false
         if regenerable {
             doc.body = "\n" + TranscriptMarkdown.body(from: transcript) + "\n"

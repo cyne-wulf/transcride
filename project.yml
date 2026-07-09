@@ -28,6 +28,7 @@ targets:
     dependencies:
       - package: FluidAudio
       - package: WhisperKit
+      - sdk: libsqlite3.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcride
@@ -44,6 +45,8 @@ targets:
     sources:
       - TranscrideTests
       - Transcride/Core
+    dependencies:
+      - sdk: libsqlite3.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcrideTests

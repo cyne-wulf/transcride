@@ -201,6 +201,40 @@ struct TranscriptionApplierTests {
         #expect(current.allWords.map(\.text) == ["Second", "engine", "pass"])
     }
 
+    @Test func explicitHandEditedFlagPreventsRegenerationEvenWhenBodyStillMatches() throws {
+        let vault = try makeVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let relPath = try makeEntry(in: vault, title: "Budget Sync")
+        let applier = TranscriptionApplier(vaultRoot: vault)
+
+        _ = try applier.apply(
+            segments: [segment(["First", "engine", "pass"])],
+            toEntryAt: relPath,
+            engine: engineMeta(),
+            engineFrontmatterID: "parakeet-tdt-v3",
+            vocabularyTerms: [],
+            date: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let entryURL = vault.appendingRelativePath(relPath)
+        let transcriptURL = try #require(TranscriptFile.url(inEntry: entryURL))
+        var doc = FrontmatterDocument.parse(try String(contentsOf: transcriptURL, encoding: .utf8))
+        doc.handEdited = true
+        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+        let flaggedText = try String(contentsOf: transcriptURL, encoding: .utf8)
+
+        let outcome = try applier.apply(
+            segments: [segment(["Second", "engine", "pass"])],
+            toEntryAt: relPath,
+            engine: engineMeta(),
+            engineFrontmatterID: "whisperkit-small",
+            vocabularyTerms: [],
+            date: Date(timeIntervalSince1970: 1_800_000_100)
+        )
+
+        #expect(outcome.markdownLeftAlone)
+        #expect(try String(contentsOf: transcriptURL, encoding: .utf8) == flaggedText)
+    }
+
     @Test func vocabularyBackstopRunsBeforeWriting() throws {
         let vault = try makeVault()
         defer { try? FileManager.default.removeItem(at: vault) }

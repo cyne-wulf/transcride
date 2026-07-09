@@ -111,4 +111,18 @@ struct FrontmatterTests {
         #expect(doc.title == "It's fine")
         #expect(doc.source == "recorded")
     }
+
+    @Test func handEditedFlagIsAbsentUntilSetAndRemovedWhenCleared() {
+        var doc = FrontmatterDocument.parse(sample)
+        #expect(!doc.handEdited)
+        #expect(doc.rawValue(for: "hand_edited") == nil)
+
+        doc.handEdited = true
+        #expect(doc.handEdited)
+        #expect(doc.serialized().contains("hand_edited: true"))
+
+        doc.handEdited = false
+        #expect(!doc.handEdited)
+        #expect(doc.rawValue(for: "hand_edited") == nil)
+    }
 }
