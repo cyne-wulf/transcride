@@ -28,6 +28,43 @@ struct WaveformTests {
         #expect(chunked.peaks == whole.peaks)
     }
 
+    @Test func displayColumnsKeepContrastOnHourLongAudio() {
+        // 1 hour at 20 peaks/s of speech-like audio: 30 s talk spans (peaks
+        // near 0.9) alternating with 30 s quiet spans (0.1). Max-aggregation
+        // renders this as a solid block — every ~270-peak column contains a
+        // loud window — which is the long-file regression this guards.
+        var peaks: [Float] = []
+        for second in 0..<3600 {
+            let loud = (second / 30) % 2 == 0
+            peaks.append(contentsOf: [Float](repeating: loud ? 0.9 : 0.1, count: 20))
+        }
+        let values = WaveformDisplay.columnValues(peaks: peaks, columns: 260)
+        #expect(values.count == 260)
+        #expect(values.max()! > 0.99)
+        #expect(values.min()! < 0.3)
+        #expect(values.filter { $0 > 0.95 }.count < values.count / 2)
+    }
+
+    @Test func displayColumnsNormalizeQuietAudioWithFloor() {
+        let values = WaveformDisplay.columnValues(
+            peaks: [Float](repeating: 0.1, count: 100), columns: 10
+        )
+        // Mean 0.1 against the 0.25 noise floor → 0.4 everywhere.
+        #expect(values.count == 10)
+        #expect(values.allSatisfy { abs($0 - 0.4) < 0.001 })
+    }
+
+    @Test func displayColumnsHandleFewerPeaksThanColumns() {
+        let values = WaveformDisplay.columnValues(peaks: [0.5, 1.0], columns: 8)
+        #expect(values.count == 8)
+        #expect(values.allSatisfy { $0 > 0 && $0 <= 1 })
+    }
+
+    @Test func displayColumnsHandleDegenerateInput() {
+        #expect(WaveformDisplay.columnValues(peaks: [], columns: 10).isEmpty)
+        #expect(WaveformDisplay.columnValues(peaks: [0.5], columns: 0).isEmpty)
+    }
+
     @Test func generatorMatchesKnownWAV() async throws {
         let url = try TestAudio.makeWAV(seconds: 2.0, amplitude: 0.5)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

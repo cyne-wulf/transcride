@@ -1,16 +1,21 @@
 import SwiftUI
 
 /// Toolbar button + popover for the transcription queue (TRN-3). The button
-/// only appears while the queue has items; each row shows the entry, model,
-/// and state, with retry on failures and remove on anything not running.
+/// only appears while the queue has items and reads as background activity —
+/// a filling progress ring around the item count — so it can't be mistaken
+/// for the entry-level Retranscribe action (which keeps the circular-arrows
+/// symbol). Each popover row shows the entry, model, and state, with retry on
+/// failures and remove on anything not running.
 struct TranscriptionQueueButton: View {
     @Environment(AppModel.self) private var model
     let queue: TranscriptionQueue
 
     @State private var showingQueue = false
 
-    private var hasRunning: Bool {
-        queue.items.contains { $0.state == .running }
+    /// The running item's progress; nil while everything is still waiting.
+    private var runningFraction: Double? {
+        guard let running = queue.items.first(where: { $0.state == .running }) else { return nil }
+        return queue.progressByItemID[running.id] ?? 0
     }
 
     private var hasFailure: Bool {
@@ -21,18 +26,45 @@ struct TranscriptionQueueButton: View {
         Button {
             showingQueue.toggle()
         } label: {
-            Label(
-                "Transcription Queue",
-                systemImage: hasFailure ? "exclamationmark.arrow.triangle.2.circlepath"
-                    : "arrow.triangle.2.circlepath"
-            )
-            .symbolEffect(.pulse, isActive: hasRunning)
-            .foregroundStyle(hasFailure ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+            if hasFailure {
+                Label("Transcription Queue", systemImage: "exclamationmark.circle.fill")
+                    .foregroundStyle(.red)
+            } else {
+                QueueProgressRing(fraction: runningFraction, count: queue.items.count)
+            }
         }
+        .accessibilityLabel("Transcription queue")
         .help("Transcription queue")
         .popover(isPresented: $showingQueue, arrowEdge: .bottom) {
             TranscriptionQueuePopover(queue: queue)
         }
+    }
+}
+
+/// Xcode/Safari-style toolbar activity ring: the accent arc fills with the
+/// running item's progress (a sliver while waiting, so it always reads as
+/// pending work) around the number of queued items.
+private struct QueueProgressRing: View {
+    /// Running item's 0…1 progress; nil when no item is running yet.
+    var fraction: Double?
+    var count: Int
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(.tertiary, lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: max(0.04, fraction ?? 0.04))
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.25), value: fraction)
+            Text("\(count)")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .frame(width: 16, height: 16)
+        .padding(2)
     }
 }
 

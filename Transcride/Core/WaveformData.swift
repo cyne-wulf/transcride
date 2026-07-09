@@ -52,6 +52,29 @@ struct WaveformData: Codable, Equatable, Sendable {
     }
 }
 
+/// Downsampling for display: one value (0…1 of the view height) per drawn
+/// bar. Each column averages its slice of peaks — aggregating with max
+/// saturates on long files, where a single column spans hundreds of windows
+/// of normal speech and virtually every column's max is ~1.0, rendering a
+/// solid full-height block. Values are then normalized so the loudest column
+/// fills the height; the 0.25 floor avoids amplifying pure noise to full
+/// scale.
+enum WaveformDisplay {
+    static func columnValues(peaks: [Float], columns: Int) -> [Float] {
+        guard columns > 0, !peaks.isEmpty else { return [] }
+        var values = [Float](repeating: 0, count: columns)
+        for column in 0..<columns {
+            let start = column * peaks.count / columns
+            let end = min(max(start + 1, (column + 1) * peaks.count / columns), peaks.count)
+            var sum: Float = 0
+            for index in start..<end { sum += peaks[index] }
+            values[column] = sum / Float(end - start)
+        }
+        let scale = 1 / max(0.25, values.max() ?? 1)
+        return values.map { min(1, $0 * scale) }
+    }
+}
+
 /// Streaming peak accumulator: feed mono samples in any chunk sizes, get one
 /// peak (max absolute value, clamped 0…1) per `samplesPerPeak` window. Used
 /// both by the live recorder tap and the offline file generator so the two

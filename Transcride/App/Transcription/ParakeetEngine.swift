@@ -66,8 +66,12 @@ actor ParakeetEngine: TranscriptionEngine {
         let manager = try await loadedManager()
 
         // Forward FluidAudio's chunk progress while the transcription runs.
+        // Take the stream before starting: the emitter tears its session down
+        // when a transcription finishes, so subscribing from inside the Task
+        // can attach to a dead session and never see an event.
+        let progressStream = await manager.transcriptionProgressStream
         let progressTask = Task {
-            for try await fraction in await manager.transcriptionProgressStream {
+            for try await fraction in progressStream {
                 progress(fraction)
             }
         }

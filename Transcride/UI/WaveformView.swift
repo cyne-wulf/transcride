@@ -46,26 +46,19 @@ struct WaveformView: View {
     static let barWidth: CGFloat = 2
     static let barGap: CGFloat = 1
 
-    /// One bar per (barWidth+barGap) column; bar height = max peak in the
-    /// column's slice of the file, normalized so the loudest bar fills the
-    /// height (quiet recordings stay visible, floor 0.25 avoids amplifying
-    /// pure noise to full scale).
+    /// One bar per (barWidth+barGap) column; bar heights come from
+    /// `WaveformDisplay.columnValues` (mean per column, loudest column fills
+    /// the height — see there for why max-aggregation is wrong).
     static func drawBars(peaks: [Float], context: inout GraphicsContext, size: CGSize, color: Color) {
         guard !peaks.isEmpty, size.width > 0, size.height > 0 else { return }
         let step = barWidth + barGap
         let columns = max(1, Int(size.width / step))
-        let scale = 1.0 / CGFloat(max(0.25, peaks.max() ?? 1))
+        let values = WaveformDisplay.columnValues(peaks: peaks, columns: columns)
         let midY = size.height / 2
 
         var path = Path()
         for column in 0..<columns {
-            let start = column * peaks.count / columns
-            let end = max(start + 1, (column + 1) * peaks.count / columns)
-            var columnPeak: Float = 0
-            for index in start..<min(end, peaks.count) where peaks[index] > columnPeak {
-                columnPeak = peaks[index]
-            }
-            let barHeight = max(2, CGFloat(columnPeak) * scale * size.height)
+            let barHeight = max(2, CGFloat(values[column]) * size.height)
             path.addRoundedRect(
                 in: CGRect(
                     x: CGFloat(column) * step,

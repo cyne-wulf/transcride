@@ -57,6 +57,11 @@ struct EntryDetailView: View {
                         .padding(.vertical, 8)
                 }
 
+                if let queue = model.transcriptionQueue,
+                   let queueItem = queue.items.first(where: { $0.entryRelativePath == entry.relativePath }) {
+                    transcriptionStatus(queueItem, queue: queue)
+                }
+
                 if let document, !document.body.isEmpty {
                     Text(document.body)
                         .font(.body)
@@ -114,6 +119,32 @@ struct EntryDetailView: View {
         .sheet(isPresented: $showingRetranscribe) {
             RetranscribeSheet(entry: entry)
         }
+    }
+
+    /// Inline transcription state for the open entry (TRN-3): the queue
+    /// popover is easy to miss, so the entry itself says it's being worked on.
+    @ViewBuilder
+    private func transcriptionStatus(_ item: TranscriptionQueueItem, queue: TranscriptionQueue) -> some View {
+        HStack(spacing: 8) {
+            switch item.state {
+            case .waiting:
+                ProgressView().controlSize(.small)
+                Text("Waiting to transcribe…")
+            case .running:
+                ProgressView(value: queue.progressByItemID[item.id] ?? 0)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 240)
+                Text("Transcribing…")
+            case .failed:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow)
+                Text(item.errorMessage ?? "Transcription failed.")
+                Button("Retry") { queue.retry(itemID: item.id) }
+                    .controlSize(.small)
+            }
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
     }
 
     // MARK: - Info popover

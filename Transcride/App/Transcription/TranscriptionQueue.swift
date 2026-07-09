@@ -162,7 +162,7 @@ final class TranscriptionQueue {
             vocabularyTerms: vocabulary
         )
         DebugLog.append(
-            "transcribed [\(item.entryRelativePath)] with \(info.id): "
+            "transcribed [\(item.entryRelativePath)] with \(info.id) (\(item.source)): "
                 + "\(segments.count) segments, \(outcome.correctionCount) corrections"
                 + (outcome.appliedTitle.map { ", titled \"\($0)\"" } ?? "")
                 + (outcome.markdownLeftAlone ? ", md left alone (hand-edited)" : "")
