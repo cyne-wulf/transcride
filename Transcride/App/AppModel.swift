@@ -222,6 +222,16 @@ final class AppModel {
     }
 
     func deleteItem(atRelativePath relPath: RelativePath) async {
+        // Standard list semantics: deleting the selected entry selects the
+        // one that takes its place (the next below, else the new last).
+        // Computed from the displayed order before the row disappears.
+        var successorID: String?
+        if selectedEntryID == relPath, let entries = selectedFolder?.entries,
+           let index = entries.firstIndex(where: { $0.id == relPath }) {
+            successorID = index + 1 < entries.count
+                ? entries[index + 1].id
+                : (index > 0 ? entries[index - 1].id : nil)
+        }
         await perform("deleteItem [\(relPath)]") { service in
             try await service.trashItem(atRelativePath: relPath)
             await MainActor.run {
@@ -230,6 +240,13 @@ final class AppModel {
                     self.sidebarSelection = .folder(relPath.parentRelativePath)
                 }
             }
+        }
+        // Only after the refresh confirmed the delete (entry gone, successor
+        // still present) — a failed trash keeps the original selection.
+        if let successorID, selectedEntryID == nil,
+           snapshot?.entry(withID: relPath) == nil,
+           snapshot?.entry(withID: successorID) != nil {
+            selectedEntryID = successorID
         }
     }
 
