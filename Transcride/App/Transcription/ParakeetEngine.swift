@@ -24,10 +24,10 @@ actor ParakeetEngine: TranscriptionEngine {
         AsrModels.modelsExist(at: cacheDirectory, version: .v3)
     }
 
-    func downloadModel(progress: @escaping @Sendable (Double) -> Void) async throws {
+    func downloadModel(progress: @escaping @Sendable (ModelDownloadProgress) -> Void) async throws {
         do {
             _ = try await AsrModels.download(version: .v3) { snapshot in
-                progress(snapshot.fractionCompleted)
+                progress(.downloading(snapshot.fractionCompleted))
             }
         } catch {
             throw TranscriptionError.engineFailure(error.localizedDescription)

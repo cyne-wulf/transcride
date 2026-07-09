@@ -110,9 +110,20 @@ private struct TranscriptionQueuePopover: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 case .running:
-                    ProgressView(value: queue.progressByItemID[item.id] ?? 0)
-                        .progressViewStyle(.linear)
-                        .controlSize(.small)
+                    // No engine progress yet means the model is still loading
+                    // (first load compiles for the Neural Engine — minutes).
+                    if (queue.progressByItemID[item.id] ?? 0) <= 0.001 {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text("Preparing model…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        ProgressView(value: queue.progressByItemID[item.id] ?? 0)
+                            .progressViewStyle(.linear)
+                            .controlSize(.small)
+                    }
                 case .failed:
                     Text(item.errorMessage ?? "Transcription failed.")
                         .font(.caption)

@@ -49,14 +49,14 @@ actor WhisperKitEngine: TranscriptionEngine {
         }
     }
 
-    func downloadModel(progress: @escaping @Sendable (Double) -> Void) async throws {
+    func downloadModel(progress: @escaping @Sendable (ModelDownloadProgress) -> Void) async throws {
         try? FileManager.default.removeItem(at: completionMarker)
         do {
             let folder = try await WhisperKit.download(
                 variant: variant,
                 downloadBase: Self.downloadBase,
                 progressCallback: { snapshot in
-                    progress(snapshot.fractionCompleted)
+                    progress(.downloading(snapshot.fractionCompleted))
                 }
             )
             // Completeness check before the marker makes it "downloaded".
@@ -69,6 +69,15 @@ actor WhisperKitEngine: TranscriptionEngine {
                     "Download incomplete; missing \(missing.joined(separator: ", "))"
                 )
             }
+            try Task.checkCancellation()
+            // Load once before writing the marker: the first load pays a
+            // minutes-long CoreML specialization and fetches the tokenizer,
+            // so that cost lands here — where the UI already says the model
+            // is being fetched — not on the first transcription. It also
+            // makes "downloaded" mean "runnable".
+            progress(.preparing)
+            pipe = try await Self.makePipe(variant: variant, modelFolder: modelFolder)
+            try Task.checkCancellation()
             try Data().write(to: folder.appending(path: ".transcride-download-complete"))
         } catch let error as TranscriptionError {
             throw error
@@ -152,18 +161,22 @@ actor WhisperKitEngine: TranscriptionEngine {
     private func loadedPipe() async throws -> WhisperKit {
         if let pipe { return pipe }
         do {
-            let config = WhisperKitConfig(model: variant)
-            config.modelFolder = modelFolder.path
-            config.verbose = false
-            config.logLevel = .error
-            config.load = true
-            config.download = false
-            let pipe = try await WhisperKit(config)
+            let pipe = try await Self.makePipe(variant: variant, modelFolder: modelFolder)
             self.pipe = pipe
             return pipe
         } catch {
             throw TranscriptionError.modelLoadFailed(error.localizedDescription)
         }
+    }
+
+    private static func makePipe(variant: String, modelFolder: URL) async throws -> WhisperKit {
+        let config = WhisperKitConfig(model: variant)
+        config.modelFolder = modelFolder.path
+        config.verbose = false
+        config.logLevel = .error
+        config.load = true
+        config.download = false
+        return try await WhisperKit(config)
     }
 
     /// Maps WhisperKit segments/word timings onto the transcript schema.

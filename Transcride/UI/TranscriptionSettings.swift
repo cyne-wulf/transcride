@@ -78,6 +78,12 @@ private struct ModelRow: View {
                 }
                 .buttonStyle(.plain)
                 .help("Cancel download")
+            case .preparing:
+                ProgressView()
+                    .controlSize(.small)
+                Text("Preparing model… (first-time setup, can take a few minutes)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .downloaded(let byteSize):
                 if let byteSize {
                     Text(ByteCountFormatter.string(fromByteCount: byteSize, countStyle: .file))

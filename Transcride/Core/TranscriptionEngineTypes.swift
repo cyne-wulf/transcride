@@ -17,6 +17,14 @@ struct TranscriptionOptions: Sendable, Equatable {
     }
 }
 
+/// One step of a model download as reported to the UI (ENG-2). `preparing`
+/// covers work after the bytes land — first-load CoreML compilation and
+/// tokenizer fetch — which can take minutes with no measurable fraction.
+enum ModelDownloadProgress: Sendable, Equatable {
+    case downloading(Double)
+    case preparing
+}
+
 /// Static description of one model-picker entry: a concrete model on a
 /// concrete engine, with the capability flags ENG-3 requires.
 struct TranscriptionModelInfo: Sendable, Equatable, Identifiable {

@@ -17,8 +17,8 @@ actor AppleSpeechEngine: TranscriptionEngine {
 
     func isDownloaded() -> Bool { true }
 
-    func downloadModel(progress: @escaping @Sendable (Double) -> Void) async throws {
-        progress(1.0)
+    func downloadModel(progress: @escaping @Sendable (ModelDownloadProgress) -> Void) async throws {
+        progress(.downloading(1.0))
     }
 
     func deleteModel() throws {

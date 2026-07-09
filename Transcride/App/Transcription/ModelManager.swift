@@ -11,6 +11,10 @@ final class ModelManager {
         case checking
         case notDownloaded
         case downloading(Double)
+        /// Bytes are on disk; the engine is doing first-load work (CoreML
+        /// compilation, tokenizer fetch) that can run minutes with no
+        /// measurable fraction.
+        case preparing
         case downloaded(byteSize: Int64?)
         case failed(String)
 
@@ -20,8 +24,10 @@ final class ModelManager {
         }
 
         var isDownloading: Bool {
-            if case .downloading = self { return true }
-            return false
+            switch self {
+            case .downloading, .preparing: return true
+            default: return false
+            }
         }
     }
 
@@ -66,10 +72,13 @@ final class ModelManager {
                 return
             }
             do {
-                try await engine.downloadModel { [weak self] fraction in
+                try await engine.downloadModel { [weak self] step in
                     Task { @MainActor [weak self] in
                         guard let self, self.state(forModelInfoID: id).isDownloading else { return }
-                        self.states[id] = .downloading(fraction)
+                        switch step {
+                        case .downloading(let fraction): self.states[id] = .downloading(fraction)
+                        case .preparing: self.states[id] = .preparing
+                        }
                     }
                 }
                 self?.states[id] = .checking

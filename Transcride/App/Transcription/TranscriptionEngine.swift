@@ -7,7 +7,7 @@ protocol TranscriptionEngine: Sendable {
     var info: TranscriptionModelInfo { get }
 
     func isDownloaded() async -> Bool
-    func downloadModel(progress: @escaping @Sendable (Double) -> Void) async throws
+    func downloadModel(progress: @escaping @Sendable (ModelDownloadProgress) -> Void) async throws
     func deleteModel() async throws
     /// Bytes the downloaded model occupies on disk, nil when not downloaded.
     func downloadedByteSize() async -> Int64?

@@ -131,10 +131,17 @@ struct EntryDetailView: View {
                 ProgressView().controlSize(.small)
                 Text("Waiting to transcribe…")
             case .running:
-                ProgressView(value: queue.progressByItemID[item.id] ?? 0)
-                    .progressViewStyle(.linear)
-                    .frame(maxWidth: 240)
-                Text("Transcribing…")
+                // No engine progress yet means the model is still loading
+                // (first load compiles for the Neural Engine — minutes).
+                if (queue.progressByItemID[item.id] ?? 0) <= 0.001 {
+                    ProgressView().controlSize(.small)
+                    Text("Preparing model…")
+                } else {
+                    ProgressView(value: queue.progressByItemID[item.id] ?? 0)
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: 240)
+                    Text("Transcribing…")
+                }
             case .failed:
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
