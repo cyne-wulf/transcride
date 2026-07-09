@@ -146,18 +146,30 @@ private struct PlaybackSection: View {
 
     @State private var waveform: WaveformData?
     @State private var waveformError: String?
+    @State private var sectionWidth: CGFloat = 420
 
     private var player: PlayerService { model.player }
 
+    /// Transport controls grow with the window (1× at 420pt up to 1.5×) so
+    /// they stay comfortable to click in a large window.
+    private var controlScale: CGFloat {
+        min(max(sectionWidth / 420, 1.0), 1.5)
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 10 * controlScale) {
             waveformArea
-                .frame(height: 72)
+                .frame(height: 72 * controlScale)
                 .frame(maxWidth: .infinity)
             transport
         }
         .padding(12)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            sectionWidth = width
+        }
         .task(id: "\(entry.relativePath)|\(entry.audioFileName ?? "")") {
             if let url = model.audioURL(for: entry) {
                 player.load(url: url, knownDuration: entry.duration)
@@ -198,54 +210,48 @@ private struct PlaybackSection: View {
     }
 
     private var transport: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 14 * controlScale) {
             Text(EntryListView.formatDuration(player.currentTime))
-                .font(.caption.monospacedDigit())
+                .font(.system(size: 11 * controlScale).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 44, alignment: .leading)
+                .frame(minWidth: 44 * controlScale, alignment: .leading)
 
             Spacer()
 
-            Button {
+            TransportButton(
+                systemImage: "gobackward.15", size: 17 * controlScale, help: "Back 15 seconds"
+            ) {
                 player.skip(-15)
-            } label: {
-                Image(systemName: "gobackward.15")
-                    .font(.system(size: 17))
             }
-            .buttonStyle(.plain)
-            .help("Back 15 seconds")
 
-            Button {
+            TransportButton(
+                systemImage: player.isPlaying ? "pause.circle.fill" : "play.circle.fill",
+                size: 34 * controlScale,
+                help: player.isPlaying ? "Pause (Space)" : "Play (Space)",
+                isProminent: true
+            ) {
                 player.togglePlayPause()
-            } label: {
-                Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 34))
             }
-            .buttonStyle(.plain)
-            .help(player.isPlaying ? "Pause (Space)" : "Play (Space)")
 
-            Button {
+            TransportButton(
+                systemImage: "goforward.15", size: 17 * controlScale, help: "Forward 15 seconds"
+            ) {
                 player.skip(15)
-            } label: {
-                Image(systemName: "goforward.15")
-                    .font(.system(size: 17))
             }
-            .buttonStyle(.plain)
-            .help("Forward 15 seconds")
 
             Spacer()
 
             speedMenu
 
             Text(EntryListView.formatDuration(player.duration))
-                .font(.caption.monospacedDigit())
+                .font(.system(size: 11 * controlScale).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 44, alignment: .trailing)
+                .frame(minWidth: 44 * controlScale, alignment: .trailing)
         }
     }
 
     private var speedMenu: some View {
-        Menu {
+        SpeedChip(scale: controlScale) {
             Picker("Playback Speed", selection: Binding(
                 get: { player.speed },
                 set: { player.speed = $0 }
@@ -258,16 +264,82 @@ private struct PlaybackSection: View {
             .labelsHidden()
         } label: {
             Text(Self.speedLabel(player.speed))
-                .font(.caption.monospacedDigit())
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Playback speed (pitch preserved)")
     }
 
     static func speedLabel(_ speed: Float) -> String {
         // Float description is the shortest exact form: "0.75", "1.5", "2.0".
         let text = speed == speed.rounded() ? String(format: "%.0f", speed) : "\(speed)"
         return text + "×"
+    }
+}
+
+/// Transport icon button: clickable area extends well past the glyph, with a
+/// soft circular highlight on hover so the target reads as a button.
+private struct TransportButton: View {
+    let systemImage: String
+    let size: CGFloat
+    let help: String
+    var isProminent = false
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: size))
+                .foregroundStyle(isProminent ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: size + 16, height: size + 14)
+                .background(
+                    Circle()
+                        .fill(.primary.opacity(hovering ? 0.08 : 0))
+                        .frame(width: size + 14, height: size + 14)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help(help)
+    }
+}
+
+/// Bordered capsule chip for the speed menu: looks like a button, so the
+/// clickable area is obvious.
+private struct SpeedChip<Content: View, Label: View>: View {
+    let scale: CGFloat
+    @ViewBuilder let content: Content
+    @ViewBuilder let label: Label
+
+    @State private var hovering = false
+
+    var body: some View {
+        Menu {
+            content
+        } label: {
+            HStack(spacing: 6 * scale) {
+                label
+                    .font(.system(size: 13 * scale, weight: .medium).monospacedDigit())
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9 * scale, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16 * scale)
+            .frame(minWidth: 64 * scale)
+            .frame(height: 32 * scale)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .background(
+            Capsule()
+                .fill(.background.opacity(hovering ? 0.9 : 0.6))
+                .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
+        )
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help("Playback speed (pitch preserved)")
     }
 }

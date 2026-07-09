@@ -218,7 +218,7 @@ final class AppModel {
         }
     }
 
-    // MARK: - Keyboard (Space / Shift+Space)
+    // MARK: - Keyboard (Space / Shift+Space / Shift+Delete)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -237,14 +237,26 @@ final class AppModel {
     }
 
     private let spaceKeyCode: UInt16 = 49
+    private let deleteKeyCode: UInt16 = 51
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
-        guard keyCode == spaceKeyCode, phase == .ready else { return false }
+        guard phase == .ready else { return false }
         let modifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
         // Field editors (TextField, search) and TextEditor are all NSTextView.
         let focusedTextView = NSApp.keyWindow?.firstResponder as? NSTextView
 
+        if keyCode == deleteKeyCode {
+            // Shift+Delete: straight to Recently Deleted, no confirmation —
+            // it's restorable for 30 days, so there's nothing to warn about.
+            guard modifiers == .shift, focusedTextView == nil,
+                  let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath
+            else { return false }
+            Task { await deleteItem(atRelativePath: entry.relativePath) }
+            return true
+        }
+
+        guard keyCode == spaceKeyCode else { return false }
         if modifiers == .shift {
             if let focusedTextView {
                 // Typing wins: Shift+Space while writing inserts a space

@@ -9,8 +9,6 @@ struct EntryListView: View {
     @State private var showRenamePrompt = false
     @State private var renamingEntry: Entry?
     @State private var renameDraft = ""
-    @State private var showDeletePrompt = false
-    @State private var deletingEntry: Entry?
 
     private var folder: FolderNode? { model.selectedFolder }
 
@@ -49,20 +47,6 @@ struct EntryListView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The title is saved into the entry’s frontmatter and appended to its folder name as a slug.")
-        }
-        .confirmationDialog(
-            "Move “\(deletingEntry?.displayTitle ?? "")” to Recently Deleted?",
-            isPresented: $showDeletePrompt,
-            titleVisibility: .visible
-        ) {
-            Button("Move to Recently Deleted", role: .destructive) {
-                if let entry = deletingEntry {
-                    Task { await model.deleteItem(atRelativePath: entry.relativePath) }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("It can be restored from Recently Deleted for 30 days.")
         }
     }
 
@@ -120,9 +104,10 @@ struct EntryListView: View {
             moveToMenu(entry)
             Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
             Divider()
+            // No confirmation: trashing is restorable for 30 days from
+            // Recently Deleted, so it doesn't warrant a safety dialog.
             Button("Delete", role: .destructive) {
-                deletingEntry = entry
-                showDeletePrompt = true
+                Task { await model.deleteItem(atRelativePath: entry.relativePath) }
             }
         }
     }
