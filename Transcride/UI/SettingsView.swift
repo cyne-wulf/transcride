@@ -24,6 +24,8 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            TranscriptionModelsSection()
+            VocabularySection()
             Section("Vault") {
                 LabeledContent("Location") {
                     Text(model.vaultURL?.path ?? "No vault selected")

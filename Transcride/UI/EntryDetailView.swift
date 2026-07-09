@@ -8,6 +8,7 @@ struct EntryDetailView: View {
 
     @State private var document: FrontmatterDocument?
     @State private var showingInfo = false
+    @State private var showingRetranscribe = false
 
     var body: some View {
         Group {
@@ -26,9 +27,11 @@ struct EntryDetailView: View {
         }
     }
 
-    /// Reload when a different entry is selected or the file changes on disk.
+    /// Reload when a different entry is selected, the file changes on disk,
+    /// or a transcription lands (transcriptRevision — our own writes are
+    /// invisible to the FSEvents watcher).
     private func taskKey(for entry: Entry) -> String {
-        "\(entry.relativePath)|\(entry.title ?? "")|\(entry.snippet)"
+        "\(entry.relativePath)|\(entry.title ?? "")|\(entry.snippet)|\(model.transcriptRevision)"
     }
 
     @ViewBuilder
@@ -61,10 +64,10 @@ struct EntryDetailView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else if entry.hasTranscript {
-                    Text("This entry’s transcript has no text yet.")
+                    Text("This entry’s transcript has no text yet — check the transcription queue in the toolbar.")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("No transcript file in this entry yet — transcription arrives in a later milestone.")
+                    Text("No transcript file in this entry yet.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -78,6 +81,16 @@ struct EntryDetailView: View {
             }
         }
         .toolbar {
+            if entry.hasAudio {
+                ToolbarItem {
+                    Button {
+                        showingRetranscribe = true
+                    } label: {
+                        Label("Retranscribe", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .help("Retranscribe with a different model")
+                }
+            }
             ToolbarItem {
                 Button {
                     showingInfo.toggle()
@@ -97,6 +110,9 @@ struct EntryDetailView: View {
                 }
                 .help("Reveal in Finder")
             }
+        }
+        .sheet(isPresented: $showingRetranscribe) {
+            RetranscribeSheet(entry: entry)
         }
     }
 

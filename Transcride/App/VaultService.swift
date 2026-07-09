@@ -83,6 +83,45 @@ actor VaultService {
         try operations.moveItem(at: relPath, toFolder: destFolder)
     }
 
+    // MARK: - Transcription (M3)
+
+    /// Applies one finished transcription (correction backstop, archive,
+    /// `transcript.original.json`, `transcript.md`, auto-title) on this actor
+    /// so the writes serialize with every other vault mutation.
+    func applyTranscription(
+        segments: [TranscriptOriginal.Segment],
+        toEntryAt relPath: RelativePath,
+        engine: TranscriptOriginal.EngineMetadata,
+        engineFrontmatterID: String,
+        vocabularyTerms: [String]
+    ) throws -> TranscriptionApplier.Outcome {
+        try TranscriptionApplier(vaultRoot: rootURL).apply(
+            segments: segments,
+            toEntryAt: relPath,
+            engine: engine,
+            engineFrontmatterID: engineFrontmatterID,
+            vocabularyTerms: vocabularyTerms,
+            date: .now
+        )
+    }
+
+    /// The entry's audio file name (canonical `audio.*` preferred), nil when
+    /// the folder has no audio.
+    func audioFileName(atEntryPath relPath: RelativePath) -> String? {
+        let url = rootURL.appendingRelativePath(relPath)
+        let fileNames = ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
+        return VaultScanner.audioFile(in: fileNames)
+    }
+
+    func vocabularyTerms() -> [String] {
+        VocabularyFile.load(fromVault: rootURL)
+    }
+
+    func saveVocabularyTerms(_ terms: [String]) throws {
+        try VocabularyFile.save(terms, toVault: rootURL)
+    }
+
     // MARK: - Trash
 
     func trashItem(atRelativePath relPath: RelativePath) throws {

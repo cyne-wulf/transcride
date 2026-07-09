@@ -1,6 +1,6 @@
 import Foundation
 
-/// ⚠️ M3 SEAM — the transcription hand-off point.
+/// The transcription hand-off point.
 ///
 /// `audioEntryReady` is called exactly once for every entry whose audio just
 /// became final:
@@ -9,19 +9,20 @@ import Foundation
 ///
 /// At that moment the entry folder contains its audio file, `waveform.json`
 /// (recordings only — imports generate it lazily on first open), and a stub
-/// transcript with frontmatter (`title`, `created`, `duration`, `source`) and
-/// an empty body. Milestone 3 replaces this no-op with enqueueing the entry
-/// into the transcription queue; the stub's empty body is what transcription
-/// fills in.
+/// transcript with frontmatter and an empty body. The entry is enqueued into
+/// the current vault's transcription queue (TRN-1), which fills the stub in.
+@MainActor
 enum TranscriptionSeam {
     enum Source: String {
         case recorded
         case imported
     }
 
+    /// The active vault's queue; owned by `AppModel`, swapped on vault change.
+    static weak var queue: TranscriptionQueue?
+
     static func audioEntryReady(entryRelativePath: RelativePath, source: Source) {
-        DebugLog.append(
-            "TranscriptionSeam: \(source.rawValue) entry ready [\(entryRelativePath)] (no-op until M3)"
-        )
+        DebugLog.append("TranscriptionSeam: \(source.rawValue) entry ready [\(entryRelativePath)]")
+        queue?.enqueue(entryRelativePath: entryRelativePath, source: source.rawValue)
     }
 }

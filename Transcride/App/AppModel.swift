@@ -33,6 +33,12 @@ final class AppModel {
     let recorder = RecorderService()
     let player = PlayerService()
     let inputDevices = AudioInputDevices()
+    let modelManager = ModelManager()
+
+    private(set) var transcriptionQueue: TranscriptionQueue?
+    /// Bumped whenever a transcription lands so the detail view re-reads
+    /// `transcript.md` (the FSEvents watcher ignores our own writes).
+    private(set) var transcriptRevision = 0
 
     var sidebarSelection: SidebarSelection? = .folder("")
     var selectedEntryID: String? {
@@ -63,6 +69,7 @@ final class AppModel {
     func start() async {
         guard phase == .launching else { return }
         installKeyMonitor()
+        Task { await modelManager.refresh() }
         if let url = VaultBookmark.resolve() {
             await openVault(at: url, isSecurityScoped: true, saveBookmark: false)
         } else {
@@ -103,6 +110,14 @@ final class AppModel {
         sidebarSelection = .folder("")
         selectedEntryID = nil
         phase = .ready
+
+        transcriptionQueue?.shutdown()
+        let queue = TranscriptionQueue(vaultRoot: url, service: service)
+        queue.onEntryTranscribed = { [weak self] originalPath, outcome in
+            self?.entryTranscribed(originalPath: originalPath, outcome: outcome)
+        }
+        transcriptionQueue = queue
+        TranscriptionSeam.queue = queue
 
         watcher = FSEventsWatcher(url: url) { [weak self] in
             Task { @MainActor [weak self] in
@@ -339,6 +354,16 @@ final class AppModel {
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
     }
 
+    /// A transcription landed: refresh, follow an auto-title rename, and let
+    /// the detail view know its transcript changed on disk.
+    private func entryTranscribed(originalPath: RelativePath, outcome: TranscriptionApplier.Outcome) {
+        transcriptRevision += 1
+        if selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
+            selectedEntryID = outcome.entryRelativePath
+        }
+        Task { await refresh() }
+    }
+
     // MARK: - Intents (import)
 
     func importViaPanel() {
@@ -430,6 +455,23 @@ final class AppModel {
 
     func readTranscript(for entry: Entry) async -> FrontmatterDocument? {
         await service?.readTranscript(atEntryPath: entry.relativePath)
+    }
+
+    // MARK: - Vocabulary (VOC-1)
+
+    func vocabularyTerms() async -> [String] {
+        await service?.vocabularyTerms() ?? []
+    }
+
+    /// Persists the vocabulary immediately (called per edit — the file is a
+    /// handful of lines, so no debounce; skips the full `perform` refresh).
+    func saveVocabularyTerms(_ terms: [String]) async {
+        guard let service else { return }
+        do {
+            try await service.saveVocabularyTerms(terms)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func perform(_ label: String, _ work: (VaultService) async throws -> Void) async {

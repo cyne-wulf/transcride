@@ -2,6 +2,17 @@
 
 > **Before starting:** read `PRD-5-start-here.md` (written at the end of Milestone 4). Full product context: [master-prd-backup.md](master-prd-backup.md) §5.3 (TRN-6), §5.8, §5.10, §5.11, §5.12, §11. Do not start until the human confirms Milestone 4's checklist is verified.
 
+## Operating procedure — orchestrate to preserve context
+
+This milestone is large; implement it by delegating to subagents rather than doing all implementation in the main conversation, so the coordinating context never runs out mid-milestone.
+
+- The main conversation acts as **orchestrator**: it reads the PRDs/handoff, decides the work breakdown, launches subagents, reviews their reports, and talks to the human. It should not write most of the code itself.
+- Use **forked subagents that inherit the full conversation context** and run on the **same (top-tier) model as the orchestrator** — never delegate implementation to a smaller/cheaper model; quality is not to be sacrificed for context savings.
+- Give each subagent one bounded work package (e.g. "delete-audio-keep-note flow", "diarization engine + rendering") with: the exact files to read first, the decisions already made (verbatim), what to build, and the requirement to build/test before reporting back.
+- Run packages **sequentially** when they regenerate the Xcode project or build (xcodegen/xcodebuild must not run concurrently); parallelize only pure-code or pure-research packages that touch disjoint files.
+- Each subagent reports back a concise summary (files created/changed, decisions taken, test/build status, open risks); the orchestrator records milestone state in persistent memory after each package so compaction never loses progress.
+- Interactive checklist verification with the human is always done by the orchestrator, never a subagent.
+
 ## Goal
 
 Complete v1. This milestone delivers the app's signature move — **delete the audio, keep the knowledge** — plus speaker detection, audio trim, the remaining organization and export features, and final polish. Exit criterion is the master PRD's §11 success scenario running end-to-end.
