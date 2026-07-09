@@ -119,6 +119,52 @@ final class VaultSearchIndex: @unchecked Sendable {
         try removeEntryUnlocked(relativePath)
     }
 
+    /// Reconciles the index after a coalesced filesystem event. Existing
+    /// entries touched by the event are re-read; paths which vanished (or
+    /// moved) are removed. A folder rename therefore updates every entry
+    /// beneath the new path without rebuilding unaffected records.
+    func synchronize(changedAbsolutePaths: [String]) throws {
+        guard let vaultRoot else {
+            throw SearchIndexError.sqlite("synchronize requires a vault root")
+        }
+        lock.lock(); defer { lock.unlock() }
+
+        let currentPaths = Set(entryPaths(in: vaultRoot))
+        let indexedPaths = try indexedEntryPathsUnlocked()
+        let standardizedChanges = changedAbsolutePaths.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        }
+        let affectedPaths: Set<RelativePath>
+        if standardizedChanges.isEmpty {
+            affectedPaths = currentPaths
+        } else {
+            affectedPaths = Set(currentPaths.filter { relativePath in
+                let entryPath = vaultRoot.appendingRelativePath(relativePath)
+                    .standardizedFileURL.path
+                return standardizedChanges.contains { changedPath in
+                    changedPath == entryPath
+                        || changedPath.hasPrefix(entryPath + "/")
+                        || entryPath.hasPrefix(changedPath + "/")
+                }
+            })
+        }
+
+        try transaction {
+            for stalePath in indexedPaths.subtracting(currentPaths) {
+                try removeEntryUnlocked(stalePath)
+            }
+            for relativePath in affectedPaths {
+                try removeEntryUnlocked(relativePath)
+                for record in recordsForEntry(
+                    at: vaultRoot.appendingRelativePath(relativePath),
+                    relativePath: relativePath
+                ) {
+                    try upsertUnlocked(record)
+                }
+            }
+        }
+    }
+
     func rebuild() throws {
         lock.lock(); defer { lock.unlock() }
         try rebuildUnlocked()
@@ -309,15 +355,22 @@ final class VaultSearchIndex: @unchecked Sendable {
         var records: [SearchRecord] = []
         var title = EntryFolderName(parsing: relativePath.lastComponent)?.slug?
             .split(separator: "-").joined(separator: " ").capitalized ?? ""
+        let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
         if let markdownURL = TranscriptFile.url(inEntry: entryURL),
            let text = try? String(contentsOf: markdownURL, encoding: .utf8) {
             let document = FrontmatterDocument.parse(text)
             title = document.title ?? title
-            records.append(SearchRecord(
-                entryPath: relativePath, layer: .edited, title: title, content: document.body
-            ))
+            // Before the first edit, transcript.md is merely the generated
+            // projection of Original. Indexing it twice produces two visually
+            // identical results. A real fork (including an external edit
+            // without the explicit flag) gets its own higher-ranked record.
+            if original == nil || TranscriptEditDocument.isForked(document, comparedTo: original) {
+                records.append(SearchRecord(
+                    entryPath: relativePath, layer: .edited, title: title, content: document.body
+                ))
+            }
         }
-        if let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL)) {
+        if let original {
             records.append(SearchRecord(
                 entryPath: relativePath,
                 layer: .original,
@@ -326,6 +379,17 @@ final class VaultSearchIndex: @unchecked Sendable {
             ))
         }
         return records
+    }
+
+    private func indexedEntryPathsUnlocked() throws -> Set<RelativePath> {
+        let statement = try prepare("SELECT DISTINCT entry_path FROM search_records")
+        defer { sqlite3_finalize(statement) }
+        var paths: Set<RelativePath> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            paths.insert(columnText(statement, 0))
+        }
+        try checkStep(statement)
+        return paths
     }
 
     private func entryPaths(in root: URL) -> [RelativePath] {
@@ -424,9 +488,18 @@ final class VaultSearchIndex: @unchecked Sendable {
     private static func hit(for record: SearchRecord, match: Match) -> SearchHit {
         let source = record.content as NSString
         let matchLength = match.range.count
-        let start = max(0, match.range.lowerBound - 60)
-        let end = min(source.length, max(match.range.upperBound + 80, start + 160))
-        let snippetRange = NSRange(location: start, length: end - start)
+        let desiredStart = max(0, match.range.lowerBound - 60)
+        let desiredEnd = min(
+            source.length,
+            max(match.range.upperBound + 80, desiredStart + 160)
+        )
+        // UTF-16 offsets are the API contract, but snippet boundaries must
+        // not split an emoji or combining-character sequence.
+        let snippetRange = source.rangeOfComposedCharacterSequences(
+            for: NSRange(location: desiredStart, length: desiredEnd - desiredStart)
+        )
+        let start = snippetRange.location
+        let end = NSMaxRange(snippetRange)
         var snippet = source.substring(with: snippetRange)
         let prefix = start > 0 ? "…" : ""
         let suffix = end < source.length ? "…" : ""

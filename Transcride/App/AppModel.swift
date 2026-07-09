@@ -8,6 +8,18 @@ enum SidebarSelection: Hashable {
     case recentlyDeleted
 }
 
+enum SearchIndexState: Equatable {
+    case unavailable
+    case indexing
+    case ready
+    case failed(String)
+}
+
+struct TranscriptNavigationRequest: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    var hit: SearchHit
+}
+
 /// Main-actor view model for the whole app. All file I/O is delegated to the
 /// background `VaultService` actor; this type only holds published state.
 @MainActor
@@ -23,6 +35,7 @@ final class AppModel {
     enum PreferenceKey {
         static let recordingQuality = "recordingQuality"
         static let preferredMicUID = "preferredMicUID"
+        static let fuzzyVaultSearch = "fuzzyVaultSearch"
     }
 
     private(set) var phase: Phase = .launching
@@ -45,6 +58,21 @@ final class AppModel {
     /// debounced save may finish while newer keystrokes are still unsaved.
     private(set) var externalVaultRevision = 0
 
+    var isVaultSearchPresented = false
+    var vaultSearchQuery = ""
+    var fuzzyVaultSearch = UserDefaults.standard.bool(forKey: PreferenceKey.fuzzyVaultSearch) {
+        didSet {
+            UserDefaults.standard.set(fuzzyVaultSearch, forKey: PreferenceKey.fuzzyVaultSearch)
+            scheduleVaultSearch()
+        }
+    }
+    private(set) var searchIndexState: SearchIndexState = .unavailable
+    private(set) var vaultSearchResults: [SearchHit] = []
+    private(set) var vaultSearchIsRunning = false
+    private(set) var vaultSearchError: String?
+    private(set) var transcriptNavigationRequest: TranscriptNavigationRequest?
+    private(set) var inNoteFindRequestRevision = 0
+
     var sidebarSelection: SidebarSelection? = .folder("")
     var selectedEntryID: String? {
         didSet {
@@ -59,6 +87,8 @@ final class AppModel {
 
     private var service: VaultService?
     private var watcher: FSEventsWatcher?
+    private var searchIndexTask: Task<Void, Never>?
+    private var vaultSearchTask: Task<Void, Never>?
     /// URL currently holding security-scoped access (stopAccessing on switch).
     private var scopedURL: URL?
 
@@ -92,6 +122,8 @@ final class AppModel {
             _ = await recorder.stop() // finalize into the old vault first
         }
         player.unload()
+        searchIndexTask?.cancel()
+        vaultSearchTask?.cancel()
         watcher?.stop()
         watcher = nil
         if let scopedURL {
@@ -118,6 +150,10 @@ final class AppModel {
         trashItems = []
         sidebarSelection = .folder("")
         selectedEntryID = nil
+        searchIndexState = .indexing
+        vaultSearchResults = []
+        vaultSearchError = nil
+        transcriptNavigationRequest = nil
         phase = .ready
 
         transcriptionQueue?.shutdown()
@@ -128,16 +164,47 @@ final class AppModel {
         transcriptionQueue = queue
         TranscriptionSeam.queue = queue
 
-        watcher = FSEventsWatcher(url: url) { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.externalVaultRevision &+= 1
-                await self?.refresh()
+        watcher = FSEventsWatcher(url: url) { [weak self] paths in
+            Task {
+                await service.synchronizeSearchIndex(changedAbsolutePaths: paths)
+                await self?.handleExternalVaultChange(for: service)
             }
         }
-
         // 30-day purge on launch/open, then first scan.
         _ = try? await service.purgeTrash()
         await refresh()
+
+        // The vault is already usable. Index construction starts only after
+        // the opening scan and runs on the VaultService actor, so it cannot
+        // hold up initial navigation on the main actor.
+        searchIndexTask = Task { [weak self] in
+            do {
+                try await service.initializeSearchIndex()
+                guard !Task.isCancelled else { return }
+                self?.searchIndexDidFinish(for: service, error: nil)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.searchIndexDidFinish(for: service, error: error)
+            }
+        }
+    }
+
+    private func handleExternalVaultChange(for changedService: VaultService) async {
+        guard service === changedService else { return }
+        externalVaultRevision &+= 1
+        await refresh()
+        refreshVaultSearchIfVisible()
+    }
+
+    private func searchIndexDidFinish(for indexedService: VaultService, error: Error?) {
+        guard service === indexedService else { return }
+        if let error {
+            searchIndexState = .failed(error.localizedDescription)
+            vaultSearchError = error.localizedDescription
+        } else {
+            searchIndexState = .ready
+            scheduleVaultSearch(immediate: true)
+        }
     }
 
     func refresh() async {
@@ -263,7 +330,98 @@ final class AppModel {
         }
     }
 
-    // MARK: - Keyboard (Z / Space / Shift+Space / Shift+Delete)
+    // MARK: - Search and transcript navigation
+
+    func presentVaultSearch() {
+        guard phase == .ready else { return }
+        isVaultSearchPresented = true
+        scheduleVaultSearch(immediate: true)
+    }
+
+    func updateVaultSearchQuery(_ query: String) {
+        guard vaultSearchQuery != query else { return }
+        vaultSearchQuery = query
+        scheduleVaultSearch()
+    }
+
+    func retrySearchIndex() {
+        guard let service else { return }
+        searchIndexTask?.cancel()
+        searchIndexState = .indexing
+        vaultSearchError = nil
+        searchIndexTask = Task { [weak self] in
+            do {
+                try await service.initializeSearchIndex()
+                guard !Task.isCancelled else { return }
+                self?.searchIndexDidFinish(for: service, error: nil)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.searchIndexDidFinish(for: service, error: error)
+            }
+        }
+    }
+
+    func retryVaultSearch() {
+        scheduleVaultSearch(immediate: true)
+    }
+
+    func selectSearchHit(_ hit: SearchHit) {
+        player.pause()
+        sidebarSelection = .folder(hit.entryPath.parentRelativePath)
+        selectedEntryID = hit.entryPath
+        transcriptNavigationRequest = TranscriptNavigationRequest(hit: hit)
+        isVaultSearchPresented = false
+    }
+
+    func requestInNoteFind() {
+        guard selectedEntry != nil else { return }
+        inNoteFindRequestRevision &+= 1
+    }
+
+    private func scheduleVaultSearch(immediate: Bool = false) {
+        vaultSearchTask?.cancel()
+        vaultSearchError = nil
+        let query = vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            vaultSearchResults = []
+            vaultSearchIsRunning = false
+            return
+        }
+        guard searchIndexState == .ready, let service else {
+            vaultSearchIsRunning = false
+            return
+        }
+
+        let fuzzy = fuzzyVaultSearch
+        vaultSearchIsRunning = true
+        vaultSearchTask = Task { [weak self] in
+            if !immediate {
+                do { try await Task.sleep(for: .milliseconds(120)) }
+                catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            do {
+                let hits = try await service.search(query, fuzzy: fuzzy)
+                guard !Task.isCancelled, self?.service === service,
+                      self?.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query,
+                      self?.fuzzyVaultSearch == fuzzy else { return }
+                self?.vaultSearchResults = hits
+                self?.vaultSearchIsRunning = false
+            } catch {
+                guard !Task.isCancelled, self?.service === service else { return }
+                self?.vaultSearchResults = []
+                self?.vaultSearchIsRunning = false
+                self?.vaultSearchError = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshVaultSearchIfVisible() {
+        guard isVaultSearchPresented, !vaultSearchQuery.isEmpty else { return }
+        scheduleVaultSearch(immediate: true)
+    }
+
+    // MARK: - Keyboard (search / find / Z / Space / Shift+Space / Shift+Delete)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -284,6 +442,7 @@ final class AppModel {
     private let spaceKeyCode: UInt16 = 49
     private let deleteKeyCode: UInt16 = 51
     private let zenKeyCode: UInt16 = 6
+    private let findKeyCode: UInt16 = 3
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
@@ -294,6 +453,16 @@ final class AppModel {
         // A selectable read-only transcript should not suppress transport
         // shortcuts. Only an actual editor or field editor owns typing keys.
         let editingTextView = focusedTextView?.isEditable == true ? focusedTextView : nil
+
+        if keyCode == findKeyCode, modifiers == [.command, .shift] {
+            presentVaultSearch()
+            return true
+        }
+        if keyCode == findKeyCode, modifiers == .command {
+            guard !isVaultSearchPresented else { return false }
+            requestInNoteFind()
+            return selectedEntry != nil
+        }
 
         if keyCode == zenKeyCode {
             // Plain Z enters Zen from anywhere except text input. Once Zen is
@@ -393,6 +562,7 @@ final class AppModel {
     func stopRecording() async {
         stopLiveTranscription()
         guard let relPath = await recorder.stop() else { return }
+        await service?.synchronizeSearchEntry(at: relPath)
         await refresh()
         selectedEntryID = relPath
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
@@ -443,6 +613,7 @@ final class AppModel {
         if selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
             selectedEntryID = outcome.entryRelativePath
         }
+        refreshVaultSearchIfVisible()
         Task { await refresh() }
     }
 
@@ -483,6 +654,7 @@ final class AppModel {
             }
         }
         await refresh()
+        refreshVaultSearchIfVisible()
         if let lastImported { selectedEntryID = lastImported }
         if !failures.isEmpty {
             let imported = urls.count - failures.count
@@ -559,6 +731,7 @@ final class AppModel {
                 atEntryPath: entry.relativePath
             )
             await refresh()
+            refreshVaultSearchIfVisible()
             return saved
         } catch {
             errorMessage = "Could not save the transcript: \(error.localizedDescription)"
@@ -596,5 +769,6 @@ final class AppModel {
             errorMessage = error.localizedDescription
         }
         await refresh()
+        refreshVaultSearchIfVisible()
     }
 }

@@ -99,6 +99,52 @@ struct VaultSearchIndexTests {
         #expect(try index.recordCount() == 0)
     }
 
+    @Test func generatedMarkdownDoesNotCreateAConfusingDuplicateLayerHit() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        _ = try createEntry(
+            in: f.vault, suffix: "04", title: "Generated",
+            edited: "same generated words", original: "same generated words"
+        )
+
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+        #expect(try index.recordCount() == 1)
+        let hits = try index.search("generated words")
+        #expect(hits.count == 1)
+        #expect(hits.first?.layer == .original)
+    }
+
+    @Test func pathAwareSynchronizationHandlesExternalEditMoveAndDelete() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let oldPath = try createEntry(
+            in: f.vault, suffix: "05", title: "External",
+            edited: "original projection", original: "original projection"
+        )
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+
+        let oldURL = f.vault.appendingRelativePath(oldPath)
+        let markdownURL = try #require(TranscriptFile.url(inEntry: oldURL))
+        var document = FrontmatterDocument.parse(try String(contentsOf: markdownURL, encoding: .utf8))
+        document.body = "\nexternally added needle\n"
+        try AtomicFile.write(document.serialized(), to: markdownURL)
+        try index.synchronize(changedAbsolutePaths: [markdownURL.path])
+        #expect(try index.search("externally added").first?.layer == .edited)
+
+        let folder = f.vault.appending(path: "Moved")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let newPath = "Moved/\(oldPath)"
+        let newURL = f.vault.appendingRelativePath(newPath)
+        try FileManager.default.moveItem(at: oldURL, to: newURL)
+        try index.synchronize(changedAbsolutePaths: [oldURL.path, newURL.path])
+        #expect(try index.search("externally added").first?.entryPath == newPath)
+
+        try FileManager.default.removeItem(at: newURL)
+        try index.synchronize(changedAbsolutePaths: [newURL.path])
+        #expect(try index.search("externally added").isEmpty)
+        #expect(try index.recordCount() == 0)
+    }
+
     @Test func rebuildFindsNestedEntriesAndUsesFTS5OutsideVault() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }

@@ -1,0 +1,236 @@
+import SwiftUI
+
+/// Prominent vault-wide search surface (SRCH-1...4). Results remain grouped
+/// by entry while each matching layer keeps its own explicit label and jump.
+struct VaultSearchView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var searchFieldFocused: Bool
+
+    private struct ResultGroup: Identifiable {
+        var entryPath: RelativePath
+        var title: String
+        var hits: [SearchHit]
+        var id: RelativePath { entryPath }
+    }
+
+    private var groups: [ResultGroup] {
+        var order: [RelativePath] = []
+        var grouped: [RelativePath: ResultGroup] = [:]
+        for hit in model.vaultSearchResults {
+            if grouped[hit.entryPath] == nil {
+                order.append(hit.entryPath)
+                grouped[hit.entryPath] = ResultGroup(
+                    entryPath: hit.entryPath, title: hit.title, hits: []
+                )
+            }
+            if hit.layer == .original,
+               grouped[hit.entryPath]?.hits.contains(where: {
+                   $0.layer == .edited
+                       && normalizedSnippet($0.snippet) == normalizedSnippet(hit.snippet)
+               }) == true {
+                continue
+            }
+            grouped[hit.entryPath]?.hits.append(hit)
+        }
+        return order.compactMap { grouped[$0] }
+    }
+
+    private func normalizedSnippet(_ snippet: String) -> String {
+        snippet.split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            searchHeader
+            Divider()
+            resultsContent
+        }
+        .frame(minWidth: 720, idealWidth: 780, minHeight: 500, idealHeight: 580)
+        .onAppear { searchFieldFocused = true }
+    }
+
+    private var searchHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                TextField(
+                    "Search every transcript",
+                    text: Binding(
+                        get: { model.vaultSearchQuery },
+                        set: { model.updateVaultSearchQuery($0) }
+                    )
+                )
+                .textFieldStyle(.plain)
+                .font(.title3)
+                .focused($searchFieldFocused)
+
+                if !model.vaultSearchQuery.isEmpty {
+                    Button {
+                        model.updateVaultSearchQuery("")
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear Search")
+                }
+
+                Divider().frame(height: 24)
+
+                Toggle("Fuzzy", isOn: Binding(
+                    get: { model.fuzzyVaultSearch },
+                    set: { model.fuzzyVaultSearch = $0 }
+                ))
+                .toggleStyle(.switch)
+                .help("Allow close spellings and small typos")
+
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            Text(model.fuzzyVaultSearch
+                 ? "Fuzzy matching is on — close spellings may match."
+                 : "Exact match — case-insensitive substring search.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(18)
+        .background(.bar)
+    }
+
+    @ViewBuilder
+    private var resultsContent: some View {
+        switch model.searchIndexState {
+        case .unavailable, .indexing:
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Indexing this vault…")
+                    .font(.headline)
+                Text("You can keep working. Search will begin automatically when the cache is ready.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(30)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("Search Index Unavailable", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("Rebuild Index") { model.retrySearchIndex() }
+            }
+
+        case .ready:
+            if model.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ContentUnavailableView(
+                    "Search the Vault",
+                    systemImage: "text.magnifyingglass",
+                    description: Text("Original transcripts and truly edited Markdown layers are searchable.")
+                )
+            } else if let error = model.vaultSearchError {
+                ContentUnavailableView {
+                    Label("Search Failed", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("Try Again") { model.retryVaultSearch() }
+                }
+            } else if model.vaultSearchIsRunning, groups.isEmpty {
+                ProgressView("Searching…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if groups.isEmpty {
+                ContentUnavailableView(
+                    "No Matches",
+                    systemImage: "magnifyingglass",
+                    description: Text(model.fuzzyVaultSearch
+                                      ? "Try a shorter word or turn off Fuzzy for literal phrases."
+                                      : "Try a shorter phrase, or turn on Fuzzy for a close spelling.")
+                )
+            } else {
+                resultList
+            }
+        }
+    }
+
+    private var resultList: some View {
+        List {
+            ForEach(groups) { group in
+                Section {
+                    ForEach(Array(group.hits.enumerated()), id: \.offset) { _, hit in
+                        Button {
+                            model.selectSearchHit(hit)
+                        } label: {
+                            resultRow(hit)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    HStack {
+                        Text(group.title.isEmpty ? group.entryPath.lastComponent : group.title)
+                            .font(.headline)
+                            .textCase(nil)
+                        Spacer()
+                        if group.hits.count > 1 {
+                            Text("\(group.hits.count) layers")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .textCase(nil)
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.inset)
+        .overlay(alignment: .topTrailing) {
+            if model.vaultSearchIsRunning {
+                ProgressView().controlSize(.small).padding(12)
+            }
+        }
+    }
+
+    private func resultRow(_ hit: SearchHit) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(hit.layer == .edited ? "Edited" : "Original")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(hit.layer == .edited
+                                 ? AnyShapeStyle(.tint)
+                                 : AnyShapeStyle(.secondary))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(.quaternary, in: Capsule())
+                .frame(width: 66)
+
+            highlightedSnippet(hit)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 4)
+            Image(systemName: "arrow.turn.down.right")
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+    }
+
+    private func highlightedSnippet(_ hit: SearchHit) -> Text {
+        let source = hit.snippet as NSString
+        let lower = min(max(0, hit.snippetMatchRange.lowerBound), source.length)
+        let upper = min(max(lower, hit.snippetMatchRange.upperBound), source.length)
+        let before = source.substring(with: NSRange(location: 0, length: lower))
+        let match = source.substring(with: NSRange(location: lower, length: upper - lower))
+        let after = source.substring(from: upper)
+        return Text(before)
+            + Text(match).bold().foregroundColor(.accentColor)
+            + Text(after)
+    }
+}

@@ -12,6 +12,7 @@ actor VaultService {
     private var scanner = VaultScanner()
     private let operations: VaultOperations
     private let trash: TrashStore
+    private var searchIndex: VaultSearchIndex?
 
     init(rootURL: URL) {
         self.rootURL = rootURL
@@ -46,6 +47,61 @@ actor VaultService {
         )
     }
 
+    // MARK: - Search cache
+
+    /// Opens and fully reconciles the rebuildable cache. AppModel starts this
+    /// in an unstructured task after the vault becomes usable, so a large
+    /// first rebuild never holds up window navigation on the main actor.
+    func initializeSearchIndex() throws {
+        let databaseURL = VaultSearchIndex.defaultDatabaseURL(forVault: rootURL)
+        let existed = FileManager.default.fileExists(atPath: databaseURL.path)
+        let index = try VaultSearchIndex(vaultRoot: rootURL, databaseURL: databaseURL)
+        // VaultSearchIndex builds a brand-new cache during initialization.
+        // An existing cache is rebuilt on every open so missed events from a
+        // prior process can never leave stale search results.
+        if existed { try index.rebuild() }
+        searchIndex = index
+    }
+
+    func search(_ query: String, fuzzy: Bool, limit: Int = 150) throws -> [SearchHit] {
+        guard let searchIndex else {
+            throw SearchIndexError.sqlite("The vault is still being indexed")
+        }
+        do {
+            return try searchIndex.search(query, fuzzy: fuzzy, limit: limit)
+        } catch {
+            _ = try searchIndex.recoverIfNeeded()
+            return try searchIndex.search(query, fuzzy: fuzzy, limit: limit)
+        }
+    }
+
+    /// File-event paths remain coalesced by FSEvents. The index reconciler
+    /// removes vanished records and re-reads only entries intersecting those
+    /// paths, including every child of a renamed folder.
+    func synchronizeSearchIndex(changedAbsolutePaths: [String]) {
+        guard let searchIndex else { return }
+        do {
+            try searchIndex.synchronize(changedAbsolutePaths: changedAbsolutePaths)
+        } catch {
+            do {
+                _ = try searchIndex.recoverIfNeeded()
+                try searchIndex.synchronize(changedAbsolutePaths: changedAbsolutePaths)
+            } catch {
+                DebugLog.append("search index sync FAILED: \(error)")
+            }
+        }
+    }
+
+    func synchronizeSearchEntry(at relativePath: RelativePath) {
+        synchronizeSearchIndex(relativePaths: [relativePath])
+    }
+
+    private func synchronizeSearchIndex(relativePaths: [RelativePath]) {
+        synchronizeSearchIndex(changedAbsolutePaths: relativePaths.map {
+            rootURL.appendingRelativePath($0).path
+        })
+    }
+
     /// Re-reads frontmatter at save time, replaces only the body, and writes
     /// atomically. This keeps metadata and unknown YAML fields intact even
     /// when another in-app operation updated them after the editor opened.
@@ -64,6 +120,7 @@ actor VaultService {
         // the debounce fired, the real edit still forked this layer.
         if markHandEdited { editable.markHandEdited() }
         try editable.save(to: transcriptURL)
+        synchronizeSearchIndex(relativePaths: [relPath])
         return editable.document
     }
 
@@ -85,7 +142,10 @@ actor VaultService {
 
     /// Creates the (still empty) entry folder a new recording streams into.
     func createEntryFolder(inFolder parent: RelativePath, date: Date) throws -> RelativePath {
-        try EntryCreator(vaultRoot: rootURL).createEntryFolder(inFolder: parent, date: date)
+        let path = try EntryCreator(vaultRoot: rootURL)
+            .createEntryFolder(inFolder: parent, date: date)
+        synchronizeSearchIndex(relativePaths: [path])
+        return path
     }
 
     /// Removes an entry folder that never got any content (recording failed
@@ -96,14 +156,17 @@ actor VaultService {
         let contents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
         guard contents.isEmpty else { return }
         try FileManager.default.removeItem(at: url)
+        synchronizeSearchIndex(relativePaths: [relPath])
     }
 
     /// Imports one audio file: probes it (per-file error for corrupt/misnamed
     /// files), then copies it into a new entry with a stub transcript.
     func importAudioFile(from sourceURL: URL, toFolder parent: RelativePath) async throws -> RelativePath {
         let duration = try await AudioImportFormat.probeDuration(of: sourceURL)
-        return try EntryCreator(vaultRoot: rootURL)
+        let path = try EntryCreator(vaultRoot: rootURL)
             .importFile(from: sourceURL, toFolder: parent, date: .now, duration: duration)
+        synchronizeSearchIndex(relativePaths: [path])
+        return path
     }
 
     // MARK: - Folder / entry mutations
@@ -113,15 +176,21 @@ actor VaultService {
     }
 
     func renameFolder(at relPath: RelativePath, to newName: String) throws -> RelativePath {
-        try operations.renameFolder(at: relPath, to: newName)
+        let newPath = try operations.renameFolder(at: relPath, to: newName)
+        synchronizeSearchIndex(relativePaths: [relPath, newPath])
+        return newPath
     }
 
     func renameEntry(at relPath: RelativePath, toTitle title: String) throws -> RelativePath {
-        try operations.renameEntry(at: relPath, toTitle: title)
+        let newPath = try operations.renameEntry(at: relPath, toTitle: title)
+        synchronizeSearchIndex(relativePaths: [relPath, newPath])
+        return newPath
     }
 
     func moveItem(at relPath: RelativePath, toFolder destFolder: RelativePath) throws -> RelativePath {
-        try operations.moveItem(at: relPath, toFolder: destFolder)
+        let newPath = try operations.moveItem(at: relPath, toFolder: destFolder)
+        synchronizeSearchIndex(relativePaths: [relPath, newPath])
+        return newPath
     }
 
     // MARK: - Transcription (M3)
@@ -136,7 +205,7 @@ actor VaultService {
         engineFrontmatterID: String,
         vocabularyTerms: [String]
     ) throws -> TranscriptionApplier.Outcome {
-        try TranscriptionApplier(vaultRoot: rootURL).apply(
+        let outcome = try TranscriptionApplier(vaultRoot: rootURL).apply(
             segments: segments,
             toEntryAt: relPath,
             engine: engine,
@@ -144,6 +213,8 @@ actor VaultService {
             vocabularyTerms: vocabularyTerms,
             date: .now
         )
+        synchronizeSearchIndex(relativePaths: [relPath, outcome.entryRelativePath])
+        return outcome
     }
 
     /// The entry's audio file name (canonical `audio.*` preferred), nil when
@@ -167,6 +238,7 @@ actor VaultService {
 
     func trashItem(atRelativePath relPath: RelativePath) throws {
         try trash.trashItem(atRelativePath: relPath)
+        synchronizeSearchIndex(relativePaths: [relPath])
     }
 
     func trashItems() throws -> [TrashItem] {
@@ -174,7 +246,9 @@ actor VaultService {
     }
 
     func restore(_ item: TrashItem) throws -> RelativePath {
-        try trash.restore(item)
+        let path = try trash.restore(item)
+        synchronizeSearchIndex(relativePaths: [path])
+        return path
     }
 
     func deletePermanently(_ item: TrashItem) throws {

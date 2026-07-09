@@ -25,6 +25,13 @@ struct TranscriptWorkbenchView: View {
     @State private var needsSave = false
     @State private var copyConfirmed = false
     @State private var copyConfirmationTask: Task<Void, Never>?
+    @State private var showingFind = false
+    @State private var findQuery = ""
+    @State private var findMatches: [NSRange] = []
+    @State private var findMatchIndex = 0
+    @State private var searchNavigationRange: NSRange?
+    @State private var handledNavigationRequestID: UUID?
+    @FocusState private var findFieldFocused: Bool
 
     private var wordMap: TranscriptWordMap? {
         original.map(TranscriptWordMap.init)
@@ -43,6 +50,13 @@ struct TranscriptWorkbenchView: View {
 
     private var currentWordIndex: Int? {
         wordMap?.wordIndex(atTime: model.player.currentTime)
+    }
+
+    private var activeNavigationRange: NSRange? {
+        if showingFind, findMatches.indices.contains(findMatchIndex) {
+            return findMatches[findMatchIndex]
+        }
+        return searchNavigationRange
     }
 
     /// Edited highlighting is enabled only when the entire body is still the
@@ -74,6 +88,12 @@ struct TranscriptWorkbenchView: View {
                 .padding(.vertical, 8)
                 .background(.bar)
 
+            if showingFind {
+                findBar
+                    .frame(height: 42)
+                    .background(.bar)
+            }
+
             Divider()
 
             ZStack(alignment: .topTrailing) {
@@ -102,6 +122,21 @@ struct TranscriptWorkbenchView: View {
         }
         .onChange(of: isForked) { wasForked, nowForked in
             if !wasForked, nowForked { activeLayer = .edited }
+        }
+        .onChange(of: viewedLayer) { _, _ in updateFindMatches() }
+        .onChange(of: findQuery) { _, _ in updateFindMatches(resetSelection: true) }
+        .onChange(of: document?.body) { _, _ in updateFindMatches() }
+        .onChange(of: model.inNoteFindRequestRevision) { _, _ in
+            showingFind = true
+            searchNavigationRange = nil
+            updateFindMatches(resetSelection: true)
+            findFieldFocused = true
+        }
+        .task(id: model.transcriptNavigationRequest?.id) {
+            handleNavigationRequestIfNeeded()
+        }
+        .onChange(of: model.player.url) { _, _ in
+            cueSearchNavigationIfPossible()
         }
         .onAppear {
             if isForked { activeLayer = .edited }
@@ -163,6 +198,44 @@ struct TranscriptWorkbenchView: View {
         }
     }
 
+    private var findBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Find in \(viewedLayer.rawValue)", text: $findQuery)
+                .textFieldStyle(.roundedBorder)
+                .focused($findFieldFocused)
+                .onSubmit { cycleFind(forward: true) }
+            Text(findQuery.isEmpty ? "" : findMatches.isEmpty
+                 ? "No matches"
+                 : "\(findMatchIndex + 1) of \(findMatches.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 70, alignment: .trailing)
+            Button { cycleFind(forward: false) } label: {
+                Image(systemName: "chevron.up")
+            }
+            .disabled(findMatches.isEmpty)
+            .help("Previous Match")
+            Button { cycleFind(forward: true) } label: {
+                Image(systemName: "chevron.down")
+            }
+            .disabled(findMatches.isEmpty)
+            .help("Next Match")
+            Button {
+                showingFind = false
+                findQuery = ""
+                findMatches = []
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .keyboardShortcut(.cancelAction)
+            .help("Close Find")
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+    }
+
     @ViewBuilder
     private var layerContent: some View {
         switch viewedLayer {
@@ -171,8 +244,10 @@ struct TranscriptWorkbenchView: View {
                 SyncedOriginalTextView(
                     map: wordMap,
                     currentWordIndex: currentWordIndex,
+                    navigationHighlightRange: activeNavigationRange,
                     followingPaused: $followingPaused
                 ) { wordIndex in
+                    searchNavigationRange = nil
                     guard let time = wordMap.startTime(forWordAt: wordIndex) else { return }
                     model.player.seek(to: time)
                 }
@@ -187,7 +262,11 @@ struct TranscriptWorkbenchView: View {
 
         case .edited:
             if let body = document?.body {
-                MarkdownBodyEditor(text: body, highlightRange: editedHighlightRange) { newBody in
+                MarkdownBodyEditor(
+                    text: body,
+                    highlightRange: editedHighlightRange,
+                    navigationHighlightRange: activeNavigationRange
+                ) { newBody in
                     applyUserEdit(newBody)
                 }
             } else {
@@ -202,6 +281,7 @@ struct TranscriptWorkbenchView: View {
 
     private func applyUserEdit(_ newBody: String) {
         guard var document, newBody != document.body else { return }
+        searchNavigationRange = nil
         var editable = TranscriptEditDocument(document: document)
         editable.replaceBody(newBody)
         document = editable.document
@@ -232,6 +312,91 @@ struct TranscriptWorkbenchView: View {
         }
     }
 
+    private var findSource: String {
+        switch viewedLayer {
+        case .original: wordMap?.renderedText ?? ""
+        case .edited: document?.body ?? ""
+        }
+    }
+
+    private func updateFindMatches(resetSelection: Bool = false) {
+        let query = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard showingFind, !query.isEmpty else {
+            findMatches = []
+            findMatchIndex = 0
+            return
+        }
+        let source = findSource as NSString
+        var matches: [NSRange] = []
+        var searchRange = NSRange(location: 0, length: source.length)
+        while searchRange.length > 0 {
+            let found = source.range(of: query, options: .caseInsensitive, range: searchRange)
+            guard found.location != NSNotFound else { break }
+            matches.append(found)
+            let next = NSMaxRange(found)
+            guard next > found.location else { break }
+            searchRange = NSRange(location: next, length: source.length - next)
+        }
+        findMatches = matches
+        if resetSelection || !matches.indices.contains(findMatchIndex) { findMatchIndex = 0 }
+    }
+
+    private func cycleFind(forward: Bool) {
+        guard !findMatches.isEmpty else { return }
+        findMatchIndex = forward
+            ? (findMatchIndex + 1) % findMatches.count
+            : (findMatchIndex - 1 + findMatches.count) % findMatches.count
+    }
+
+    private func handleNavigationRequestIfNeeded() {
+        guard let request = model.transcriptNavigationRequest,
+              request.hit.entryPath == entry.relativePath,
+              handledNavigationRequestID != request.id else { return }
+        handledNavigationRequestID = request.id
+        showingFind = false
+        findQuery = ""
+        findMatches = []
+        searchNavigationRange = NSRange(request.hit.matchRange)
+        switch request.hit.layer {
+        case .original:
+            activeLayer = .original
+            editingUnforked = false
+        case .edited:
+            activeLayer = .edited
+            editingUnforked = true
+        }
+        cueSearchNavigationIfPossible()
+    }
+
+    private func cueSearchNavigationIfPossible() {
+        guard let request = model.transcriptNavigationRequest,
+              request.id == handledNavigationRequestID,
+              request.hit.entryPath == entry.relativePath,
+              model.player.url != nil,
+              let map = wordMap else { return }
+
+        let mapOffset: Int?
+        switch request.hit.layer {
+        case .original:
+            mapOffset = request.hit.matchRange.lowerBound
+        case .edited:
+            guard let body = document?.body else { return }
+            let nsBody = body as NSString
+            let projection = nsBody.range(of: map.renderedText)
+            guard projection.location != NSNotFound,
+                  request.hit.matchRange.lowerBound >= projection.location,
+                  request.hit.matchRange.lowerBound < NSMaxRange(projection),
+                  nsBody.substring(to: projection.location)
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  nsBody.substring(from: NSMaxRange(projection))
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            mapOffset = request.hit.matchRange.lowerBound - projection.location
+        }
+        guard let mapOffset, let time = map.startTime(atOrBeforeUTF16Offset: mapOffset) else { return }
+        model.player.pause()
+        model.player.seek(to: time)
+    }
+
     private func copyCurrentLayer() {
         let markdown: String
         switch viewedLayer {
@@ -258,6 +423,7 @@ struct TranscriptWorkbenchView: View {
 private struct SyncedOriginalTextView: NSViewRepresentable {
     let map: TranscriptWordMap
     let currentWordIndex: Int?
+    let navigationHighlightRange: NSRange?
     @Binding var followingPaused: Bool
     let onWordClick: (Int) -> Void
 
@@ -312,7 +478,10 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
         if context.coordinator.renderedText != map.renderedText {
             context.coordinator.renderBaseText()
         }
-        context.coordinator.updateHighlight(to: currentWordIndex)
+        context.coordinator.updateHighlights(
+            playbackWordIndex: currentWordIndex,
+            navigationRange: navigationHighlightRange
+        )
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -326,6 +495,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         var renderedText = ""
         var highlightedWordIndex: Int?
+        var navigationRange: NSRange?
         var boundsObserver: NSObjectProtocol?
         var isProgrammaticScroll = false
 
@@ -360,6 +530,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
             guard let textView else { return }
             renderedText = parent.map.renderedText
             highlightedWordIndex = nil
+            navigationRange = nil
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 4
             paragraph.paragraphSpacing = 8
@@ -373,23 +544,55 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
             )
         }
 
-        func updateHighlight(to wordIndex: Int?) {
-            guard let textView, highlightedWordIndex != wordIndex else {
-                if wordIndex != nil, !parent.followingPaused { scrollToWord(wordIndex!) }
-                return
+        func updateHighlights(playbackWordIndex: Int?, navigationRange: NSRange?) {
+            guard let textView else { return }
+            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+            textView.layoutManager?.removeTemporaryAttribute(
+                .backgroundColor, forCharacterRange: fullRange
+            )
+
+            let wordChanged = highlightedWordIndex != playbackWordIndex
+            highlightedWordIndex = playbackWordIndex
+            if let playbackWordIndex,
+               let range = parent.map.range(forWordAt: playbackWordIndex) {
+                textView.layoutManager?.addTemporaryAttribute(
+                    .backgroundColor,
+                    value: NSColor.controlAccentColor.withAlphaComponent(0.30),
+                    forCharacterRange: NSRange(range)
+                )
+                if wordChanged, !parent.followingPaused { scrollToWord(playbackWordIndex) }
             }
-            if let old = highlightedWordIndex,
-               let range = parent.map.range(forWordAt: old) {
-                textView.textStorage?.removeAttribute(.backgroundColor, range: NSRange(range))
+
+            let navigationChanged = self.navigationRange != navigationRange
+            self.navigationRange = navigationRange
+            if let navigationRange,
+               NSMaxRange(navigationRange) <= (textView.string as NSString).length {
+                textView.layoutManager?.addTemporaryAttribute(
+                    .backgroundColor,
+                    value: NSColor.systemYellow.withAlphaComponent(0.45),
+                    forCharacterRange: navigationRange
+                )
+                if navigationChanged { scrollToCharacterRange(navigationRange) }
             }
-            highlightedWordIndex = wordIndex
-            if let wordIndex, let range = parent.map.range(forWordAt: wordIndex) {
-                textView.textStorage?.addAttributes([
-                    .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.30),
-                    .foregroundColor: NSColor.labelColor,
-                ], range: NSRange(range))
-                if !parent.followingPaused { scrollToWord(wordIndex) }
-            }
+        }
+
+        private func scrollToCharacterRange(_ range: NSRange) {
+            guard let textView, let scrollView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: range, actualCharacterRange: nil
+            )
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            rect.origin.x += textView.textContainerOrigin.x
+            rect.origin.y += textView.textContainerOrigin.y
+            let viewport = scrollView.contentView.bounds
+            let targetY = max(0, rect.midY - viewport.height * 0.42)
+            isProgrammaticScroll = true
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            DispatchQueue.main.async { [weak self] in self?.isProgrammaticScroll = false }
         }
 
         private func scrollToWord(_ wordIndex: Int) {
@@ -451,6 +654,7 @@ private final class UserAwareTranscriptScrollView: NSScrollView {
 private struct MarkdownBodyEditor: NSViewRepresentable {
     let text: String
     let highlightRange: NSRange?
+    let navigationHighlightRange: NSRange?
     let onUserEdit: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -486,7 +690,7 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         textView.string = text
         scrollView.documentView = textView
         context.coordinator.textView = textView
-        context.coordinator.updateHighlight()
+        context.coordinator.updateHighlights()
         return scrollView
     }
 
@@ -496,14 +700,13 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         if textView.string != text {
             let selection = textView.selectedRange()
             context.coordinator.isApplyingExternalText = true
-            context.coordinator.removeHighlight()
             textView.string = text
             textView.setSelectedRange(NSRange(
                 location: min(selection.location, (text as NSString).length), length: 0
             ))
             context.coordinator.isApplyingExternalText = false
         }
-        context.coordinator.updateHighlight()
+        context.coordinator.updateHighlights()
     }
 
     @MainActor
@@ -512,42 +715,52 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         var isApplyingExternalText = false
         var appliedHighlightRange: NSRange?
+        var appliedNavigationRange: NSRange?
 
         init(parent: MarkdownBodyEditor) { self.parent = parent }
 
         func textDidChange(_ notification: Notification) {
             guard !isApplyingExternalText, let textView else { return }
-            textView.textStorage?.removeAttribute(
-                .backgroundColor,
-                range: NSRange(location: 0, length: (textView.string as NSString).length)
-            )
             appliedHighlightRange = nil
+            appliedNavigationRange = nil
             parent.onUserEdit(textView.string)
         }
 
-        func removeHighlight() {
-            guard let textView, let appliedHighlightRange,
-                  NSMaxRange(appliedHighlightRange) <= (textView.string as NSString).length else {
-                self.appliedHighlightRange = nil
-                return
-            }
-            textView.textStorage?.removeAttribute(.backgroundColor, range: appliedHighlightRange)
-            self.appliedHighlightRange = nil
-        }
-
-        func updateHighlight() {
+        func updateHighlights() {
             guard let textView else { return }
-            if appliedHighlightRange != parent.highlightRange { removeHighlight() }
+            let stringLength = (textView.string as NSString).length
+            let fullRange = NSRange(location: 0, length: stringLength)
+            textView.layoutManager?.removeTemporaryAttribute(
+                .backgroundColor, forCharacterRange: fullRange
+            )
+
+            appliedHighlightRange = nil
             guard textView.window?.firstResponder !== textView,
                   let range = parent.highlightRange,
-                  NSMaxRange(range) <= (textView.string as NSString).length,
-                  appliedHighlightRange == nil else { return }
-            textView.textStorage?.addAttribute(
+                  NSMaxRange(range) <= stringLength else {
+                applyNavigationHighlight(to: textView, stringLength: stringLength)
+                return
+            }
+            textView.layoutManager?.addTemporaryAttribute(
                 .backgroundColor,
                 value: NSColor.controlAccentColor.withAlphaComponent(0.24),
-                range: range
+                forCharacterRange: range
             )
             appliedHighlightRange = range
+            applyNavigationHighlight(to: textView, stringLength: stringLength)
+        }
+
+        private func applyNavigationHighlight(to textView: NSTextView, stringLength: Int) {
+            let changed = appliedNavigationRange != parent.navigationHighlightRange
+            appliedNavigationRange = parent.navigationHighlightRange
+            guard let range = parent.navigationHighlightRange,
+                  NSMaxRange(range) <= stringLength else { return }
+            textView.layoutManager?.addTemporaryAttribute(
+                .backgroundColor,
+                value: NSColor.systemYellow.withAlphaComponent(0.45),
+                forCharacterRange: range
+            )
+            if changed { textView.scrollRangeToVisible(range) }
         }
     }
 }

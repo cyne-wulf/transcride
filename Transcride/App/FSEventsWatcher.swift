@@ -7,15 +7,22 @@ import CoreServices
 final class FSEventsWatcher: @unchecked Sendable {
     private var stream: FSEventStreamRef?
     private let queue = DispatchQueue(label: "com.ashandevine.transcride.fsevents")
-    private let handler: @Sendable () -> Void
+    private let handler: @Sendable ([String]) -> Void
 
-    init?(url: URL, latency: CFTimeInterval = 0.7, handler: @escaping @Sendable () -> Void) {
+    init?(
+        url: URL,
+        latency: CFTimeInterval = 0.7,
+        handler: @escaping @Sendable ([String]) -> Void
+    ) {
         self.handler = handler
         self.stream = nil
 
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        let callback: FSEventStreamCallback = { _, info, count, paths, _, _ in
             guard let info else { return }
-            Unmanaged<FSEventsWatcher>.fromOpaque(info).takeUnretainedValue().handler()
+            let watcher = Unmanaged<FSEventsWatcher>.fromOpaque(info).takeUnretainedValue()
+            let values = unsafeBitCast(paths, to: NSArray.self)
+                .compactMap { $0 as? String }
+            watcher.handler(Array(values.prefix(count)))
         }
         var context = FSEventStreamContext()
         context.info = Unmanaged.passUnretained(self).toOpaque()
@@ -24,6 +31,7 @@ final class FSEventsWatcher: @unchecked Sendable {
             kFSEventStreamCreateFlagUseCFTypes
                 | kFSEventStreamCreateFlagIgnoreSelf
                 | kFSEventStreamCreateFlagNoDefer
+                | kFSEventStreamCreateFlagFileEvents
         )
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,

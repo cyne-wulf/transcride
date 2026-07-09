@@ -32,6 +32,20 @@ struct TranscrideApp: App {
                 .disabled(model.phase != .ready)
             }
 
+            CommandMenu("Find") {
+                Button("Find in Note") {
+                    model.requestInNoteFind()
+                }
+                .keyboardShortcut("f", modifiers: [.command])
+                .disabled(model.phase != .ready || model.selectedEntry == nil || model.isVaultSearchPresented)
+
+                Button("Search Vault") {
+                    model.presentVaultSearch()
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(model.phase != .ready)
+            }
+
             KeyboardShortcutsCommands()
         }
 
