@@ -137,12 +137,43 @@ struct VocabularyCorrectorTests {
     }
 
     @Test func realWorldEngineMissesStayConservative() {
-        // Also from verification runs: sound-alike but 3 edits away — too far
-        // to correct safely, and real words never get rewritten into names.
-        var t = transcript(["ocean", "waves", "and", "Erikeet", "or", "Mythish"])
+        // Also from verification runs: "ocean" is 3 edits from a 5-letter
+        // term, "Mythish" 3 from a 6-letter one — both too far to correct
+        // safely; real words never get rewritten into names.
+        var t = transcript(["ocean", "waves", "or", "Mythish", "and", "meet", "this"])
         let before = t
-        VocabularyCorrector.apply(terms: ["Ashan", "Airakeet", "Mitesh"], to: &t)
+        VocabularyCorrector.apply(terms: ["Ashan", "Mitesh"], to: &t)
         #expect(t == before)
+    }
+
+    @Test func vowelRespellingsOfLongTermsAreCorrected() {
+        // Real Parakeet output: "Erikeet," for "Airakeet" — 3 edits, but the
+        // consonant skeleton is identical, so every edit is in the vowels.
+        var t = transcript(["like", "Erikeet,", "maybe"])
+        VocabularyCorrector.apply(terms: ["Airakeet"], to: &t)
+        #expect(t.segments[0].words[1].text == "Airakeet,")
+        #expect(t.segments[0].words[1].correctedFrom == "Erikeet,")
+    }
+
+    @Test func distanceThreeNeverAppliesToJoinedWindows() {
+        // "flat audio" shares FluidAudio's consonant skeleton at 3 edits;
+        // multi-word joins stay capped at 2 so real phrases survive.
+        var t = transcript(["a", "flat", "audio", "profile"])
+        let before = t
+        VocabularyCorrector.apply(terms: ["FluidAudio"], to: &t)
+        #expect(t == before)
+    }
+
+    @Test func phraseWithVowelOnsetMissIsCorrected() {
+        // Real Parakeet output: "Oshan Divine," with both "Ashan" and
+        // "Ashan Devine" in the vocabulary — the longer phrase must win
+        // (previously the raw 2-char prefix gate stranded "Divine,").
+        var t = transcript(["like", "Oshan", "Divine,", "and"])
+        let count = VocabularyCorrector.apply(terms: ["Ashan", "Ashan Devine"], to: &t)
+        #expect(count == 1)
+        let words = t.segments[0].words
+        #expect(words.map(\.text) == ["like", "Ashan Devine,", "and"])
+        #expect(words[1].correctedFrom == "Oshan Divine,")
     }
 
     @Test func realWorldTrailingPunctuationMiss() {

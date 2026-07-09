@@ -37,9 +37,12 @@ enum VocabularyFile {
 ///
 /// Deliberately conservative — a false correction is worse than a miss:
 /// - fuzzy matching needs ≥ 5 significant characters and edit distance ≤ 1
-///   (≤ 2 only for terms of 8+ characters with the same 2-character prefix),
-///   AND an equal phonetic key, so look-alikes that sound different
-///   ("transcribe" vs "Transcride") are left alone;
+///   (≤ 2 for terms of 8+ characters, ≤ 3 only for single words against such
+///   terms — where the equal phonetic key confines the edits to the vowel
+///   pattern, e.g. "Erikeet" → "Airakeet"), an anchored first character
+///   (equal, or both vowels) once the distance exceeds 1, AND an equal
+///   phonetic key, so look-alikes that sound different ("transcribe" vs
+///   "Transcride") are left alone;
 /// - case-only rewrites happen only for terms with internal capitals
 ///   ("FluidAudio"), never plain names, so sentence capitalization survives;
 /// - a window that exactly matches a *different* vocabulary term is never
@@ -156,10 +159,13 @@ enum VocabularyCorrector {
                       abs(windowKey.count - term.key.count) <= 2,
                       !exactKeys.contains(windowKey)
                 else { continue }
-                let maxDistance = term.key.count >= 8 ? 2 : 1
+                // Distance 3 is only for single words against long terms: the
+                // phonetic gate then confines all edits to the vowel pattern.
+                let maxDistance = term.key.count >= 8 ? (windowSize == 1 ? 3 : 2) : 1
                 let distance = editDistance(windowKey, term.key, limit: maxDistance)
                 guard distance >= 1, distance <= maxDistance else { continue }
-                if distance == 2, windowKey.prefix(2) != term.key.prefix(2) { continue }
+                if distance >= 2, windowKey.first != term.key.first,
+                   !(isVowel(windowKey.first) && isVowel(term.key.first)) { continue }
                 guard phoneticKey(windowKey) == phoneticKey(term.key) else { continue }
                 return Match(term: term, windowSize: windowSize)
             }
@@ -178,6 +184,11 @@ enum VocabularyCorrector {
 
     private static func stripPunctuation(_ text: String) -> String {
         text.trimmingCharacters(in: .punctuationCharacters)
+    }
+
+    private static func isVowel(_ char: Character?) -> Bool {
+        guard let char else { return false }
+        return "aeiou".contains(char)
     }
 
     private static func trailingPunctuation(of text: String) -> String {
