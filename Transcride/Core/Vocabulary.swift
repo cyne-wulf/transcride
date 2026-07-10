@@ -81,11 +81,21 @@ enum VocabularyCorrector {
     private static let minFuzzyLength = 5
 
     /// Applies the backstop in place. Returns the number of corrections made.
+    ///
+    /// `protectedBy` widens the never-correct set without widening the match
+    /// set: a re-apply pass restricted to newly added terms (VOC-4) passes the
+    /// whole vocabulary here, so a window that exactly matches some *other*
+    /// term keeps its transcription-time protection.
     @discardableResult
-    static func apply(terms rawTerms: [String], to transcript: inout TranscriptOriginal) -> Int {
+    static func apply(
+        terms rawTerms: [String],
+        protectedBy allRawTerms: [String]? = nil,
+        to transcript: inout TranscriptOriginal
+    ) -> Int {
         let terms = rawTerms.compactMap(Term.init)
         guard !terms.isEmpty else { return 0 }
-        let exactKeys = Set(terms.map(\.key))
+        let protectedTerms = (allRawTerms ?? rawTerms).compactMap(Term.init)
+        let exactKeys = Set(terms.map(\.key)).union(protectedTerms.map(\.key))
         var corrections = 0
 
         for segmentIndex in transcript.segments.indices {

@@ -958,6 +958,60 @@ final class AppModel {
         }
     }
 
+    // MARK: - Vocabulary re-apply (VOC-4)
+
+    struct VocabularyReapplyScan: Sendable {
+        var previews: [VocabularyReapply.EntryPreview]
+        /// Entries excluded because they are queued or transcribing right now.
+        var skippedBusyCount: Int
+    }
+
+    /// Dry run across the vault, minus entries the queue is about to rewrite
+    /// anyway (their fresh transcription gets the new vocabulary at landing).
+    func previewVocabularyReapply(terms: [String]) async -> VocabularyReapplyScan? {
+        guard let service else { return nil }
+        do {
+            let previews = try await service.previewVocabularyReapply(terms: terms)
+            let busy = transcriptionBusyEntryPaths
+            let idle = previews.filter { !busy.contains($0.entryRelativePath) }
+            return VocabularyReapplyScan(
+                previews: idle, skippedBusyCount: previews.count - idle.count
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func applyVocabularyReapply(
+        terms: [String], toEntriesAt paths: [RelativePath]
+    ) async -> VocabularyReapplyApplier.Summary? {
+        guard let service else { return nil }
+        // Re-check against the queue at apply time; the scan may be stale.
+        let busy = transcriptionBusyEntryPaths
+        let idlePaths = paths.filter { !busy.contains($0) }
+        do {
+            let summary = try await service.applyVocabularyReapply(
+                terms: terms, toEntriesAt: idlePaths
+            )
+            if !summary.changedEntryPaths.isEmpty {
+                transcriptRevision += 1 // reload any open workbench
+                await refresh()
+                refreshVaultSearchIfVisible()
+            }
+            return summary
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    private var transcriptionBusyEntryPaths: Set<RelativePath> {
+        Set(transcriptionQueue?.items.map(\.entryRelativePath) ?? [])
+    }
+
     private func perform(_ label: String, _ work: (VaultService) async throws -> Void) async {
         guard let service else {
             DebugLog.append("\(label): NO SERVICE")

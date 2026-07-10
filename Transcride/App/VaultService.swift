@@ -330,6 +330,41 @@ actor VaultService {
         try VocabularyFile.save(terms, toVault: rootURL)
     }
 
+    /// VOC-4 dry run: scans every transcribed entry for corrections `terms`
+    /// would make, writing nothing. Cancellable between entries.
+    func previewVocabularyReapply(terms: [String]) async throws -> [VocabularyReapply.EntryPreview] {
+        let allTerms = vocabularyTerms()
+        var previews: [VocabularyReapply.EntryPreview] = []
+        for entry in scanner.scan(root: rootURL).allEntries {
+            try Task.checkCancellation()
+            let entryURL = rootURL.appendingRelativePath(entry.relativePath)
+            guard let transcript = TranscriptOriginal.load(
+                from: TranscriptOriginal.url(inEntry: entryURL)
+            ) else { continue }
+            let corrections = VocabularyReapply.preview(
+                terms: terms, protectedBy: allTerms, transcript: transcript
+            )
+            if !corrections.isEmpty {
+                previews.append(.init(
+                    entryRelativePath: entry.relativePath, corrections: corrections
+                ))
+            }
+        }
+        return previews
+    }
+
+    /// VOC-4 apply: corrects the approved entries' JSON, regenerates
+    /// still-generated markdown, and resyncs the search index.
+    func applyVocabularyReapply(
+        terms: [String], toEntriesAt paths: [RelativePath]
+    ) throws -> VocabularyReapplyApplier.Summary {
+        let summary = try VocabularyReapplyApplier(vaultRoot: rootURL).apply(
+            terms: terms, protectedBy: vocabularyTerms(), toEntriesAt: paths
+        )
+        synchronizeSearchIndex(relativePaths: summary.changedEntryPaths)
+        return summary
+    }
+
     // MARK: - Trash
 
     func trashItem(atRelativePath relPath: RelativePath) throws {

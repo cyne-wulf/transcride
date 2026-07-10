@@ -125,6 +125,14 @@ struct VocabularySection: View {
     @State private var rows: [Row] = []
     @State private var newTerm = ""
     @State private var loaded = false
+    /// Terms added this session and not yet offered for re-apply (VOC-4).
+    @State private var pendingReapplyTerms: [String] = []
+    @State private var reapplyRequest: ReapplyRequest?
+
+    private struct ReapplyRequest: Identifiable {
+        let id = UUID()
+        var terms: [String]
+    }
 
     var body: some View {
         Section("Custom Vocabulary") {
@@ -153,10 +161,47 @@ struct VocabularySection: View {
                     Button("Add", action: addTerm)
                         .disabled(newTerm.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-                Text("Names and jargon listed here are corrected in every transcript (and passed to models that support biasing). Saved to vocabulary.txt in the vault.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if !pendingReapplyTerms.isEmpty {
+                    HStack {
+                        Text(offerText)
+                            .font(.caption)
+                        Spacer()
+                        Button("Preview…") {
+                            reapplyRequest = ReapplyRequest(terms: pendingReapplyTerms)
+                        }
+                        Button {
+                            pendingReapplyTerms = []
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss")
+                    }
+                }
+                HStack {
+                    Text("Names and jargon listed here are corrected in every transcript (and passed to models that support biasing). Saved to vocabulary.txt in the vault.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Re-apply to Existing Transcripts…") {
+                        let terms = rows
+                            .map { $0.text.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }
+                        reapplyRequest = ReapplyRequest(terms: terms)
+                    }
+                    .disabled(rows.allSatisfy {
+                        $0.text.trimmingCharacters(in: .whitespaces).isEmpty
+                    })
+                    .help("Check every existing transcript against the whole vocabulary")
+                }
             }
+        }
+        .sheet(item: $reapplyRequest) { request in
+            VocabularyReapplySheet(terms: request.terms)
+                .onDisappear {
+                    pendingReapplyTerms.removeAll { request.terms.contains($0) }
+                }
         }
         .task(id: model.vaultURL) {
             rows = await model.vocabularyTerms().map { Row(text: $0) }
@@ -168,11 +213,21 @@ struct VocabularySection: View {
         }
     }
 
+    private var offerText: String {
+        pendingReapplyTerms.count == 1
+            ? "Check existing transcripts for “\(pendingReapplyTerms[0])”?"
+            : "Check existing transcripts for the \(pendingReapplyTerms.count) new terms?"
+    }
+
     private func addTerm() {
         let term = newTerm.trimmingCharacters(in: .whitespaces)
         guard !term.isEmpty else { return }
         rows.append(Row(text: term))
         newTerm = ""
+        // Offer re-apply for completed additions only — never per keystroke.
+        if !pendingReapplyTerms.contains(term) {
+            pendingReapplyTerms.append(term)
+        }
     }
 
     private func persist() {
