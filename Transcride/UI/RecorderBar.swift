@@ -5,30 +5,43 @@ import SwiftUI
 /// pause/stop while recording. The library stays fully usable throughout.
 struct RecorderBar: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(AppModel.PreferenceKey.preferredMicUID) private var preferredMicUID = ""
     @AppStorage(LiveTranscriber.enabledKey) private var liveTranscription = false
 
     private var recorder: RecorderService { model.recorder }
+    private var isCaptureShelfVisible: Bool {
+        recorder.state == .recording || recorder.state == .paused
+    }
 
     var body: some View {
-        HStack(spacing: 12) {
+        Group {
             switch recorder.state {
             case .idle:
-                idleControls
+                HStack(spacing: 12) {
+                    idleControls
+                }
             case .recording, .paused:
                 recordingControls
             case .finalizing:
-                ProgressView().controlSize(.small)
-                Text("Finalizing recording…")
-                    .foregroundStyle(.secondary)
-                Spacer()
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    Text("Finalizing recording…")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .frame(height: 56)
+        .frame(height: isCaptureShelfVisible ? 184 : 56)
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.28),
+            value: isCaptureShelfVisible
+        )
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
+        .accessibilityIdentifier("recorder-bar")
         .alert(
             "Recording Problem",
             isPresented: Binding(
@@ -113,28 +126,40 @@ struct RecorderBar: View {
 
     @ViewBuilder
     private var recordingControls: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(recorder.state == .paused ? Color.orange : Color.red)
-                .frame(width: 9, height: 9)
-            Text(recorder.state == .paused ? "Paused" : "Recording")
-                .foregroundStyle(.secondary)
-                .font(.callout)
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(recorder.state == .paused ? Color.orange : Color.red)
+                        .frame(width: 10, height: 10)
+                    Text(recorder.state == .paused ? "Paused" : "Recording")
+                        .foregroundStyle(.secondary)
+                        .font(.callout.weight(.medium))
+                }
+                .frame(width: 112, alignment: .leading)
+
+                Spacer(minLength: 12)
+
+                Text(formatElapsed(recorder.elapsed))
+                    .font(.title2.monospacedDigit())
+                    .contentTransition(.numericText())
+                    .frame(minWidth: 96, alignment: .trailing)
+
+                pauseResumeButton
+                stopButton
+                zenButton
+            }
+
+            LiveWaveformView(peaks: recorder.livePeaks)
+                .frame(maxWidth: .infinity)
+                .frame(height: 88)
+                .padding(.horizontal, 10)
+                .background(.quaternary.opacity(0.28), in: RoundedRectangle(cornerRadius: 10))
+                .opacity(recorder.state == .paused ? 0.42 : 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(recorder.state == .paused ? "Paused recording waveform" : "Live recording waveform")
+                .accessibilityIdentifier("live-recording-waveform")
         }
-        .frame(width: 100, alignment: .leading)
-
-        LiveWaveformView(peaks: recorder.livePeaks)
-            .frame(maxWidth: .infinity)
-            .frame(height: 32)
-            .opacity(recorder.state == .paused ? 0.4 : 1)
-
-        Text(formatElapsed(recorder.elapsed))
-            .font(.title3.monospacedDigit())
-            .frame(minWidth: 76, alignment: .trailing)
-
-        pauseResumeButton
-        stopButton
-        zenButton
     }
 
     private var pauseResumeButton: some View {
@@ -153,10 +178,15 @@ struct RecorderBar: View {
         Button {
             Task { await model.stopRecording() }
         } label: {
-            Image(systemName: "stop.circle.fill")
-                .font(.system(size: 24))
+            RecordingStopIndicator(
+                isRecording: recorder.state == .recording,
+                reduceMotion: reduceMotion
+            )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Stop and Save Recording")
+        .accessibilityHint("Stops recording and saves it to the current vault")
+        .accessibilityIdentifier("stop-recording-button")
         .help("Stop and Save")
     }
 
@@ -168,5 +198,39 @@ struct RecorderBar: View {
         }
         .buttonStyle(.borderless)
         .help("Zen Mode (Z) — a distraction-free recording view")
+    }
+}
+
+/// The active stop action doubles as the unmistakable recording indicator.
+/// TimelineView owns no repeating task or timer, and automatically pauses when
+/// capture stops or Reduce Motion is enabled. Paused recordings keep the same
+/// clear stop affordance without implying that audio is still being captured.
+private struct RecordingStopIndicator: View {
+    let isRecording: Bool
+    let reduceMotion: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isRecording || reduceMotion)) { context in
+            let phase = isRecording && !reduceMotion
+                ? (context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.35) / 1.35)
+                : 0
+            let wave = (sin(phase * .pi * 2 - .pi / 2) + 1) / 2
+
+            ZStack {
+                if isRecording {
+                    Circle()
+                        .stroke(Color.red.opacity(reduceMotion ? 0.5 : 0.18 + 0.32 * wave), lineWidth: 2)
+                        .scaleEffect(reduceMotion ? 1.14 : 1.04 + 0.18 * wave)
+                }
+
+                Circle()
+                    .fill(Color.red.opacity(isRecording ? 0.9 + 0.1 * wave : 0.78))
+
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(.white)
+                    .frame(width: 12, height: 12)
+            }
+            .frame(width: 34, height: 34)
+        }
     }
 }
