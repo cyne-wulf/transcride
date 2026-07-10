@@ -1,6 +1,59 @@
 import AppKit
 import SwiftUI
 
+/// AppKit styling shared by the immutable and safely mapped edited transcript
+/// surfaces. Voice Memos distinguishes the spoken word with luminance rather
+/// than a selection-shaped box: surrounding copy recedes, while the active
+/// run returns to the primary label color with a small zero-offset glow.
+private enum TranscriptPlaybackWordStyle {
+    static let temporaryKeys: [NSAttributedString.Key] = [
+        .foregroundColor,
+        .shadow,
+    ]
+
+    static func clearPlaybackAttributes(
+        from layoutManager: NSLayoutManager?,
+        in range: NSRange
+    ) {
+        for key in temporaryKeys {
+            layoutManager?.removeTemporaryAttribute(key, forCharacterRange: range)
+        }
+    }
+
+    static func subdueTranscript(
+        in layoutManager: NSLayoutManager?,
+        range: NSRange
+    ) {
+        guard range.length > 0 else { return }
+        layoutManager?.addTemporaryAttribute(
+            .foregroundColor,
+            value: NSColor.secondaryLabelColor,
+            forCharacterRange: range
+        )
+    }
+
+    static func illuminateWord(
+        in layoutManager: NSLayoutManager?,
+        range: NSRange
+    ) {
+        let glow = NSShadow()
+        glow.shadowOffset = .zero
+        glow.shadowBlurRadius = 4
+        // `labelColor` is appearance-aware: this becomes a pale glow in dark
+        // mode and a restrained dark halo in light mode, retaining contrast in
+        // both without introducing an accent-colored selection rectangle.
+        glow.shadowColor = NSColor.labelColor.withAlphaComponent(0.42)
+
+        layoutManager?.addTemporaryAttributes(
+            [
+                .foregroundColor: NSColor.labelColor,
+                .shadow: glow,
+            ],
+            forCharacterRange: range
+        )
+    }
+}
+
 /// The layered note surface for Milestone 4. The immutable original and the
 /// editable Markdown document deliberately use separate AppKit text views so
 /// there is no UI path that can mutate engine output.
@@ -612,7 +665,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
             paragraph.paragraphSpacing = 12
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 17, weight: .medium),
-                .foregroundColor: NSColor.labelColor,
+                .foregroundColor: NSColor.secondaryLabelColor,
                 .paragraphStyle: paragraph,
             ]
             textView.textStorage?.setAttributedString(
@@ -623,18 +676,25 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
         func updateHighlights(playbackWordIndex: Int?, navigationRange: NSRange?) {
             guard let textView else { return }
             let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+            TranscriptPlaybackWordStyle.clearPlaybackAttributes(
+                from: textView.layoutManager,
+                in: fullRange
+            )
             textView.layoutManager?.removeTemporaryAttribute(
                 .backgroundColor, forCharacterRange: fullRange
+            )
+            TranscriptPlaybackWordStyle.subdueTranscript(
+                in: textView.layoutManager,
+                range: fullRange
             )
 
             let wordChanged = highlightedWordIndex != playbackWordIndex
             highlightedWordIndex = playbackWordIndex
             if let playbackWordIndex,
                let range = parent.map.range(forWordAt: playbackWordIndex) {
-                textView.layoutManager?.addTemporaryAttribute(
-                    .backgroundColor,
-                    value: NSColor.controlAccentColor.withAlphaComponent(0.30),
-                    forCharacterRange: NSRange(range)
+                TranscriptPlaybackWordStyle.illuminateWord(
+                    in: textView.layoutManager,
+                    range: NSRange(range)
                 )
                 if wordChanged, !parent.followingPaused { scrollToWord(playbackWordIndex) }
             }
@@ -824,21 +884,28 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
             guard let textView else { return }
             let stringLength = (textView.string as NSString).length
             let fullRange = NSRange(location: 0, length: stringLength)
+            TranscriptPlaybackWordStyle.clearPlaybackAttributes(
+                from: textView.layoutManager,
+                in: fullRange
+            )
             textView.layoutManager?.removeTemporaryAttribute(
                 .backgroundColor, forCharacterRange: fullRange
             )
 
             appliedHighlightRange = nil
-            guard textView.window?.firstResponder !== textView,
+            guard !parent.isEditable,
                   let range = parent.highlightRange,
                   NSMaxRange(range) <= stringLength else {
                 applyNavigationHighlight(to: textView, stringLength: stringLength)
                 return
             }
-            textView.layoutManager?.addTemporaryAttribute(
-                .backgroundColor,
-                value: NSColor.controlAccentColor.withAlphaComponent(0.24),
-                forCharacterRange: range
+            TranscriptPlaybackWordStyle.subdueTranscript(
+                in: textView.layoutManager,
+                range: fullRange
+            )
+            TranscriptPlaybackWordStyle.illuminateWord(
+                in: textView.layoutManager,
+                range: range
             )
             appliedHighlightRange = range
             applyNavigationHighlight(to: textView, stringLength: stringLength)
