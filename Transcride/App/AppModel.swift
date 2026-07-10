@@ -907,6 +907,25 @@ final class AppModel {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    // MARK: - Obsidian interop (EXP-2 adjacent)
+
+    /// True when the open vault is also an Obsidian vault (has `.obsidian/`),
+    /// which is what makes "Open in Obsidian" resolvable.
+    var vaultHasObsidianConfig: Bool {
+        guard let vaultURL else { return false }
+        return ObsidianLink.isObsidianVault(vaultURL)
+    }
+
+    /// Opens this entry's transcript file in Obsidian via its URI scheme.
+    func openInObsidian(entry: Entry) {
+        guard let vaultURL,
+              let fileURL = TranscriptFile.url(
+                  inEntry: vaultURL.appendingRelativePath(entry.relativePath)
+              ),
+              let link = ObsidianLink.openURL(forPath: fileURL.path) else { return }
+        NSWorkspace.shared.open(link)
+    }
+
     func readTranscript(for entry: Entry) async -> FrontmatterDocument? {
         await service?.readTranscript(atEntryPath: entry.relativePath)
     }

@@ -15,6 +15,7 @@ struct EntryDetailView: View {
     @State private var showingDeleteAudio = false
     @State private var deleteAudioByteSize: Int64?
     @State private var isTrimming = false
+    @State private var showingExport = false
 
     var body: some View {
         Group {
@@ -180,6 +181,24 @@ struct EntryDetailView: View {
                                 ?? "Select the range of audio to keep")
                     }
                     Button("Duplicate Entry") { Task { await model.duplicateEntry(entry) } }
+                    Divider()
+                    Button("Export Markdown…") { showingExport = true }
+                        .disabled(original == nil && document == nil)
+                        .help("Write this note as a clean .md file into a folder")
+                    if entry.hasAudio, let audioURL = model.audioURL(for: entry) {
+                        ShareLink(item: audioURL) {
+                            Label("Share Audio…", systemImage: "square.and.arrow.up")
+                        }
+                        .help("Send the audio file with AirDrop, Messages, Mail…")
+                    } else if entry.audioDeleted {
+                        Button("Share Audio…") {}
+                            .disabled(true)
+                            .help(entry.audioUnavailableExplanation ?? "")
+                    }
+                    if model.vaultHasObsidianConfig, entry.hasTranscript {
+                        Button("Open in Obsidian") { model.openInObsidian(entry: entry) }
+                            .help("Open this note in Obsidian")
+                    }
                     if entry.hasAudio || entry.audioDeleted {
                         Divider()
                         Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
@@ -213,6 +232,9 @@ struct EntryDetailView: View {
         }
         .sheet(isPresented: $showingRetranscribe) {
             RetranscribeSheet(entry: entry)
+        }
+        .sheet(isPresented: $showingExport) {
+            ExportMarkdownSheet(entry: entry, original: original, document: document)
         }
         .confirmationDialog(
             "Delete the audio from “\(entry.displayTitle)”?",
@@ -491,10 +513,29 @@ private struct PlaybackSection: View {
                     Text("0:00")
                     Spacer()
                     Text(EntryListView.formatDuration(player.duration))
+                        .padding(.trailing, audioDragURL == nil ? 0 : 2)
+                    audioDragChip
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var audioDragURL: URL? {
+        model.audioURL(for: entry)
+    }
+
+    /// Drag-out of the audio file (EXP-3's "plus"): drop the chip on Finder,
+    /// Mail, Messages, … to copy the file out of the vault.
+    @ViewBuilder
+    private var audioDragChip: some View {
+        if let audioDragURL {
+            Image(systemName: "square.and.arrow.up")
+                .foregroundStyle(.tertiary)
+                .onDrag { NSItemProvider(contentsOf: audioDragURL) ?? NSItemProvider() }
+                .help("Drag out to copy the audio file — or use More → Share Audio…")
+                .accessibilityLabel("Drag out audio file")
         }
     }
 
