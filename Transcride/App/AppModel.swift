@@ -754,6 +754,17 @@ final class AppModel {
         }
     }
 
+    // MARK: - Intents (speaker rename, TRN-6)
+
+    /// Applies speaker renames (machine id → display name; nil/empty removes)
+    /// and reloads the open transcript so the new labels render everywhere.
+    func renameSpeakers(_ names: [String: String?], for entry: Entry) async {
+        await perform("renameSpeakers [\(entry.relativePath)]") { service in
+            try await service.saveSpeakerNames(names, atEntryPath: entry.relativePath)
+            await MainActor.run { self.transcriptRevision += 1 }
+        }
+    }
+
     // MARK: - Intents (trash)
 
     func restoreTrashItem(_ item: TrashItem) async {

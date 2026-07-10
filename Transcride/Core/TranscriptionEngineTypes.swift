@@ -7,12 +7,22 @@ struct TranscriptionOptions: Sendable, Equatable {
     /// Vocabulary terms, given to engines whose capability flags say they can
     /// bias natively. The correction backstop runs for every engine regardless.
     var vocabulary: [String] = []
+    /// Speaker detection (TRN-6): run the diarizer after transcription and
+    /// fill `speaker` in the segments. Engines ignore this — diarization is a
+    /// separate post-pass in the queue.
+    var detectSpeakers: Bool = false
+    /// Exact speaker count when the user knows it; nil = auto-detect.
+    var speakerCount: Int?
 
     /// Flat string form recorded in the transcript's engine metadata (ENG-4).
     var metadataDictionary: [String: String] {
         var dict: [String: String] = [:]
         if let languageHint { dict["language_hint"] = languageHint }
         if !vocabulary.isEmpty { dict["vocabulary_terms"] = String(vocabulary.count) }
+        if detectSpeakers {
+            dict["speaker_detection"] = "true"
+            if let speakerCount { dict["speaker_count"] = String(speakerCount) }
+        }
         return dict
     }
 }

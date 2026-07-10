@@ -43,6 +43,8 @@ struct TranscriptEditDocument: Equatable, Sendable {
 
     /// Explicit M4 state wins. Comparison remains the backstop for edits made
     /// externally by Obsidian or another editor that does not know our flag.
+    /// The comparison regenerates with the document's own speaker renames, so
+    /// a diarized body whose labels were renamed still counts as generated.
     static func isForked(
         _ document: FrontmatterDocument,
         comparedTo original: TranscriptOriginal?
@@ -50,6 +52,8 @@ struct TranscriptEditDocument: Equatable, Sendable {
         if document.handEdited { return true }
         if TranscriptMarkdown.isStubBody(document.body) { return false }
         guard let original else { return true }
-        return !TranscriptMarkdown.isGeneratedBody(document.body, from: original)
+        return !TranscriptMarkdown.isGeneratedBody(
+            document.body, from: original, speakerNames: SpeakerNames.names(in: document)
+        )
     }
 }

@@ -15,35 +15,26 @@ struct TranscriptWordMap: Equatable, Sendable {
 
     let renderedText: String
     let spans: [Span]
+    /// Rendered speaker labels (`**Name:**` runs) for diarized transcripts.
+    /// Labels are separator text: they never resolve to a word and never
+    /// highlight, but the view styles them and routes clicks to rename.
+    let speakerLabels: [TranscriptRendering.SpeakerLabel]
 
-    init(transcript: TranscriptOriginal) {
-        var text = ""
-        var spans: [Span] = []
-        var previousEnd: TimeInterval?
-
-        for (wordIndex, word) in transcript.allWords.enumerated() {
-            let wordText = word.text.trimmingCharacters(in: .whitespaces)
-            guard !wordText.isEmpty else { continue }
-
-            if let previousEnd {
-                text += word.start - previousEnd >= TranscriptMarkdown.paragraphPauseThreshold
-                    ? "\n\n"
-                    : " "
-            }
-            let lowerBound = text.utf16.count
-            text += wordText
-            let upperBound = text.utf16.count
-            spans.append(Span(
-                wordIndex: wordIndex,
-                range: lowerBound..<upperBound,
-                startTime: word.start,
-                endTime: word.end
-            ))
-            previousEnd = word.end
+    init(transcript: TranscriptOriginal, speakerNames: [String: String] = [:]) {
+        // The map shares TranscriptMarkdown's rendering walk, so renderedText
+        // stays byte-identical to the generated body — search offsets, word
+        // runs, and markdown all live in one coordinate space.
+        let rendering = TranscriptMarkdown.rendering(from: transcript, speakerNames: speakerNames)
+        renderedText = rendering.text
+        spans = rendering.words.map {
+            Span(
+                wordIndex: $0.wordIndex,
+                range: $0.range,
+                startTime: $0.startTime,
+                endTime: $0.endTime
+            )
         }
-
-        self.renderedText = text
-        self.spans = spans
+        speakerLabels = rendering.labels
     }
 
     func range(forWordAt wordIndex: Int) -> Range<Int>? {
@@ -51,9 +42,15 @@ struct TranscriptWordMap: Equatable, Sendable {
     }
 
     /// Returns a word only when the character is inside its rendered run.
-    /// Separating spaces and paragraph breaks deliberately return nil.
+    /// Separating spaces, paragraph breaks and speaker labels deliberately
+    /// return nil.
     func wordIndex(containingUTF16Offset offset: Int) -> Int? {
         spans.first(where: { $0.range.contains(offset) })?.wordIndex
+    }
+
+    /// The speaker label under a character, for click-to-rename (TRN-6).
+    func speakerLabel(containingUTF16Offset offset: Int) -> TranscriptRendering.SpeakerLabel? {
+        speakerLabels.first(where: { $0.range.contains(offset) })
     }
 
     /// Best-effort lookup for clicks or search offsets that land on separator

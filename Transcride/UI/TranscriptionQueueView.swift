@@ -109,9 +109,20 @@ private struct TranscriptionQueuePopover: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 case .running:
-                    // No engine progress yet means the model is still loading
-                    // (first load compiles for the Neural Engine — minutes).
-                    if (queue.progressByItemID[item.id] ?? 0) <= 0.001 {
+                    if queue.speakerPhaseItemIDs.contains(item.id) {
+                        HStack(spacing: 6) {
+                            ProgressView(value: queue.progressByItemID[item.id] ?? 0)
+                                .progressViewStyle(.linear)
+                                .controlSize(.small)
+                            Text("Detecting speakers…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize()
+                        }
+                    } else if (queue.progressByItemID[item.id] ?? 0) <= 0.001 {
+                        // No engine progress yet means the model is still
+                        // loading (first load compiles for the Neural
+                        // Engine — minutes).
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.mini)
                             Text("Preparing model…")

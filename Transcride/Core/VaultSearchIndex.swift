@@ -355,11 +355,15 @@ final class VaultSearchIndex: @unchecked Sendable {
         var records: [SearchRecord] = []
         var title = EntryFolderName(parsing: relativePath.lastComponent)?.slug?
             .split(separator: "-").joined(separator: " ").capitalized ?? ""
+        // Rendered with the entry's speaker renames so original-layer match
+        // offsets index straight into the synced view's word map.
+        var speakerNames: [String: String] = [:]
         let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
         if let markdownURL = TranscriptFile.url(inEntry: entryURL),
            let text = try? String(contentsOf: markdownURL, encoding: .utf8) {
             let document = FrontmatterDocument.parse(text)
             title = document.title ?? title
+            speakerNames = SpeakerNames.names(in: document)
             // Before the first edit, transcript.md is merely the generated
             // projection of Original. Indexing it twice produces two visually
             // identical results. A real fork (including an external edit
@@ -375,7 +379,7 @@ final class VaultSearchIndex: @unchecked Sendable {
                 entryPath: relativePath,
                 layer: .original,
                 title: title,
-                content: TranscriptMarkdown.body(from: original)
+                content: TranscriptMarkdown.body(from: original, speakerNames: speakerNames)
             ))
         }
         return records

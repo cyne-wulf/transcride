@@ -41,16 +41,24 @@ final class ModelManager {
         states[id] ?? .checking
     }
 
-    /// Re-checks every catalog model's on-disk state.
+    /// Resolves a model id to whatever manages its files: an ASR engine from
+    /// the registry, or the diarizer (TRN-6), which shares the same
+    /// download/delete surface without being a transcription engine.
+    private func managing(forID id: String) async -> (any ModelManaging)? {
+        if id == ModelCatalog.speakerDiarization.id { return DiarizationEngine.shared }
+        return await EngineRegistry.shared.engine(forModelInfoID: id)
+    }
+
+    /// Re-checks every managed model's on-disk state.
     func refresh() async {
-        for info in ModelCatalog.available {
+        for info in ModelCatalog.available + [ModelCatalog.speakerDiarization] {
             await refreshModel(info.id)
         }
     }
 
     func refreshModel(_ id: String) async {
         guard downloadTasks[id] == nil else { return } // don't fight a download
-        guard let engine = await EngineRegistry.shared.engine(forModelInfoID: id) else {
+        guard let engine = await managing(forID: id) else {
             states[id] = .failed("Unknown model")
             return
         }
@@ -67,7 +75,7 @@ final class ModelManager {
         guard downloadTasks[id] == nil else { return }
         states[id] = .downloading(0)
         let task = Task { [weak self] in
-            guard let engine = await EngineRegistry.shared.engine(forModelInfoID: id) else {
+            guard let engine = await self?.managing(forID: id) else {
                 await MainActor.run { self?.states[id] = .failed("Unknown model") }
                 return
             }
@@ -100,7 +108,7 @@ final class ModelManager {
     }
 
     func delete(_ id: String) async {
-        guard let engine = await EngineRegistry.shared.engine(forModelInfoID: id) else { return }
+        guard let engine = await managing(forID: id) else { return }
         do {
             try await engine.deleteModel()
         } catch {
@@ -112,6 +120,6 @@ final class ModelManager {
 
     /// On-disk folder of a downloaded model, for "Show in Finder".
     func modelDirectory(forModelInfoID id: String) async -> URL? {
-        await EngineRegistry.shared.engine(forModelInfoID: id)?.modelDirectory()
+        await managing(forID: id)?.modelDirectory()
     }
 }

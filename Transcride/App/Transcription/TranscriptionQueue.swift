@@ -9,6 +9,9 @@ import Observation
 final class TranscriptionQueue {
     private(set) var items: [TranscriptionQueueItem] = []
     private(set) var progressByItemID: [String: Double] = [:]
+    /// Items currently in the diarization post-pass (TRN-6), so the UI can
+    /// say "Detecting speakers…" instead of "Transcribing…".
+    private(set) var speakerPhaseItemIDs: Set<String> = []
 
     /// Called after each successful transcription with the item's original
     /// entry path and the applier's outcome (the path may have changed via
@@ -46,13 +49,17 @@ final class TranscriptionQueue {
         entryRelativePath: RelativePath,
         source: String,
         isRetranscribe: Bool = false,
-        modelID: String = ModelCatalog.preferredDefaultModelID()
+        modelID: String = ModelCatalog.preferredDefaultModelID(),
+        detectSpeakers: Bool = false,
+        speakerCount: Int? = nil
     ) {
         items.append(TranscriptionQueueItem(
             entryRelativePath: entryRelativePath,
             modelID: modelID,
             source: source,
             isRetranscribe: isRetranscribe,
+            detectSpeakers: detectSpeakers,
+            speakerCount: speakerCount,
             createdAt: .now
         ))
         persist()
@@ -176,6 +183,7 @@ final class TranscriptionQueue {
             items.removeAll { $0.id == item.id } // success, or notFound drop
         }
         progressByItemID[item.id] = nil
+        speakerPhaseItemIDs.remove(item.id)
         persist()
     }
 
@@ -194,16 +202,19 @@ final class TranscriptionQueue {
         }
 
         let vocabulary = await service.vocabularyTerms()
+        let detectSpeakers = item.detectSpeakers && info.supportsDiarization
         let options = TranscriptionOptions(
             languageHint: nil,
-            vocabulary: info.supportsVocabularyBiasing ? vocabulary : []
+            vocabulary: info.supportsVocabularyBiasing ? vocabulary : [],
+            detectSpeakers: detectSpeakers,
+            speakerCount: detectSpeakers ? item.speakerCount : nil
         )
 
         let audioURL = vaultRoot
             .appendingRelativePath(item.entryRelativePath)
             .appending(path: audioFileName)
         let itemID = item.id
-        let segments = try await engine.transcribe(
+        var segments = try await engine.transcribe(
             audioURL: audioURL, options: options
         ) { [weak self] fraction in
             Task { @MainActor [weak self] in
@@ -212,6 +223,33 @@ final class TranscriptionQueue {
             }
         }
         try Task.checkCancellation()
+
+        // Speaker detection (TRN-6): a separate diarizer pass over the same
+        // file, fused into the segments before anything is written.
+        if detectSpeakers {
+            guard await DiarizationEngine.shared.isDownloaded() else {
+                throw TranscriptionError.modelNotDownloaded(
+                    "Speaker Detection — download it in Settings → Transcription"
+                )
+            }
+            speakerPhaseItemIDs.insert(itemID)
+            defer { speakerPhaseItemIDs.remove(itemID) }
+            progressByItemID[itemID] = 0
+            let turns = try await DiarizationEngine.shared.diarize(
+                audioURL: audioURL, speakerCount: item.speakerCount
+            ) { [weak self] fraction in
+                Task { @MainActor [weak self] in
+                    guard let self, self.progressByItemID[itemID] != nil else { return }
+                    self.progressByItemID[itemID] = fraction
+                }
+            }
+            try Task.checkCancellation()
+            segments = SpeakerAssigner.apply(turns: turns, to: segments)
+            DebugLog.append(
+                "diarized [\(item.entryRelativePath)]: \(turns.count) turns, "
+                    + "\(Set(turns.map(\.speakerID)).count) speakers"
+            )
+        }
 
         let bundle = Bundle.main
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"

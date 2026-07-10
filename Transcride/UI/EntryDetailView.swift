@@ -263,9 +263,14 @@ struct EntryDetailView: View {
                 ProgressView().controlSize(.small)
                 Text("Waiting to transcribe…")
             case .running:
-                // No engine progress yet means the model is still loading
-                // (first load compiles for the Neural Engine — minutes).
-                if (queue.progressByItemID[item.id] ?? 0) <= 0.001 {
+                if queue.speakerPhaseItemIDs.contains(item.id) {
+                    ProgressView(value: queue.progressByItemID[item.id] ?? 0)
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: 240)
+                    Text("Detecting speakers…")
+                } else if (queue.progressByItemID[item.id] ?? 0) <= 0.001 {
+                    // No engine progress yet means the model is still loading
+                    // (first load compiles for the Neural Engine — minutes).
                     ProgressView().controlSize(.small)
                     Text("Preparing model…")
                 } else {

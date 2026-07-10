@@ -20,6 +20,10 @@ struct TranscriptionModelsSection: View {
             ForEach(ModelCatalog.available) { info in
                 ModelRow(info: info)
             }
+            ModelRow(info: ModelCatalog.speakerDiarization)
+            Text("Speaker detection labels who said what (Speaker 1, Speaker 2, …) when enabled in the Retranscribe dialog. One download serves every model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .task { await model.modelManager.refresh() }
     }

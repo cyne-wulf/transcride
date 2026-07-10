@@ -15,6 +15,10 @@ struct TranscriptionQueueItem: Codable, Equatable, Identifiable, Sendable {
     /// "recorded" / "imported" / "retranscribe" — for display and debugging.
     var source: String
     var isRetranscribe: Bool
+    /// Speaker detection (TRN-6): run the diarizer post-pass for this item.
+    var detectSpeakers: Bool
+    /// Exact speaker count hint; nil = auto.
+    var speakerCount: Int?
     var createdAt: Date
     var state: State
     var errorMessage: String?
@@ -24,6 +28,8 @@ struct TranscriptionQueueItem: Codable, Equatable, Identifiable, Sendable {
         modelID: String,
         source: String,
         isRetranscribe: Bool = false,
+        detectSpeakers: Bool = false,
+        speakerCount: Int? = nil,
         createdAt: Date,
         state: State = .waiting,
         errorMessage: String? = nil,
@@ -34,9 +40,27 @@ struct TranscriptionQueueItem: Codable, Equatable, Identifiable, Sendable {
         self.modelID = modelID
         self.source = source
         self.isRetranscribe = isRetranscribe
+        self.detectSpeakers = detectSpeakers
+        self.speakerCount = speakerCount
         self.createdAt = createdAt
         self.state = state
         self.errorMessage = errorMessage
+    }
+
+    // Tolerant decode: queue files written before speaker detection existed
+    // have no `detectSpeakers`/`speakerCount` keys.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        entryRelativePath = try c.decode(RelativePath.self, forKey: .entryRelativePath)
+        modelID = try c.decode(String.self, forKey: .modelID)
+        source = try c.decode(String.self, forKey: .source)
+        isRetranscribe = try c.decode(Bool.self, forKey: .isRetranscribe)
+        detectSpeakers = try c.decodeIfPresent(Bool.self, forKey: .detectSpeakers) ?? false
+        speakerCount = try c.decodeIfPresent(Int.self, forKey: .speakerCount)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        state = try c.decode(State.self, forKey: .state)
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
     }
 }
 

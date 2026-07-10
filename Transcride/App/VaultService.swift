@@ -269,6 +269,35 @@ actor VaultService {
         return VaultScanner.audioFile(in: fileNames)
     }
 
+    /// Speaker rename (TRN-6): stores machine-id → display-name mappings in
+    /// the entry's frontmatter (`speaker_s1: "Alice"`; nil/empty removes) and
+    /// regenerates the markdown labels for a never-hand-edited entry. The
+    /// JSON keeps the stable machine ids untouched.
+    func saveSpeakerNames(
+        _ names: [String: String?], atEntryPath relPath: RelativePath
+    ) throws {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        guard let transcriptURL = TranscriptFile.url(inEntry: entryURL),
+              let text = try? String(contentsOf: transcriptURL, encoding: .utf8) else {
+            throw VaultError.notFound("Transcript for \(relPath)")
+        }
+        var doc = FrontmatterDocument.parse(text)
+        let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
+        // Decide regenerability against the *current* names before applying
+        // the rename, so a previously regenerated labeled body still matches.
+        let regenerable = !TranscriptEditDocument.isForked(doc, comparedTo: original)
+        for (id, name) in names {
+            SpeakerNames.set(name: name, forID: id, in: &doc)
+        }
+        if regenerable, let original {
+            doc.body = "\n" + TranscriptMarkdown.body(
+                from: original, speakerNames: SpeakerNames.names(in: doc)
+            ) + "\n"
+        }
+        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+        synchronizeSearchIndex(relativePaths: [relPath])
+    }
+
     func vocabularyTerms() -> [String] {
         VocabularyFile.load(fromVault: rootURL)
     }

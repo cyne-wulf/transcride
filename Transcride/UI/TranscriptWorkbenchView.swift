@@ -88,10 +88,21 @@ struct TranscriptWorkbenchView: View {
     @State private var findMatchIndex = 0
     @State private var searchNavigationRange: NSRange?
     @State private var handledNavigationRequestID: UUID?
+    @State private var showingSpeakerRename = false
     @FocusState private var findFieldFocused: Bool
 
+    /// User-chosen display names for machine speaker ids (TRN-6), from the
+    /// entry's frontmatter.
+    private var speakerNames: [String: String] {
+        document.map { SpeakerNames.names(in: $0) } ?? [:]
+    }
+
     private var wordMap: TranscriptWordMap? {
-        original.map(TranscriptWordMap.init)
+        original.map { TranscriptWordMap(transcript: $0, speakerNames: speakerNames) }
+    }
+
+    private var hasSpeakers: Bool {
+        original?.segments.contains { $0.speaker != nil } == true
     }
 
     private var isForked: Bool {
@@ -194,6 +205,15 @@ struct TranscriptWorkbenchView: View {
         .onAppear {
             if isForked { activeLayer = .edited }
         }
+        .sheet(isPresented: $showingSpeakerRename) {
+            if let original {
+                SpeakerRenameSheet(
+                    entry: entry,
+                    speakerIDs: SpeakerNames.speakerIDs(in: original),
+                    currentNames: speakerNames
+                )
+            }
+        }
         .onDisappear {
             let pendingSave = pendingSave
             pendingSave?.cancel()
@@ -227,6 +247,16 @@ struct TranscriptWorkbenchView: View {
             }
 
             Spacer()
+
+            if hasSpeakers {
+                Button {
+                    showingSpeakerRename = true
+                } label: {
+                    Label("Rename Speakers", systemImage: "person.2")
+                }
+                .disabled(isEditing || isSaving)
+                .help("Rename Speaker 1, Speaker 2, … — or click a label in the transcript")
+            }
 
             Button {
                 copyCurrentLayer()
@@ -311,12 +341,16 @@ struct TranscriptWorkbenchView: View {
                     map: wordMap,
                     currentWordIndex: currentWordIndex,
                     navigationHighlightRange: activeNavigationRange,
-                    followingPaused: $followingPaused
-                ) { wordIndex in
-                    searchNavigationRange = nil
-                    guard let time = wordMap.startTime(forWordAt: wordIndex) else { return }
-                    model.player.seek(to: time)
-                }
+                    followingPaused: $followingPaused,
+                    onWordClick: { wordIndex in
+                        searchNavigationRange = nil
+                        guard let time = wordMap.startTime(forWordAt: wordIndex) else { return }
+                        model.player.seek(to: time)
+                    },
+                    onSpeakerLabelClick: { _ in
+                        showingSpeakerRename = true
+                    }
+                )
                 .background(Color(nsColor: .windowBackgroundColor).opacity(0.72))
             } else {
                 ContentUnavailableView(
@@ -545,6 +579,8 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
     let navigationHighlightRange: NSRange?
     @Binding var followingPaused: Bool
     let onWordClick: (Int) -> Void
+    /// Clicking a rendered `**Speaker N:**` label opens rename (TRN-6).
+    let onSpeakerLabelClick: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -570,10 +606,12 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.onCharacterClick = { offset in
-            guard let wordIndex = context.coordinator.parent.map.wordIndex(containingUTF16Offset: offset) else {
-                return
+            let parent = context.coordinator.parent
+            if let label = parent.map.speakerLabel(containingUTF16Offset: offset) {
+                parent.onSpeakerLabelClick(label.speakerID)
+            } else if let wordIndex = parent.map.wordIndex(containingUTF16Offset: offset) {
+                parent.onWordClick(wordIndex)
             }
-            context.coordinator.parent.onWordClick(wordIndex)
         }
         scrollView.documentView = textView
         context.coordinator.textView = textView
@@ -589,10 +627,12 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.textView?.onCharacterClick = { offset in
-            guard let wordIndex = context.coordinator.parent.map.wordIndex(containingUTF16Offset: offset) else {
-                return
+            let parent = context.coordinator.parent
+            if let label = parent.map.speakerLabel(containingUTF16Offset: offset) {
+                parent.onSpeakerLabelClick(label.speakerID)
+            } else if let wordIndex = parent.map.wordIndex(containingUTF16Offset: offset) {
+                parent.onWordClick(wordIndex)
             }
-            context.coordinator.parent.onWordClick(wordIndex)
         }
         if context.coordinator.renderedText != map.renderedText {
             context.coordinator.renderBaseText()
@@ -662,6 +702,34 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
             textView.textStorage?.setAttributedString(
                 NSAttributedString(string: renderedText, attributes: attributes)
             )
+            // Speaker labels render semibold. The font is a permanent
+            // attribute (fonts affect layout, so they can't be temporary);
+            // color treatment happens per-highlight-pass below.
+            for label in parent.map.speakerLabels {
+                textView.textStorage?.addAttributes(
+                    [.font: NSFont.systemFont(ofSize: 17, weight: .semibold)],
+                    range: NSRange(label.range)
+                )
+            }
+        }
+
+        /// The rendered text keeps the markdown `**` so it stays byte-aligned
+        /// with the generated body and search index; drawing the asterisks
+        /// clear makes the label read as "Name:" with a little padding.
+        private func styleSpeakerLabels() {
+            guard let layoutManager = textView?.layoutManager else { return }
+            for label in parent.map.speakerLabels {
+                let range = NSRange(label.range)
+                guard range.length > 4 else { continue }
+                for asterisks in [
+                    NSRange(location: range.location, length: 2),
+                    NSRange(location: NSMaxRange(range) - 2, length: 2),
+                ] {
+                    layoutManager.addTemporaryAttribute(
+                        .foregroundColor, value: NSColor.clear, forCharacterRange: asterisks
+                    )
+                }
+            }
         }
 
         func updateHighlights(playbackWordIndex: Int?, navigationRange: NSRange?) {
@@ -678,6 +746,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
                 in: textView.layoutManager,
                 range: fullRange
             )
+            styleSpeakerLabels()
 
             let wordChanged = highlightedWordIndex != playbackWordIndex
             highlightedWordIndex = playbackWordIndex

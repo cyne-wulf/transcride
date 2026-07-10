@@ -60,7 +60,11 @@ struct TranscriptionApplier: Sendable {
         let regenerable = !TranscriptEditDocument.isForked(doc, comparedTo: previousOriginal)
         var markdownLeftAlone = false
         if regenerable {
-            doc.body = "\n" + TranscriptMarkdown.body(from: transcript) + "\n"
+            // Speaker renames stored in the frontmatter carry over into the
+            // regenerated labels; the JSON keeps the machine ids.
+            doc.body = "\n" + TranscriptMarkdown.body(
+                from: transcript, speakerNames: SpeakerNames.names(in: doc)
+            ) + "\n"
             doc.engine = engineFrontmatterID
             try AtomicFile.write(doc.serialized(), to: transcriptURL)
         } else {
@@ -77,7 +81,9 @@ struct TranscriptionApplier: Sendable {
             correctionCount: correctionCount
         )
         if doc.title == AutoTitle.placeholderTitle,
-           let title = AutoTitle.extract(fromTranscriptText: TranscriptMarkdown.body(from: transcript)) {
+           let title = AutoTitle.extract(
+               fromTranscriptText: TranscriptMarkdown.body(from: transcript, speakerLabels: false)
+           ) {
             do {
                 let newPath = try VaultOperations(vaultRoot: vaultRoot)
                     .renameEntry(at: relPath, toTitle: title)

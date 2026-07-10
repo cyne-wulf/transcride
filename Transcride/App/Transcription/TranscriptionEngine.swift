@@ -1,9 +1,9 @@
 import Foundation
 
-/// One transcription runtime bound to one concrete model (ENG-3). Async and
-/// cancellable throughout (cancellation = structured `Task` cancellation) so
-/// the protocol can host cloud engines in P2 without change.
-protocol TranscriptionEngine: Sendable {
+/// The downloadable-model management surface (ENG-2) shared by transcription
+/// engines and the diarizer, so `ModelManager` and the Settings rows drive
+/// them identically.
+protocol ModelManaging: Sendable {
     var info: TranscriptionModelInfo { get }
 
     func isDownloaded() async -> Bool
@@ -14,7 +14,12 @@ protocol TranscriptionEngine: Sendable {
     /// On-disk model folder for "Show in Finder", nil when not downloaded or
     /// system-managed (Apple Speech).
     func modelDirectory() async -> URL?
+}
 
+/// One transcription runtime bound to one concrete model (ENG-3). Async and
+/// cancellable throughout (cancellation = structured `Task` cancellation) so
+/// the protocol can host cloud engines in P2 without change.
+protocol TranscriptionEngine: ModelManaging {
     /// Transcribes one audio file into word-timed segments. `progress` is
     /// called with 0…1 fractions on an arbitrary queue.
     func transcribe(
@@ -39,7 +44,7 @@ enum ModelCatalog {
         ],
         downloadSizeBytes: 470_000_000,
         supportsVocabularyBiasing: false,
-        supportsDiarization: false
+        supportsDiarization: true
     )
 
     // Vocabulary biasing stays off for the turbo variant: its distilled
@@ -55,7 +60,7 @@ enum ModelCatalog {
         languageCodes: [],
         downloadSizeBytes: 650_000_000,
         supportsVocabularyBiasing: false,
-        supportsDiarization: false
+        supportsDiarization: true
     )
 
     static let whisperSmall = TranscriptionModelInfo(
@@ -67,7 +72,7 @@ enum ModelCatalog {
         languageCodes: [],
         downloadSizeBytes: 500_000_000,
         supportsVocabularyBiasing: true,
-        supportsDiarization: false
+        supportsDiarization: true
     )
 
     static let appleSpeech = TranscriptionModelInfo(
@@ -79,7 +84,22 @@ enum ModelCatalog {
         languageCodes: [],
         downloadSizeBytes: 0,
         supportsVocabularyBiasing: false,
-        supportsDiarization: false
+        supportsDiarization: true
+    )
+
+    /// The diarization model set (TRN-6). Not an ASR choice — it augments any
+    /// engine as a post-pass — so it lives outside `available` but shares the
+    /// same download/management machinery via `DiarizationEngine`.
+    static let speakerDiarization = TranscriptionModelInfo(
+        id: "speaker-diarization",
+        displayName: "Speaker Detection",
+        engineID: "fluidaudio-diarizer",
+        modelID: "speaker-diarization-coreml",
+        languagesDescription: "Labels speakers, works with every model",
+        languageCodes: [],
+        downloadSizeBytes: 22_000_000,
+        supportsVocabularyBiasing: false,
+        supportsDiarization: true
     )
 
     /// Models offered on this machine, dropdown order. Parakeet first — it's
