@@ -279,7 +279,7 @@ struct EntryDetailView: View {
             ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
         } ?? "its disk space"
         return "This frees \(size). The transcript is kept, and the audio "
-            + "can be restored from Recently Deleted for \(TrashStore.retentionDays) days."
+            + "can be restored from Recently Deleted for \(model.trashRetentionDays) days."
     }
 
     private func playbackShelf(_ entry: Entry, availableHeight: CGFloat) -> some View {
@@ -489,7 +489,7 @@ private struct PlaybackSection: View {
         "This keeps \(EntryListView.formatDuration(trimSelection.length)) of "
             + "\(EntryListView.formatDuration(trimDuration)) and re-transcribes the audio "
             + "(a hand-edited note is never overwritten). The original audio can be restored "
-            + "from Recently Deleted for \(TrashStore.retentionDays) days."
+            + "from Recently Deleted for \(model.trashRetentionDays) days."
     }
 
     private var waveformShelf: some View {

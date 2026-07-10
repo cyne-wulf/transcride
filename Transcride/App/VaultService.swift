@@ -12,12 +12,14 @@ actor VaultService {
     private var scanner = VaultScanner()
     private let operations: VaultOperations
     private let trash: TrashStore
+    private let settings: VaultSettingsStore
     private var searchIndex: VaultSearchIndex?
 
     init(rootURL: URL) {
         self.rootURL = rootURL
         self.operations = VaultOperations(vaultRoot: rootURL)
         self.trash = TrashStore(vaultRoot: rootURL)
+        self.settings = VaultSettingsStore(vaultRoot: rootURL)
     }
 
     // MARK: - Reading
@@ -387,6 +389,22 @@ actor VaultService {
     }
 
     func purgeTrash() throws -> Int {
-        try trash.purge()
+        try trash.purge(olderThanDays: settings.trashRetentionDays())
+    }
+
+    // MARK: - Storage & per-vault settings (AUD-6, SET-2)
+
+    /// Full-vault size accounting for the Storage pane. Walks the tree on
+    /// this actor so the main thread never touches the disk.
+    func storageSummary() -> VaultStorageSummary {
+        VaultStorage.measure(vaultRoot: rootURL)
+    }
+
+    func trashRetentionDays() -> Int {
+        settings.trashRetentionDays()
+    }
+
+    func setTrashRetentionDays(_ days: Int) throws {
+        try settings.setTrashRetentionDays(days)
     }
 }

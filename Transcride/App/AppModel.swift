@@ -44,6 +44,13 @@ final class AppModel {
     private(set) var vaultURL: URL?
     private(set) var snapshot: VaultSnapshot?
     private(set) var trashItems: [TrashItem] = []
+    /// Recently Deleted retention (SET-2), loaded from the vault's settings
+    /// file on open; user-visible copy quotes this, not the built-in default.
+    private(set) var trashRetentionDays = VaultSettingsStore.defaultTrashRetentionDays
+    /// Last storage measurement (AUD-6). Kept so reopening the Storage pane
+    /// shows numbers instantly while a fresh walk revalidates in background.
+    private(set) var storageSummary: VaultStorageSummary?
+    private(set) var storageSummaryIsLoading = false
 
     let recorder = RecorderService()
     let player = PlayerService()
@@ -218,7 +225,10 @@ final class AppModel {
                 await self?.handleExternalVaultChange(for: service)
             }
         }
-        // 30-day purge on launch/open, then first scan.
+        // Retention purge on launch/open (window configurable per vault,
+        // SET-2), then first scan.
+        storageSummary = nil
+        trashRetentionDays = await service.trashRetentionDays()
         _ = try? await service.purgeTrash()
         await refresh()
 
@@ -888,6 +898,28 @@ final class AppModel {
     func deleteTrashItemPermanently(_ item: TrashItem) async {
         await perform("deletePermanently [\(item.trashedName)]") { service in
             try await service.deletePermanently(item)
+        }
+    }
+
+    // MARK: - Intents (storage & vault settings, AUD-6/SET-2)
+
+    /// Re-measures the vault for the Storage pane. The previous summary stays
+    /// visible while the walk runs on the vault actor.
+    func refreshStorageSummary() async {
+        guard let service, !storageSummaryIsLoading else { return }
+        storageSummaryIsLoading = true
+        storageSummary = await service.storageSummary()
+        storageSummaryIsLoading = false
+    }
+
+    /// Persists the Recently Deleted retention window to the vault's settings
+    /// file. Items beyond the new window are purged on the next vault open,
+    /// as the Settings copy states — never retroactively mid-session.
+    func setTrashRetentionDays(_ days: Int) async {
+        guard days != trashRetentionDays else { return }
+        trashRetentionDays = days
+        await perform("setTrashRetentionDays [\(days)]") { service in
+            try await service.setTrashRetentionDays(days)
         }
     }
 

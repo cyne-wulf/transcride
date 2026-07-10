@@ -16,7 +16,7 @@ struct RecentlyDeletedView: View {
                 ContentUnavailableView {
                     Label("Recently Deleted Is Empty", systemImage: "trash")
                 } description: {
-                    Text("Deleted entries, folders, and audio files are kept here for \(TrashStore.retentionDays) days.")
+                    Text("Deleted entries, folders, and audio files are kept here for \(model.trashRetentionDays) days.")
                 }
             } else {
                 List {
