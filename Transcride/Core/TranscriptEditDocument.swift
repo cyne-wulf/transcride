@@ -30,6 +30,13 @@ struct TranscriptEditDocument: Equatable, Sendable {
         document.handEdited = true
     }
 
+    /// Used only when an edit session that began unforked finishes with its
+    /// original body. A debounced intermediate write may already have set the
+    /// flag, so Save must be able to restore the genuinely unforked state.
+    mutating func clearHandEdited() {
+        document.handEdited = false
+    }
+
     func save(to url: URL) throws {
         try AtomicFile.write(document.serialized(), to: url)
     }

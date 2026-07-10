@@ -19,7 +19,11 @@ struct TranscriptWorkbenchView: View {
     @Binding var document: FrontmatterDocument?
 
     @State private var activeLayer: Layer = .original
-    @State private var editingUnforked = false
+    @State private var isEditing = false
+    @State private var isSaving = false
+    @State private var editStartBody: String?
+    @State private var editingStartedForked = false
+    @State private var editingDidChange = false
     @State private var followingPaused = false
     @State private var pendingSave: Task<Void, Never>?
     @State private var needsSave = false
@@ -44,7 +48,8 @@ struct TranscriptWorkbenchView: View {
 
     private var viewedLayer: Layer {
         if original == nil { return .edited }
-        if !isForked { return editingUnforked ? .edited : .original }
+        if isEditing { return .edited }
+        if !isForked { return .original }
         return activeLayer
     }
 
@@ -137,13 +142,17 @@ struct TranscriptWorkbenchView: View {
             if isForked { activeLayer = .edited }
         }
         .onDisappear {
+            let pendingSave = pendingSave
             pendingSave?.cancel()
             copyConfirmationTask?.cancel()
-            if needsSave, let document {
+            if (needsSave || editingDidChange), let document {
+                let clearHandEdited = !editingStartedForked && document.body == editStartBody
                 Task {
+                    await pendingSave?.value
                     _ = await model.saveTranscriptBody(
                         document.body,
-                        markHandEdited: document.handEdited,
+                        markHandEdited: !clearHandEdited && document.handEdited,
+                        clearHandEdited: clearHandEdited,
                         for: entry
                     )
                 }
@@ -183,12 +192,21 @@ struct TranscriptWorkbenchView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
+                .disabled(isEditing || isSaving)
                 .help("Switch between the immutable engine output and your edited note")
-            } else if original != nil, !editingUnforked {
-                Button("Edit") {
-                    editingUnforked = true
+            }
+
+            if isEditing {
+                Button("Save") {
+                    Task { await saveAndFinishEditing() }
                 }
-                .help("Create an editable layer; Original remains untouched")
+                .disabled(isSaving)
+                .help("Save changes and finish editing")
+            } else if document != nil, viewedLayer == .edited || !isForked {
+                Button("Edit") {
+                    beginEditing()
+                }
+                .help(isForked ? "Edit the Markdown layer" : "Create an editable layer; Original remains untouched")
             }
         }
     }
@@ -259,6 +277,7 @@ struct TranscriptWorkbenchView: View {
             if let body = document?.body {
                 MarkdownBodyEditor(
                     text: body,
+                    isEditable: isEditing && !isSaving,
                     highlightRange: editedHighlightRange,
                     navigationHighlightRange: activeNavigationRange
                 ) { newBody in
@@ -274,8 +293,60 @@ struct TranscriptWorkbenchView: View {
         }
     }
 
+    private func beginEditing() {
+        guard let document else { return }
+        editingStartedForked = isForked
+        editingDidChange = false
+        editStartBody = document.body
+        activeLayer = .edited
+        isEditing = true
+    }
+
+    @MainActor
+    private func saveAndFinishEditing() async {
+        guard isEditing, !isSaving, let document else { return }
+        isSaving = true
+
+        let pendingSave = pendingSave
+        pendingSave?.cancel()
+        self.pendingSave = nil
+        await pendingSave?.value
+
+        let hasActualChange = document.body != editStartBody
+        let restoreUnforkedState = !editingStartedForked && !hasActualChange
+        var savedDocument = document
+
+        if editingDidChange || needsSave {
+            guard let saved = await model.saveTranscriptBody(
+                document.body,
+                markHandEdited: !restoreUnforkedState && document.handEdited,
+                clearHandEdited: restoreUnforkedState,
+                for: entry
+            ) else {
+                isSaving = false
+                return
+            }
+            savedDocument = saved
+            self.document = saved
+        }
+
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        needsSave = false
+        isEditing = false
+        isSaving = false
+        editStartBody = nil
+        editingDidChange = false
+        editingStartedForked = false
+
+        if original != nil, !TranscriptEditDocument.isForked(savedDocument, comparedTo: original) {
+            activeLayer = .original
+        } else {
+            activeLayer = .edited
+        }
+    }
+
     private func applyUserEdit(_ newBody: String) {
-        guard var document, newBody != document.body else { return }
+        guard isEditing, var document, newBody != document.body else { return }
         searchNavigationRange = nil
         var editable = TranscriptEditDocument(document: document)
         editable.replaceBody(newBody)
@@ -283,6 +354,7 @@ struct TranscriptWorkbenchView: View {
         self.document = document
         activeLayer = .edited
         needsSave = true
+        editingDidChange = true
 
         pendingSave?.cancel()
         let entry = entry
@@ -347,6 +419,14 @@ struct TranscriptWorkbenchView: View {
         guard let request = model.transcriptNavigationRequest,
               request.hit.entryPath == entry.relativePath,
               handledNavigationRequestID != request.id else { return }
+        if isEditing {
+            Task {
+                await saveAndFinishEditing()
+                guard !isEditing else { return }
+                handleNavigationRequestIfNeeded()
+            }
+            return
+        }
         handledNavigationRequestID = request.id
         showingFind = false
         findQuery = ""
@@ -355,10 +435,10 @@ struct TranscriptWorkbenchView: View {
         switch request.hit.layer {
         case .original:
             activeLayer = .original
-            editingUnforked = false
+            isEditing = false
         case .edited:
             activeLayer = .edited
-            editingUnforked = true
+            isEditing = false
         }
         cueSearchNavigationIfPossible()
     }
@@ -649,6 +729,7 @@ private final class UserAwareTranscriptScrollView: NSScrollView {
 
 private struct MarkdownBodyEditor: NSViewRepresentable {
     let text: String
+    let isEditable: Bool
     let highlightRange: NSRange?
     let navigationHighlightRange: NSRange?
     let onUserEdit: (String) -> Void
@@ -662,7 +743,7 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
 
         let textView = NSTextView()
         textView.delegate = context.coordinator
-        textView.isEditable = true
+        textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = false
         textView.allowsUndo = true
@@ -687,6 +768,12 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         scrollView.documentView = textView
         context.coordinator.textView = textView
         context.coordinator.updateHighlights()
+        if isEditable {
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, textView.window != nil else { return }
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
         return scrollView
     }
 
@@ -701,6 +788,17 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
                 location: min(selection.location, (text as NSString).length), length: 0
             ))
             context.coordinator.isApplyingExternalText = false
+        }
+        if textView.isEditable != isEditable {
+            textView.isEditable = isEditable
+            if isEditable {
+                DispatchQueue.main.async { [weak textView] in
+                    guard let textView, textView.window != nil else { return }
+                    textView.window?.makeFirstResponder(textView)
+                }
+            } else if textView.window?.firstResponder === textView {
+                textView.window?.makeFirstResponder(nil)
+            }
         }
         context.coordinator.updateHighlights()
     }

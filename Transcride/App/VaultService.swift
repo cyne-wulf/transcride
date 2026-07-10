@@ -108,6 +108,7 @@ actor VaultService {
     func saveTranscriptBody(
         _ body: String,
         markHandEdited: Bool,
+        clearHandEdited: Bool = false,
         atEntryPath relPath: RelativePath
     ) throws -> FrontmatterDocument {
         let entryURL = rootURL.appendingRelativePath(relPath)
@@ -115,10 +116,9 @@ actor VaultService {
             throw VaultError.notFound("Transcript for \(relPath)")
         }
         var editable = try TranscriptEditDocument.load(from: transcriptURL)
-        editable.replaceBody(body)
-        // If the user edited and then undid back to the starting text before
-        // the debounce fired, the real edit still forked this layer.
+        editable.replaceBody(body, markHandEdited: markHandEdited)
         if markHandEdited { editable.markHandEdited() }
+        if clearHandEdited { editable.clearHandEdited() }
         try editable.save(to: transcriptURL)
         synchronizeSearchIndex(relativePaths: [relPath])
         return editable.document

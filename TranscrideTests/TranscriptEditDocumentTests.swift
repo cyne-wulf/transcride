@@ -59,6 +59,25 @@ struct TranscriptEditDocumentTests {
         #expect(!savedText.contains("hand_edited"))
     }
 
+    @Test func clearingEditFlagRestoresUnforkedStateAfterUndo() throws {
+        let url = try temporaryFile(contents: "---\ntitle: Test\n---\n\nOriginal words\n")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var editable = try TranscriptEditDocument.load(from: url)
+        let startingBody = editable.body
+
+        editable.replaceBody("\nChanged words\n")
+        editable.replaceBody(startingBody)
+        #expect(editable.isHandEdited)
+
+        editable.clearHandEdited()
+        try editable.save(to: url)
+
+        let reloaded = try TranscriptEditDocument.load(from: url)
+        #expect(reloaded.body == startingBody)
+        #expect(!reloaded.isHandEdited)
+        #expect(!TranscriptEditDocument.isForked(reloaded.document, comparedTo: original()))
+    }
+
     @Test func generatedBodyIsNotForkedButExternalTextChangeIs() {
         let transcript = original()
         var generated = FrontmatterDocument(

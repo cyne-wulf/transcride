@@ -721,6 +721,7 @@ final class AppModel {
     func saveTranscriptBody(
         _ body: String,
         markHandEdited: Bool,
+        clearHandEdited: Bool = false,
         for entry: Entry
     ) async -> FrontmatterDocument? {
         guard let service else { return nil }
@@ -728,6 +729,7 @@ final class AppModel {
             let saved = try await service.saveTranscriptBody(
                 body,
                 markHandEdited: markHandEdited,
+                clearHandEdited: clearHandEdited,
                 atEntryPath: entry.relativePath
             )
             await refresh()
