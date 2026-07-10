@@ -848,6 +848,8 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
                 location: min(selection.location, (text as NSString).length), length: 0
             ))
             context.coordinator.isApplyingExternalText = false
+            // Registered undo actions reference ranges in the replaced text.
+            context.coordinator.editUndoManager.removeAllActions()
         }
         if textView.isEditable != isEditable {
             textView.isEditable = isEditable
@@ -870,8 +872,15 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         var isApplyingExternalText = false
         var appliedHighlightRange: NSRange?
         var appliedNavigationRange: NSRange?
+        /// Hosted NSTextViews otherwise resolve `undoManager` through the
+        /// SwiftUI window, whose manager doesn't track the text view's edits.
+        let editUndoManager = UndoManager()
 
         init(parent: MarkdownBodyEditor) { self.parent = parent }
+
+        func undoManager(for view: NSTextView) -> UndoManager? {
+            editUndoManager
+        }
 
         func textDidChange(_ notification: Notification) {
             guard !isApplyingExternalText, let textView else { return }
