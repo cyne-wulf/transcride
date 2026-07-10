@@ -125,9 +125,6 @@ struct EntryDetailView: View {
         .toolbar {
             if entry.hasAudio {
                 ToolbarItem {
-                    PlaybackOptionsButton()
-                }
-                ToolbarItem {
                     Button {
                         showingRetranscribe = true
                     } label: {
@@ -350,6 +347,8 @@ private struct PlaybackSection: View {
 
     private var transport: some View {
         HStack(spacing: 23 * controlScale) {
+            speedControl
+
             TransportButton(
                 systemImage: "gobackward.15", size: 19 * controlScale, help: "Back 15 seconds"
             ) {
@@ -369,6 +368,8 @@ private struct PlaybackSection: View {
             ) {
                 player.skip(15)
             }
+
+            skipSilenceControl
         }
         .padding(.horizontal, 22 * controlScale)
         .padding(.vertical, 7 * controlScale)
@@ -377,6 +378,53 @@ private struct PlaybackSection: View {
         .fixedSize()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("playback-transport")
+    }
+
+    /// Persistent rate control on the transport, podcast-app style: the label
+    /// always shows the active speed; the menu lists the full ladder.
+    private var speedControl: some View {
+        Menu {
+            Picker("Playback Speed", selection: Binding(
+                get: { player.speed },
+                set: { player.speed = $0 }
+            )) {
+                ForEach(PlayerService.speeds, id: \.self) { speed in
+                    Text(Self.speedLabel(speed)).tag(speed)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            Text(Self.speedLabel(player.speed))
+                .font(.system(size: 13 * controlScale, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(minWidth: 40 * controlScale, minHeight: 30 * controlScale)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Playback speed — press [ for slower, ] for faster")
+        .accessibilityLabel("Playback speed, \(Self.speedLabel(player.speed))")
+        .accessibilityIdentifier("playback-speed-menu")
+    }
+
+    private var skipSilenceControl: some View {
+        TransportButton(
+            systemImage: player.skipSilence ? "waveform.badge.minus" : "waveform",
+            size: 15 * controlScale,
+            help: player.skipSilence
+                ? "Skip Silence is on — pauses longer than "
+                    + String(format: "%.1f", SilenceGap.defaultThreshold)
+                    + " seconds are jumped"
+                : "Skip Silence is off",
+            tint: player.skipSilence ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary)
+        ) {
+            player.skipSilence.toggle()
+        }
+        .accessibilityLabel("Skip Silence")
+        .accessibilityIdentifier("skip-silence-toggle")
     }
 
     static func speedLabel(_ speed: Float) -> String {
@@ -405,6 +453,7 @@ private struct TransportButton: View {
     let systemImage: String
     let size: CGFloat
     let help: String
+    var tint = AnyShapeStyle(.primary)
     let action: () -> Void
 
     @State private var hovering = false
@@ -413,7 +462,7 @@ private struct TransportButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: size))
-                .foregroundStyle(.primary)
+                .foregroundStyle(tint)
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: size + 16, height: size + 14)
                 .background(
@@ -430,59 +479,3 @@ private struct TransportButton: View {
     }
 }
 
-/// Voice Memos-style playback panel in the detail toolbar. Playback rate and
-/// Skip Silence live together here instead of competing with the transport.
-private struct PlaybackOptionsButton: View {
-    @Environment(AppModel.self) private var model
-    @State private var showingOptions = false
-
-    var body: some View {
-        Button {
-            showingOptions.toggle()
-        } label: {
-            Label("Playback Controls", systemImage: "slider.horizontal.3")
-        }
-        .accessibilityLabel("Playback Controls")
-        .accessibilityIdentifier("playback-controls-menu")
-        .help("Playback speed and Skip Silence")
-        .popover(isPresented: $showingOptions, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Playback Controls")
-                    .font(.headline)
-
-                HStack(spacing: 12) {
-                    Label("Playback Speed", systemImage: "gauge.with.dots.needle.50percent")
-                    Spacer()
-                    Picker("Playback Speed", selection: Binding(
-                        get: { model.player.speed },
-                        set: { model.player.speed = $0 }
-                    )) {
-                        ForEach(PlayerService.speeds, id: \.self) { speed in
-                            Text(PlaybackSection.speedLabel(speed)).tag(speed)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(width: 92)
-                }
-
-                Divider()
-
-                Toggle(isOn: Binding(
-                    get: { model.player.skipSilence },
-                    set: { model.player.skipSilence = $0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Skip Silence")
-                        Text("Jump pauses longer than \(SilenceGap.defaultThreshold, specifier: "%.1f") seconds")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .toggleStyle(.checkbox)
-            }
-            .padding(16)
-            .frame(width: 300)
-        }
-    }
-}

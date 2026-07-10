@@ -158,6 +158,16 @@ final class PlayerService {
         seek(to: currentTime + delta)
     }
 
+    /// Steps to the adjacent entry in `speeds`; +1 faster, -1 slower
+    /// (the [ and ] shortcuts). Clamps at the ends of the list.
+    func stepSpeed(_ direction: Int) {
+        guard let index = Self.speeds.firstIndex(of: speed) else {
+            speed = 1.0
+            return
+        }
+        speed = Self.speeds[min(max(index + direction, 0), Self.speeds.count - 1)]
+    }
+
     private func handlePlayedToEnd() {
         isPlaying = false
         if duration > 0 { currentTime = duration }

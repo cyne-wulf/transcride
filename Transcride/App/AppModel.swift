@@ -421,7 +421,7 @@ final class AppModel {
         scheduleVaultSearch(immediate: true)
     }
 
-    // MARK: - Keyboard (search / find / Z / Space / Shift+Space / Shift+Delete)
+    // MARK: - Keyboard (search / find / Z / Space / Shift+Space / Shift+Delete / brackets)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -443,6 +443,8 @@ final class AppModel {
     private let deleteKeyCode: UInt16 = 51
     private let zenKeyCode: UInt16 = 6
     private let findKeyCode: UInt16 = 3
+    private let leftBracketKeyCode: UInt16 = 33
+    private let rightBracketKeyCode: UInt16 = 30
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
@@ -469,6 +471,14 @@ final class AppModel {
             // active, Escape remains the deliberate exit control.
             guard modifiers.isEmpty, editingTextView == nil else { return false }
             recorder.isZenMode = true
+            return true
+        }
+
+        if keyCode == leftBracketKeyCode || keyCode == rightBracketKeyCode {
+            // [ and ] step playback speed whenever an entry with audio is
+            // open, matching the persistent speed control in the transport.
+            guard modifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
+            player.stepSpeed(keyCode == rightBracketKeyCode ? 1 : -1)
             return true
         }
 

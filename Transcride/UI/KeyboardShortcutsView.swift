@@ -42,6 +42,19 @@ struct KeyboardShortcutsView: View {
                         ),
                     ])
 
+                    shortcutSection("Playback", rows: [
+                        ShortcutRow(
+                            keys: ["["],
+                            title: "Slower playback",
+                            detail: "Steps down the speed ladder (0.5×–4×)."
+                        ),
+                        ShortcutRow(
+                            keys: ["]"],
+                            title: "Faster playback",
+                            detail: "Steps up the speed ladder (0.5×–4×)."
+                        ),
+                    ])
+
                     shortcutSection("Zen Mode", rows: [
                         ShortcutRow(
                             keys: ["Z"],
