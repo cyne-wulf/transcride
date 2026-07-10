@@ -76,6 +76,41 @@ struct TranscriptWordMapTests {
         #expect(map.wordIndex(atTime: 10) == 2)
         #expect(map.wordIndex(atTime: .nan) == nil)
     }
+
+    @Test func editedMatchCuesByOccurrenceDespiteShiftedOffsets() {
+        let map = TranscriptWordMap(transcript: transcript([
+            ("alpha", 0, 0.4), ("beta", 0.5, 0.9), ("gamma", 1.0, 1.4),
+        ]))
+        // "# Heading\n\n" prefix shifts every offset by 11.
+        let body = "# Heading\n\nalpha beta gamma"
+        let match = (body as NSString).range(of: "beta")
+        #expect(map.startTime(forMatch: match.lowerBound..<NSMaxRange(match), inEditedBody: body) == 0.5)
+    }
+
+    @Test func editedMatchOrdinalPicksTheRightRepeatedPhrase() {
+        let map = TranscriptWordMap(transcript: transcript([
+            ("go", 0, 0.2), ("stop", 0.5, 0.7), ("go", 1.0, 1.2),
+        ]))
+        let body = "go stop go"
+        // Second occurrence of "go" cues the second spoken "go", not the first.
+        #expect(map.startTime(forMatch: 8..<10, inEditedBody: body) == 1.0)
+        #expect(map.startTime(forMatch: 0..<2, inEditedBody: body) == 0)
+    }
+
+    @Test func editedMatchIsCaseInsensitiveAndEditedOnlyTextHasNoMoment() {
+        let map = TranscriptWordMap(transcript: transcript([
+            ("alpha", 0, 0.4), ("beta", 0.5, 0.9),
+        ]))
+        let body = "ALPHA beta plus my own words"
+        #expect(map.startTime(forMatch: 0..<5, inEditedBody: body) == 0)
+        let ownWords = (body as NSString).range(of: "own words")
+        #expect(map.startTime(
+            forMatch: ownWords.lowerBound..<NSMaxRange(ownWords), inEditedBody: body
+        ) == nil)
+        // Out-of-bounds and whitespace-only matches are rejected, not crashed.
+        #expect(map.startTime(forMatch: 0..<999, inEditedBody: body) == nil)
+        #expect(map.startTime(forMatch: 5..<6, inEditedBody: body) == nil)
+    }
 }
 
 @Suite("Silence gap computation")

@@ -91,4 +91,42 @@ struct TranscriptWordMap: Equatable, Sendable {
         guard let wordIndex = wordIndex(atOrBeforeUTF16Offset: offset) else { return nil }
         return startTime(forWordAt: wordIndex)
     }
+
+    /// Best-effort cue for an edited-layer search match (SRCH-3). Edits shift
+    /// character offsets arbitrarily, so the matched text is re-located in the
+    /// timed rendering by case-insensitive occurrence ordinal instead. Returns
+    /// nil when the phrase no longer appears in the original — edited-only
+    /// text simply has no audio moment.
+    func startTime(forMatch matchRange: Range<Int>, inEditedBody body: String) -> TimeInterval? {
+        let nsBody = body as NSString
+        let nsRange = NSRange(location: matchRange.lowerBound, length: matchRange.count)
+        guard nsRange.location >= 0, NSMaxRange(nsRange) <= nsBody.length else { return nil }
+        let phrase = nsBody.substring(with: nsRange)
+        guard !phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+
+        let bodyOccurrences = Self.caseInsensitiveOccurrences(of: phrase, in: nsBody)
+        let ordinal = bodyOccurrences.firstIndex(of: nsRange.location) ?? 0
+        let renderedOccurrences = Self.caseInsensitiveOccurrences(
+            of: phrase, in: renderedText as NSString
+        )
+        guard !renderedOccurrences.isEmpty else { return nil }
+        let offset = renderedOccurrences[min(ordinal, renderedOccurrences.count - 1)]
+        return startTime(atOrBeforeUTF16Offset: offset)
+    }
+
+    private static func caseInsensitiveOccurrences(of phrase: String, in text: NSString) -> [Int] {
+        var locations: [Int] = []
+        var searchLocation = 0
+        while searchLocation < text.length {
+            let found = text.range(
+                of: phrase,
+                options: .caseInsensitive,
+                range: NSRange(location: searchLocation, length: text.length - searchLocation)
+            )
+            guard found.location != NSNotFound else { break }
+            locations.append(found.location)
+            searchLocation = found.location + max(found.length, 1)
+        }
+        return locations
+    }
 }

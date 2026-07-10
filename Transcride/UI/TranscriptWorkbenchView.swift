@@ -503,24 +503,15 @@ struct TranscriptWorkbenchView: View {
               model.player.url != nil,
               let map = wordMap else { return }
 
-        let mapOffset: Int?
+        let time: TimeInterval?
         switch request.hit.layer {
         case .original:
-            mapOffset = request.hit.matchRange.lowerBound
+            time = map.startTime(atOrBeforeUTF16Offset: request.hit.matchRange.lowerBound)
         case .edited:
             guard let body = document?.body else { return }
-            let nsBody = body as NSString
-            let projection = nsBody.range(of: map.renderedText)
-            guard projection.location != NSNotFound,
-                  request.hit.matchRange.lowerBound >= projection.location,
-                  request.hit.matchRange.lowerBound < NSMaxRange(projection),
-                  nsBody.substring(to: projection.location)
-                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  nsBody.substring(from: NSMaxRange(projection))
-                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            mapOffset = request.hit.matchRange.lowerBound - projection.location
+            time = map.startTime(forMatch: request.hit.matchRange, inEditedBody: body)
         }
-        guard let mapOffset, let time = map.startTime(atOrBeforeUTF16Offset: mapOffset) else { return }
+        guard let time else { return }
         model.player.pause()
         model.player.seek(to: time)
     }
