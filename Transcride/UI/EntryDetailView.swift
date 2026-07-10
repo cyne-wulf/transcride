@@ -415,10 +415,12 @@ private struct PlaybackSection: View {
             systemImage: player.skipSilence ? "waveform.badge.minus" : "waveform",
             size: 15 * controlScale,
             help: player.skipSilence
-                ? "Skip Silence is on — pauses longer than "
+                ? "Skip Silence: On — skipping pauses longer than "
                     + String(format: "%.1f", SilenceGap.defaultThreshold)
-                    + " seconds are jumped"
-                : "Skip Silence is off",
+                    + " seconds. Click to turn off."
+                : "Skip Silence: Off — click to skip pauses longer than "
+                    + String(format: "%.1f", SilenceGap.defaultThreshold)
+                    + " seconds.",
             tint: player.skipSilence ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary)
         ) {
             player.skipSilence.toggle()
