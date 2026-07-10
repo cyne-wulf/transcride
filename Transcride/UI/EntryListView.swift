@@ -11,20 +11,28 @@ struct EntryListView: View {
     @State private var renameDraft = ""
 
     private var folder: FolderNode? { model.selectedFolder }
+    private var isFavoritesView: Bool { model.sidebarSelection == .favorites }
 
     var body: some View {
         @Bindable var model = model
+        let entries = model.displayedEntries
         Group {
-            if let folder {
-                if folder.entries.isEmpty {
+            if isFavoritesView, entries.isEmpty {
+                ContentUnavailableView {
+                    Label("No Favorites", systemImage: "star")
+                } description: {
+                    Text("Star an entry to see it here.")
+                }
+            } else if isFavoritesView || folder != nil {
+                if entries.isEmpty {
                     ContentUnavailableView {
                         Label("No Entries", systemImage: "waveform")
                     } description: {
-                        Text("Entries in “\(folderTitle(folder))” will appear here.")
+                        Text("Entries in “\(folder.map(folderTitle) ?? "this folder")” will appear here.")
                     }
                 } else {
                     List(selection: $model.selectedEntryID) {
-                        ForEach(folder.entries) { entry in
+                        ForEach(entries) { entry in
                             entryRow(entry)
                                 .tag(entry.id)
                         }
@@ -35,7 +43,22 @@ struct EntryListView: View {
                 ContentUnavailableView("No Folder Selected", systemImage: "folder")
             }
         }
-        .navigationTitle(folder.map(folderTitle) ?? "Entries")
+        .navigationTitle(isFavoritesView ? "Favorites" : folder.map(folderTitle) ?? "Entries")
+        .toolbar {
+            ToolbarItem {
+                Menu {
+                    Picker("Sort By", selection: $model.entrySortOrder) {
+                        ForEach(EntrySortOrder.allCases, id: \.self) { order in
+                            Text(order.displayName).tag(order)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                }
+                .help("Sort entries by \(model.entrySortOrder.displayName.lowercased())")
+            }
+        }
         .alert("Rename Entry", isPresented: $showRenamePrompt) {
             TextField("Title", text: $renameDraft)
             Button("Rename") {
@@ -100,7 +123,12 @@ struct EntryListView: View {
         .contentShape(Rectangle())
         .draggable(entry.relativePath)
         .contextMenu {
+            Button(entry.favorite ? "Unfavorite" : "Favorite") {
+                Task { await model.toggleFavorite(for: entry) }
+            }
+            Divider()
             Button("Rename…") { beginRename(entry) }
+            Button("Duplicate") { Task { await model.duplicateEntry(entry) } }
             moveToMenu(entry)
             Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
             Divider()

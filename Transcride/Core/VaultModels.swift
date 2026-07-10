@@ -31,6 +31,9 @@ struct Entry: Identifiable, Hashable, Sendable {
     var folderName: EntryFolderName
     var title: String?
     var created: Date
+    /// Last content change: the transcript file's modification date, falling
+    /// back to the folder's. Drives the "Recently Edited" sort (LIB-4).
+    var modified: Date
     var duration: Double?
     var snippet: String
     var favorite: Bool
@@ -108,6 +111,11 @@ struct VaultSnapshot: Sendable {
 
     func entry(withID id: String) -> Entry? {
         root.allFolders.lazy.compactMap { $0.entries.first(where: { $0.id == id }) }.first
+    }
+
+    /// Every entry in the vault, depth-first by folder.
+    var allEntries: [Entry] {
+        root.allFolders.flatMap(\.entries)
     }
 }
 

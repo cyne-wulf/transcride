@@ -134,6 +134,11 @@ struct EntryDetailView: View {
         }
         .contentShape(Rectangle())
         .contextMenu {
+            Button(entry.favorite ? "Unfavorite" : "Favorite") {
+                Task { await model.toggleFavorite(for: entry) }
+            }
+            Button("Duplicate Entry") { Task { await model.duplicateEntry(entry) } }
+            Divider()
             Button("Show Info") { showingInfo = true }
             Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
             if entry.hasAudio || entry.audioDeleted {
@@ -143,6 +148,17 @@ struct EntryDetailView: View {
             }
         }
         .toolbar {
+            ToolbarItem {
+                Button {
+                    Task { await model.toggleFavorite(for: entry) }
+                } label: {
+                    Label(
+                        entry.favorite ? "Unfavorite" : "Favorite",
+                        systemImage: entry.favorite ? "star.fill" : "star"
+                    )
+                }
+                .help(entry.favorite ? "Remove from Favorites" : "Add to Favorites")
+            }
             if entry.hasAudio || entry.audioDeleted {
                 ToolbarItem {
                     Button {
@@ -154,21 +170,26 @@ struct EntryDetailView: View {
                     .help(entry.audioUnavailableExplanation
                         ?? "Retranscribe with a different model")
                 }
-                ToolbarItem {
-                    Menu {
+            }
+            ToolbarItem {
+                Menu {
+                    if entry.hasAudio || entry.audioDeleted {
                         Button("Trim Audio…") { isTrimming = true }
                             .disabled(!canTrim(entry))
                             .help(entry.audioUnavailableExplanation
                                 ?? "Select the range of audio to keep")
+                    }
+                    Button("Duplicate Entry") { Task { await model.duplicateEntry(entry) } }
+                    if entry.hasAudio || entry.audioDeleted {
                         Divider()
                         Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
                             .disabled(!canDeleteAudio(entry))
                             .help(entry.audioUnavailableExplanation ?? "")
-                    } label: {
-                        Label("More", systemImage: "ellipsis.circle")
                     }
-                    .help("More actions")
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
                 }
+                .help("More actions")
             }
             ToolbarItem {
                 Button {

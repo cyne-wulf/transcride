@@ -29,6 +29,9 @@ struct SidebarView: View {
                 }
             }
             Section {
+                Label("Favorites", systemImage: "star")
+                    .badge(model.favoriteEntries.count)
+                    .tag(SidebarSelection.favorites)
                 Label("Recently Deleted", systemImage: "trash")
                     .badge(model.trashItems.count)
                     .tag(SidebarSelection.recentlyDeleted)

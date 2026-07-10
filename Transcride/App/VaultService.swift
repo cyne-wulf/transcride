@@ -193,6 +193,30 @@ actor VaultService {
         return newPath
     }
 
+    func duplicateEntry(at relPath: RelativePath) throws -> RelativePath {
+        let newPath = try operations.duplicateEntry(at: relPath)
+        synchronizeSearchIndex(relativePaths: [newPath])
+        return newPath
+    }
+
+    /// Favorite toggle (LIB-3): a frontmatter-only write — the body is left
+    /// byte-identical, so it can never fork the entry, and the search index
+    /// (title + content only) needs no re-sync.
+    func setFavorite(_ favorite: Bool, atEntryPath relPath: RelativePath) throws {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        let transcriptURL = TranscriptFile.url(inEntry: entryURL)
+            ?? entryURL.appending(path: TranscriptFile.defaultName)
+        var doc: FrontmatterDocument
+        if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
+            doc = FrontmatterDocument.parse(text)
+        } else {
+            doc = FrontmatterDocument(fields: [], body: "")
+            doc.created = EntryFolderName(parsing: relPath.lastComponent)?.date
+        }
+        doc.favorite = favorite
+        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+    }
+
     // MARK: - Transcription (M3)
 
     /// Applies one finished transcription (correction backstop, archive,

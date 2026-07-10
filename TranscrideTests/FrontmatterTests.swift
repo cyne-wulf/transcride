@@ -86,6 +86,20 @@ struct FrontmatterTests {
         #expect(reparsed.body == "Hello.\n")
     }
 
+    @Test func favoriteWritesTrueAndRemovesOnFalse() {
+        var doc = FrontmatterDocument.parse("---\ntitle: \"T\"\n---\nBody stays put.\n")
+        let body = doc.body
+        doc.favorite = true
+        #expect(doc.serialized().contains("favorite: true"))
+        #expect(FrontmatterDocument.parse(doc.serialized()).favorite == true)
+        // Unfavoriting removes the key entirely — ordinary entries never carry it.
+        doc.favorite = false
+        #expect(!doc.serialized().contains("favorite"))
+        #expect(FrontmatterDocument.parse(doc.serialized()).favorite == false)
+        // A favorite toggle is frontmatter-only: the body is byte-identical.
+        #expect(doc.body == body)
+    }
+
     @Test func createdDateRoundTrips() throws {
         var doc = FrontmatterDocument(fields: [], body: "")
         var components = DateComponents()

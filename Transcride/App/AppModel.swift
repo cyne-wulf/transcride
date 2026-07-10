@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 enum SidebarSelection: Hashable {
     case folder(RelativePath)
+    case favorites
     case recentlyDeleted
 }
 
@@ -36,6 +37,7 @@ final class AppModel {
         static let recordingQuality = "recordingQuality"
         static let preferredMicUID = "preferredMicUID"
         static let fuzzyVaultSearch = "fuzzyVaultSearch"
+        static let entrySortOrder = "entrySortOrder"
     }
 
     private(set) var phase: Phase = .launching
@@ -62,8 +64,23 @@ final class AppModel {
     /// entry path and audio file name are unchanged.
     private(set) var audioRevision = 0
 
-    var isVaultSearchPresented = false
+    var isVaultSearchPresented = false {
+        didSet {
+            // Filters reset when the overlay closes: a stale hidden filter on
+            // the next search would silently explain away missing results.
+            if !isVaultSearchPresented, vaultSearchFilters != VaultSearchFilters() {
+                vaultSearchFilters = VaultSearchFilters()
+            }
+        }
+    }
     var vaultSearchQuery = ""
+    /// SRCH-5 filters; changes re-run the visible search immediately.
+    var vaultSearchFilters = VaultSearchFilters() {
+        didSet {
+            guard vaultSearchFilters != oldValue else { return }
+            scheduleVaultSearch(immediate: true)
+        }
+    }
     var fuzzyVaultSearch = UserDefaults.standard.bool(forKey: PreferenceKey.fuzzyVaultSearch) {
         didSet {
             UserDefaults.standard.set(fuzzyVaultSearch, forKey: PreferenceKey.fuzzyVaultSearch)
@@ -78,6 +95,14 @@ final class AppModel {
     private(set) var inNoteFindRequestRevision = 0
 
     var sidebarSelection: SidebarSelection? = .folder("")
+    /// Entry-list sort (LIB-4), persisted across launches.
+    var entrySortOrder = EntrySortOrder(
+        rawValue: UserDefaults.standard.string(forKey: PreferenceKey.entrySortOrder) ?? ""
+    ) ?? .dateNewest {
+        didSet {
+            UserDefaults.standard.set(entrySortOrder.rawValue, forKey: PreferenceKey.entrySortOrder)
+        }
+    }
     var selectedEntryID: String? {
         didSet {
             // PLY: switching entries stops playback; returning doesn't resume.
@@ -104,6 +129,25 @@ final class AppModel {
     var selectedFolder: FolderNode? {
         guard case .folder(let relPath)? = sidebarSelection else { return nil }
         return snapshot?.folder(at: relPath)
+    }
+
+    /// Every favorited entry in the vault (the Favorites smart filter, LIB-3).
+    var favoriteEntries: [Entry] {
+        snapshot?.allEntries.filter(\.favorite) ?? []
+    }
+
+    /// The entries the list column shows for the current sidebar selection,
+    /// in the user's sort order. Selection successors (delete) must be
+    /// computed from this same order.
+    var displayedEntries: [Entry] {
+        switch sidebarSelection {
+        case .folder:
+            return entrySortOrder.sorted(selectedFolder?.entries ?? [])
+        case .favorites:
+            return entrySortOrder.sorted(favoriteEntries)
+        case .recentlyDeleted, .none:
+            return []
+        }
     }
 
     // MARK: - Lifecycle
@@ -319,7 +363,8 @@ final class AppModel {
         // one that takes its place (the next below, else the new last).
         // Computed from the displayed order before the row disappears.
         var successorID: String?
-        if selectedEntryID == relPath, let entries = selectedFolder?.entries,
+        let entries = displayedEntries
+        if selectedEntryID == relPath,
            let index = entries.firstIndex(where: { $0.id == relPath }) {
             successorID = index + 1 < entries.count
                 ? entries[index + 1].id
@@ -341,6 +386,30 @@ final class AppModel {
            snapshot?.entry(withID: relPath) == nil,
            snapshot?.entry(withID: successorID) != nil {
             selectedEntryID = successorID
+        }
+    }
+
+    func toggleFavorite(for entry: Entry) async {
+        let favorite = !entry.favorite
+        await perform("setFavorite \(favorite) [\(entry.relativePath)]") { service in
+            try await service.setFavorite(favorite, atEntryPath: entry.relativePath)
+        }
+    }
+
+    /// Duplicate Entry (LIB-3): fresh timestamp folder, all files copied,
+    /// title "… copy". The copy becomes the selection so the user lands on
+    /// what they just made.
+    func duplicateEntry(_ entry: Entry) async {
+        guard let service else { return }
+        do {
+            let newPath = try await service.duplicateEntry(at: entry.relativePath)
+            DebugLog.append("duplicateEntry [\(entry.relativePath)] -> [\(newPath)]")
+            await refresh { self.selectedEntryID = newPath }
+            refreshVaultSearchIfVisible()
+        } catch {
+            DebugLog.append("duplicateEntry [\(entry.relativePath)]: FAILED \(error)")
+            errorMessage = error.localizedDescription
+            await refresh()
         }
     }
 
@@ -407,6 +476,7 @@ final class AppModel {
         }
 
         let fuzzy = fuzzyVaultSearch
+        let filters = vaultSearchFilters
         vaultSearchIsRunning = true
         vaultSearchTask = Task { [weak self] in
             if !immediate {
@@ -418,8 +488,9 @@ final class AppModel {
                 let hits = try await service.search(query, fuzzy: fuzzy)
                 guard !Task.isCancelled, self?.service === service,
                       self?.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query,
-                      self?.fuzzyVaultSearch == fuzzy else { return }
-                self?.vaultSearchResults = hits
+                      self?.fuzzyVaultSearch == fuzzy,
+                      self?.vaultSearchFilters == filters else { return }
+                self?.vaultSearchResults = self?.applyingSearchFilters(filters, to: hits) ?? hits
                 self?.vaultSearchIsRunning = false
             } catch {
                 guard !Task.isCancelled, self?.service === service else { return }
@@ -433,6 +504,25 @@ final class AppModel {
     private func refreshVaultSearchIfVisible() {
         guard isVaultSearchPresented, !vaultSearchQuery.isEmpty else { return }
         scheduleVaultSearch(immediate: true)
+    }
+
+    /// SRCH-5: hits are filtered against snapshot metadata after the text
+    /// query, keeping the search index a pure text cache. Entries missing
+    /// from the snapshot (deleted mid-search) are excluded only while a
+    /// filter is active — an unfiltered search shows whatever the index said.
+    private func applyingSearchFilters(
+        _ filters: VaultSearchFilters, to hits: [SearchHit]
+    ) -> [SearchHit] {
+        guard filters.isActive, let snapshot else { return hits }
+        var entriesByPath: [RelativePath: Entry] = [:]
+        for entry in snapshot.allEntries {
+            entriesByPath[entry.relativePath] = entry
+        }
+        let now = Date.now
+        return hits.filter { hit in
+            guard let entry = entriesByPath[hit.entryPath] else { return false }
+            return filters.matches(entry, now: now)
+        }
     }
 
     // MARK: - Keyboard (search / find / Z / Space / Shift+Space / Shift+Delete / brackets)

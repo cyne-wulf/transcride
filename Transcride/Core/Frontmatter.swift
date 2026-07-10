@@ -145,9 +145,12 @@ extension FrontmatterDocument {
         set { setValue(newValue.map { String(format: "%.2f", $0) }, for: "duration") }
     }
 
+    /// Favorite flag (LIB-3). Clearing removes the key rather than writing
+    /// `false`, so ordinary entries never carry it; Obsidian parses the bare
+    /// `true` as a real boolean property.
     var favorite: Bool {
         get { Self.bool(value(for: "favorite")) }
-        set { setValue(newValue ? "true" : "false", for: "favorite") }
+        set { setValue(newValue ? "true" : nil, for: "favorite") }
     }
 
     /// Set when the entry's audio was deleted (AUD-1). Clearing removes the

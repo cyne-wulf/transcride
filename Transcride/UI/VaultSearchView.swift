@@ -98,9 +98,97 @@ struct VaultSearchView: View {
                  : "Exact match — case-insensitive substring search.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            filterRow
         }
         .padding(18)
         .background(.bar)
+    }
+
+    // MARK: - Filters (SRCH-5)
+
+    private var filterRow: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Picker("Folder", selection: $model.vaultSearchFilters.folder) {
+                    Text("All Folders").tag(RelativePath?.none)
+                    ForEach(filterableFolders, id: \.relativePath) { node in
+                        Text(node.relativePath).tag(RelativePath?.some(node.relativePath))
+                    }
+                }
+                .fixedSize()
+                .help("Only entries inside this folder")
+
+                Picker("Date", selection: datePresetBinding) {
+                    ForEach(VaultSearchFilters.DatePreset.allCases, id: \.self) { preset in
+                        Text(preset.displayName).tag(preset)
+                    }
+                }
+                .fixedSize()
+                .help("Only entries created in this period")
+
+                Picker("Audio", selection: $model.vaultSearchFilters.audio) {
+                    ForEach(VaultSearchFilters.AudioPresence.allCases, id: \.self) { presence in
+                        Text(presence.displayName).tag(presence)
+                    }
+                }
+                .fixedSize()
+                .help("Whether the entry still has its audio")
+
+                Toggle("Favorites", isOn: $model.vaultSearchFilters.favoritesOnly)
+                    .toggleStyle(.checkbox)
+                    .help("Only favorited entries")
+
+                Spacer()
+
+                if model.vaultSearchFilters.isActive {
+                    Button("Clear Filters") {
+                        model.vaultSearchFilters = VaultSearchFilters()
+                    }
+                }
+            }
+
+            if model.vaultSearchFilters.datePreset == .custom {
+                HStack(spacing: 10) {
+                    DatePicker(
+                        "From",
+                        selection: $model.vaultSearchFilters.customStart,
+                        displayedComponents: .date
+                    )
+                    .fixedSize()
+                    DatePicker(
+                        "To",
+                        selection: $model.vaultSearchFilters.customEnd,
+                        displayedComponents: .date
+                    )
+                    .fixedSize()
+                }
+            }
+        }
+        .controlSize(.small)
+    }
+
+    /// Non-root folders, depth-first, as shown in the folder filter.
+    private var filterableFolders: [FolderNode] {
+        guard let root = model.snapshot?.root else { return [] }
+        return Array(root.allFolders.dropFirst())
+    }
+
+    /// Choosing "Custom Range…" seeds the pickers with a sane recent window
+    /// instead of the sentinel epoch/distant-future defaults.
+    private var datePresetBinding: Binding<VaultSearchFilters.DatePreset> {
+        Binding {
+            model.vaultSearchFilters.datePreset
+        } set: { preset in
+            var filters = model.vaultSearchFilters
+            if preset == .custom, filters.customStart == Date(timeIntervalSince1970: 0) {
+                filters.customStart = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
+                filters.customEnd = .now
+            }
+            filters.datePreset = preset
+            model.vaultSearchFilters = filters
+        }
     }
 
     @ViewBuilder
@@ -147,13 +235,21 @@ struct VaultSearchView: View {
                 ProgressView("Searching…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if groups.isEmpty {
-                ContentUnavailableView(
-                    "No Matches",
-                    systemImage: "magnifyingglass",
-                    description: Text(model.fuzzyVaultSearch
-                                      ? "Try a shorter word or turn off Fuzzy for literal phrases."
-                                      : "Try a shorter phrase, or turn on Fuzzy for a close spelling.")
-                )
+                ContentUnavailableView {
+                    Label("No Matches", systemImage: "magnifyingglass")
+                } description: {
+                    Text(model.vaultSearchFilters.isActive
+                         ? "No filtered entries match. Try clearing the filters."
+                         : (model.fuzzyVaultSearch
+                            ? "Try a shorter word or turn off Fuzzy for literal phrases."
+                            : "Try a shorter phrase, or turn on Fuzzy for a close spelling."))
+                } actions: {
+                    if model.vaultSearchFilters.isActive {
+                        Button("Clear Filters") {
+                            model.vaultSearchFilters = VaultSearchFilters()
+                        }
+                    }
+                }
             } else {
                 resultList
             }

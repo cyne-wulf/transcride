@@ -98,6 +98,7 @@ struct VaultScanner {
             folderName: folderName,
             title: title,
             created: created,
+            modified: transcriptModified ?? folderModified,
             duration: duration,
             snippet: snippet,
             favorite: favorite,

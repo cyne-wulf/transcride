@@ -89,6 +89,60 @@ struct VaultOperations: Sendable {
         return newRelPath
     }
 
+    /// Duplicates an entry (LIB-3): a fresh timestamp folder next to the
+    /// source, every visible file copied, the copy titled "<Title> copy"
+    /// (frontmatter, `.md` file name, and folder slug all follow). `created`
+    /// becomes the duplication time so date sorting places the copy where it
+    /// was made; an untitled source stays untitled.
+    @discardableResult
+    func duplicateEntry(at relPath: RelativePath, date: Date = .now) throws -> RelativePath {
+        guard EntryFolderName(parsing: relPath.lastComponent) != nil else {
+            throw VaultError.notFound(relPath)
+        }
+        let sourceURL = vaultRoot.appendingRelativePath(relPath)
+        guard fm.fileExists(atPath: sourceURL.path) else { throw VaultError.notFound(relPath) }
+
+        let sourceTitle = TranscriptFile.url(inEntry: sourceURL)
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .flatMap { FrontmatterDocument.parse($0).title }
+        let copyTitle = sourceTitle.map { $0 + " copy" }
+
+        let slug = Slug.make(from: copyTitle ?? "")
+        let newRelPath = try EntryCreator(vaultRoot: vaultRoot).createEntryFolder(
+            inFolder: relPath.parentRelativePath, date: date, slug: slug.isEmpty ? nil : slug
+        )
+        let destURL = vaultRoot.appendingRelativePath(newRelPath)
+        do {
+            let names = try fm.contentsOfDirectory(atPath: sourceURL.path)
+                .filter { !$0.hasPrefix(".") }
+            for name in names {
+                try fm.copyItem(
+                    at: sourceURL.appending(path: name),
+                    to: destURL.appending(path: name)
+                )
+            }
+            if let transcriptURL = TranscriptFile.url(inEntry: destURL),
+               let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
+                var doc = FrontmatterDocument.parse(text)
+                if let copyTitle { doc.title = copyTitle }
+                doc.created = date
+                try AtomicFile.write(doc.serialized(), to: transcriptURL)
+                let newFileName = TranscriptFile.fileName(forTitle: doc.title)
+                if newFileName != transcriptURL.lastPathComponent {
+                    let newFileURL = destURL.appending(path: newFileName)
+                    if !fm.fileExists(atPath: newFileURL.path) {
+                        try fm.moveItem(at: transcriptURL, to: newFileURL)
+                    }
+                }
+            }
+        } catch {
+            // Failed mid-copy: remove the half-made duplicate.
+            try? fm.removeItem(at: destURL)
+            throw error
+        }
+        return newRelPath
+    }
+
     /// Moves an entry (or folder) into another folder. Returns the new path.
     @discardableResult
     func moveItem(at relPath: RelativePath, toFolder destFolder: RelativePath) throws -> RelativePath {

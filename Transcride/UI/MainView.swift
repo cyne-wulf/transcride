@@ -16,7 +16,7 @@ struct MainView: View {
                     switch model.sidebarSelection {
                     case .recentlyDeleted:
                         RecentlyDeletedView()
-                    case .folder, .none:
+                    case .folder, .favorites, .none:
                         EntryListView()
                     }
                 }
