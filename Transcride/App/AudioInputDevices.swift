@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreAudio
 import Foundation
 import Observation
@@ -68,6 +69,28 @@ final class AudioInputDevices {
         )
         guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
         return deviceID
+    }
+
+    /// The device currently bound to an AVAudioEngine input AudioUnit.
+    /// This can differ from the system default when the user picked a mic.
+    static func currentInputDeviceID(for audioUnit: AudioUnit?) -> AudioDeviceID? {
+        guard let audioUnit else { return nil }
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            &size
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
+    }
+
+    static func isUsableInputDevice(_ deviceID: AudioDeviceID) -> Bool {
+        inputChannelCount(of: deviceID) > 0
     }
 
     private static func inputChannelCount(of deviceID: AudioDeviceID) -> Int {

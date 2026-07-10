@@ -79,6 +79,11 @@ final class RecorderService {
     private var entryCreated: Date = .now
     private var sampleRate: Double = 44_100
     private var configChangeObserver: NSObjectProtocol?
+    private var baselineInputSignature: RecordingInputSignature?
+    private var recordingStartUptime: TimeInterval?
+    private var configurationChangeCount = 0
+    private var configurationChangePending = false
+    private var isHandlingConfigurationChange = false
     private var reportedSinkError = false
 
     var isActive: Bool { state != .idle }
@@ -109,11 +114,12 @@ final class RecorderService {
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        var preferredDeviceStatus: OSStatus?
         if !preferredMicUID.isEmpty,
            let device = AudioInputDevices.allInputDevices().first(where: { $0.uid == preferredMicUID }),
            let unit = input.audioUnit {
             var deviceID = device.deviceID
-            AudioUnitSetProperty(
+            preferredDeviceStatus = AudioUnitSetProperty(
                 unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                 &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size)
             )
@@ -171,6 +177,15 @@ final class RecorderService {
             throw error
         }
 
+        let baselineInputSignature = Self.inputSignature(for: engine)
+        guard baselineInputSignature.isUsable else {
+            input.removeTap(onBus: 0)
+            engine.stop()
+            sink.finish()
+            try? FileManager.default.removeItem(at: cafURL)
+            throw RecorderError.noInputDevice
+        }
+
         self.engine = engine
         self.sink = sink
         self.entryURL = entryURL
@@ -179,6 +194,12 @@ final class RecorderService {
         entryCreated = EntryFolderName(parsing: entryURL.lastPathComponent)?.date ?? .now
         elapsed = 0
         livePeaks = []
+        alertMessage = nil
+        self.baselineInputSignature = baselineInputSignature
+        recordingStartUptime = ProcessInfo.processInfo.systemUptime
+        configurationChangeCount = 0
+        configurationChangePending = false
+        isHandlingConfigurationChange = false
         reportedSinkError = false
         state = .recording
 
@@ -187,9 +208,15 @@ final class RecorderService {
         configChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { _ in
-            Task { @MainActor [weak self] in self?.handleConfigurationChange() }
+            Task { @MainActor [weak self] in await self?.receiveConfigurationChange() }
         }
-        DebugLog.append("recorder: started [\(relativePath)] quality=\(quality.rawValue)")
+        let preferredStatusDescription = preferredDeviceStatus.map(String.init) ?? "default"
+        DebugLog.append(
+            "recorder: started [\(relativePath)] quality=\(quality.rawValue) "
+                + "input={\(Self.describe(baselineInputSignature))} "
+                + "preferred_uid=\(preferredMicUID.isEmpty ? "<system-default>" : preferredMicUID) "
+                + "set_device_status=\(preferredStatusDescription) engine_running=\(engine.isRunning)"
+        )
     }
 
     func pause() {
@@ -208,13 +235,144 @@ final class RecorderService {
         }
     }
 
-    private func handleConfigurationChange() {
+    private func receiveConfigurationChange() async {
+        configurationChangePending = true
+        guard !isHandlingConfigurationChange else { return }
+
+        isHandlingConfigurationChange = true
+        defer { isHandlingConfigurationChange = false }
+        while configurationChangePending, state == .recording {
+            configurationChangePending = false
+            await evaluateConfigurationChange()
+        }
+    }
+
+    private func evaluateConfigurationChange() async {
+        guard state == .recording,
+              let engine,
+              let baselineInputSignature else { return }
+
+        configurationChangeCount += 1
+        let event = configurationChangeCount
+        let current = Self.inputSignature(for: engine)
+        let wasRunning = engine.isRunning
+        let sinceStart = recordingStartUptime.map {
+            ProcessInfo.processInfo.systemUptime - $0
+        } ?? 0
+        let decision = RecordingConfigurationDecision.classify(
+            baseline: baselineInputSignature,
+            current: current,
+            engineIsRunning: wasRunning
+        )
+        DebugLog.append(
+            "recorder: config_change #\(event) +\(String(format: "%.3f", sinceStart))s "
+                + "baseline={\(Self.describe(baselineInputSignature))} "
+                + "current={\(Self.describe(current))} engine_running=\(wasRunning) "
+                + "decision=\(String(describing: decision))"
+        )
+
+        switch decision {
+        case .keepRunning:
+            return
+        case .restartEngine:
+            await restartEngineAfterBenignConfigurationChange(
+                engine,
+                baseline: baselineInputSignature,
+                event: event
+            )
+        case .pauseForInputChange:
+            pauseForInputChange(engine: engine, event: event, current: current)
+        }
+    }
+
+    /// AVAudioEngine can stop while CoreAudio rebuilds a graph even though
+    /// the microphone itself did not change. The existing input tap stays
+    /// installed, so preparing and starting the same engine preserves the
+    /// single RecordingSink and liveTee ordering without duplicating buffers.
+    private func restartEngineAfterBenignConfigurationChange(
+        _ engine: AVAudioEngine,
+        baseline: RecordingInputSignature,
+        event: Int
+    ) async {
+        let retryDelays: [UInt64] = [0, 50_000_000, 150_000_000, 300_000_000]
+        var lastError: Error?
+
+        for delay in retryDelays {
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            guard state == .recording, self.engine === engine else { return }
+
+            let current = Self.inputSignature(for: engine)
+            guard baseline.isCompatible(with: current) else {
+                pauseForInputChange(engine: engine, event: event, current: current)
+                return
+            }
+            if engine.isRunning {
+                DebugLog.append(
+                    "recorder: config_change #\(event) recovered before restart "
+                        + "input={\(Self.describe(current))}"
+                )
+                return
+            }
+
+            do {
+                engine.prepare()
+                try engine.start()
+                DebugLog.append(
+                    "recorder: config_change #\(event) restarted engine "
+                        + "input={\(Self.describe(current))}"
+                )
+                return
+            } catch {
+                lastError = error
+                DebugLog.append(
+                    "recorder: config_change #\(event) restart attempt failed: \(error)"
+                )
+            }
+        }
+
+        guard state == .recording, self.engine === engine else { return }
+        engine.pause()
+        state = .paused
+        let detail = lastError?.localizedDescription ?? "CoreAudio did not restart the engine."
+        alertMessage = "Recording paused — the microphone is still available, but audio capture could not restart: \(detail)"
+        DebugLog.append("recorder: config_change #\(event) recovery exhausted; paused")
+    }
+
+    private func pauseForInputChange(
+        engine: AVAudioEngine,
+        event: Int,
+        current: RecordingInputSignature
+    ) {
         guard state == .recording else { return }
-        pause()
+        engine.pause()
+        state = .paused
         alertMessage = """
         The audio input changed or disappeared, so the recording was paused. \
         Nothing was lost — press resume to continue on the current input, or stop to finish.
         """
+        DebugLog.append(
+            "recorder: config_change #\(event) input changed; paused current={\(Self.describe(current))}"
+        )
+    }
+
+    private static func inputSignature(for engine: AVAudioEngine) -> RecordingInputSignature {
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        let deviceID = AudioInputDevices.currentInputDeviceID(for: input.audioUnit)
+        return RecordingInputSignature(
+            deviceID: deviceID,
+            sampleRate: format.sampleRate,
+            channelCount: format.channelCount,
+            deviceIsAvailable: deviceID.map(AudioInputDevices.isUsableInputDevice) ?? false
+        )
+    }
+
+    private static func describe(_ signature: RecordingInputSignature) -> String {
+        let device = signature.deviceID.map(String.init) ?? "nil"
+        return "device=\(device),rate=\(String(format: "%.1f", signature.sampleRate)),"
+            + "channels=\(signature.channelCount),available=\(signature.deviceIsAvailable)"
     }
 
     private func applySinkUpdate(elapsed: Double, peaksTail: [Float], error: Error?) {
@@ -240,6 +398,7 @@ final class RecorderService {
             NotificationCenter.default.removeObserver(configChangeObserver)
             self.configChangeObserver = nil
         }
+        configurationChangePending = false
 
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -247,6 +406,8 @@ final class RecorderService {
         self.engine = nil
         self.sink = nil
         self.entryURL = nil
+        baselineInputSignature = nil
+        recordingStartUptime = nil
 
         let relPath = currentEntryPath
         let duration = Double(result.frames) / sampleRate
