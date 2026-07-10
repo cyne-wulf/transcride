@@ -110,6 +110,24 @@ struct TranscriptWorkbenchView: View {
         return TranscriptEditDocument.isForked(document, comparedTo: original)
     }
 
+    /// Same condition as the toolbar's Edit button.
+    private var canEditNote: Bool {
+        document != nil && !isEditing && (viewedLayer == .edited || !isForked)
+    }
+
+    /// Snapshot of what this workbench can do, mirrored into AppModel for the
+    /// menu bar (see the onChange in `body`).
+    private var currentUIState: AppModel.WorkbenchUIState {
+        AppModel.WorkbenchUIState(
+            hasContent: document != nil || original != nil,
+            canEditNote: canEditNote,
+            isEditing: isEditing,
+            isForked: isForked && original != nil,
+            hasSpeakers: hasSpeakers,
+            viewedLayerIsOriginal: viewedLayer == .original
+        )
+    }
+
     private var viewedLayer: Layer {
         if original == nil { return .edited }
         if isEditing { return .edited }
@@ -204,6 +222,34 @@ struct TranscriptWorkbenchView: View {
         }
         .onAppear {
             if isForked { activeLayer = .edited }
+        }
+        // Mirror this view's capabilities up so menu-bar items enable and
+        // retitle truthfully; the state itself stays view-local.
+        .onChange(of: currentUIState, initial: true) { _, newState in
+            model.workbenchUIState = newState
+        }
+        .onChange(of: model.workbenchActionRevision) { _, _ in
+            switch model.workbenchActionRequest {
+            case .editOrSave:
+                if isEditing {
+                    if !isSaving { Task { await saveAndFinishEditing() } }
+                } else if canEditNote {
+                    beginEditing()
+                }
+            case .copyAsMarkdown:
+                copyCurrentLayer()
+            case .toggleLayer:
+                if isForked, !isEditing, original != nil {
+                    activeLayer = activeLayer == .original ? .edited : .original
+                }
+            case .renameSpeakers:
+                if hasSpeakers, !isEditing, !isSaving { showingSpeakerRename = true }
+            case nil:
+                break
+            }
+        }
+        .onDisappear {
+            model.workbenchUIState = AppModel.WorkbenchUIState()
         }
         .sheet(isPresented: $showingSpeakerRename) {
             if let original {

@@ -50,7 +50,7 @@ struct EntryDetailView: View {
                 ContentUnavailableView(
                     "No Entry Selected",
                     systemImage: "waveform",
-                    description: Text("Select an entry to see its transcript.")
+                    description: Text("Select an entry to see its transcript — or start talking with a new recording.")
                 )
             }
         }
@@ -228,6 +228,24 @@ struct EntryDetailView: View {
                     Label("Reveal in Finder", systemImage: "folder")
                 }
                 .help("Reveal in Finder")
+            }
+        }
+        .onChange(of: model.entryActionRevision) { _, _ in
+            // Menu-bar items reach this view's sheets/prompts through the
+            // request pattern; conditions mirror the equivalent buttons.
+            switch model.entryActionRequest {
+            case .retranscribe:
+                if entry.hasAudio { showingRetranscribe = true }
+            case .trim:
+                if canTrim(entry) { isTrimming = true }
+            case .exportMarkdown:
+                if original != nil || document != nil { showingExport = true }
+            case .deleteAudio:
+                if canDeleteAudio(entry) { promptDeleteAudio(entry) }
+            case .showInfo:
+                showingInfo = true
+            case nil:
+                break
             }
         }
         .sheet(isPresented: $showingRetranscribe) {

@@ -9,6 +9,7 @@ struct RecentlyDeletedView: View {
     @State private var permanentlyDeleting: TrashItem?
     @State private var showRestorePreTrimPrompt = false
     @State private var restoringPreTrim: TrashItem?
+    @State private var showEmptyTrashPrompt = false
 
     var body: some View {
         Group {
@@ -28,6 +29,29 @@ struct RecentlyDeletedView: View {
             }
         }
         .navigationTitle("Recently Deleted")
+        .toolbar {
+            ToolbarItem {
+                Button("Empty Trash…") {
+                    showEmptyTrashPrompt = true
+                }
+                .disabled(model.trashItems.isEmpty)
+                .help("Permanently delete everything in Recently Deleted")
+            }
+        }
+        .confirmationDialog(
+            model.trashItems.count == 1
+                ? "Permanently delete 1 item?"
+                : "Permanently delete all \(model.trashItems.count) items?",
+            isPresented: $showEmptyTrashPrompt,
+            titleVisibility: .visible
+        ) {
+            Button("Empty Trash", role: .destructive) {
+                Task { await model.emptyTrash() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Everything in Recently Deleted is deleted immediately. This cannot be undone.")
+        }
         .confirmationDialog(
             "Permanently delete “\(permanentlyDeleting?.displayName ?? "")”?",
             isPresented: $showDeletePrompt,

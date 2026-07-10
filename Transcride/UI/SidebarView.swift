@@ -38,6 +38,10 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: model.newFolderRequestRevision) { _, _ in
+            // File → New Folder… routes here; same prompt as the toolbar button.
+            beginNewFolder(in: currentFolderPath)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             vaultFooter
         }

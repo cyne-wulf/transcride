@@ -36,8 +36,11 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Transcride/Transcride.entitlements
         ENABLE_HARDENED_RUNTIME: NO
         GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
-        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Ashan Devine"
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Transcride records voice memos with your microphone. Audio is stored only in your local vault."
   TranscrideTests:
     type: bundle.unit-test

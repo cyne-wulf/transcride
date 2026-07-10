@@ -101,6 +101,68 @@ final class AppModel {
     private(set) var transcriptNavigationRequest: TranscriptNavigationRequest?
     private(set) var inNoteFindRequestRevision = 0
 
+    // MARK: - Menu-bar command routing
+    //
+    // Menu items must invoke the same flows as the in-view buttons, but the
+    // sheets and prompts those buttons drive live in view-local @State. The
+    // menu therefore publishes a request (enum + bumped revision, the same
+    // pattern as in-note find) and the owning view fulfills it.
+
+    enum EntryActionRequest {
+        case retranscribe, trim, exportMarkdown, deleteAudio, showInfo
+    }
+
+    enum WorkbenchActionRequest {
+        case editOrSave, copyAsMarkdown, toggleLayer, renameSpeakers
+    }
+
+    /// What the note workbench can do right now, mirrored up so menu items
+    /// enable/disable and retitle truthfully (the state itself is view-local).
+    struct WorkbenchUIState: Equatable {
+        var hasContent = false
+        var canEditNote = false
+        var isEditing = false
+        var isForked = false
+        var hasSpeakers = false
+        var viewedLayerIsOriginal = true
+    }
+
+    private(set) var entryActionRequest: EntryActionRequest?
+    private(set) var entryActionRevision = 0
+    private(set) var workbenchActionRequest: WorkbenchActionRequest?
+    private(set) var workbenchActionRevision = 0
+    private(set) var newFolderRequestRevision = 0
+    private(set) var renameEntryRequestRevision = 0
+    private(set) var queuePopoverRequestRevision = 0
+    var workbenchUIState = WorkbenchUIState()
+
+    func requestEntryAction(_ request: EntryActionRequest) {
+        guard selectedEntry != nil else { return }
+        entryActionRequest = request
+        entryActionRevision &+= 1
+    }
+
+    func requestWorkbenchAction(_ request: WorkbenchActionRequest) {
+        guard selectedEntry != nil else { return }
+        workbenchActionRequest = request
+        workbenchActionRevision &+= 1
+    }
+
+    func requestNewFolder() {
+        guard phase == .ready else { return }
+        newFolderRequestRevision &+= 1
+    }
+
+    func requestRenameEntry() {
+        guard selectedEntry != nil else { return }
+        renameEntryRequestRevision &+= 1
+    }
+
+    func requestQueuePopover() {
+        guard phase == .ready else { return }
+        queuePopoverRequestRevision &+= 1
+    }
+
     var sidebarSelection: SidebarSelection? = .folder("")
     /// Entry-list sort (LIB-4), persisted across launches.
     var entrySortOrder = EntrySortOrder(
@@ -899,6 +961,29 @@ final class AppModel {
         await perform("deletePermanently [\(item.trashedName)]") { service in
             try await service.deletePermanently(item)
         }
+    }
+
+    /// Empties Recently Deleted in one pass (Voice Memos' "Delete All").
+    /// The caller confirms first — this is the one unrecoverable bulk action.
+    func emptyTrash() async {
+        await perform("emptyTrash") { service in
+            _ = try await service.emptyTrash()
+        }
+    }
+
+    // MARK: - Share (EXP-3, menu-bar entry point)
+
+    /// The toolbar's More menu uses ShareLink, which needs a view anchor; a
+    /// menu-bar item has none, so it goes through NSSharingServicePicker
+    /// anchored to the key window's content view instead.
+    func shareAudioFromMenu(for entry: Entry) {
+        guard let audioURL = audioURL(for: entry),
+              let contentView = NSApp.keyWindow?.contentView else { return }
+        let picker = NSSharingServicePicker(items: [audioURL])
+        let anchor = NSRect(
+            x: contentView.bounds.midX, y: contentView.bounds.midY, width: 1, height: 1
+        )
+        picker.show(relativeTo: anchor, of: contentView, preferredEdge: .minY)
     }
 
     // MARK: - Intents (storage & vault settings, AUD-6/SET-2)

@@ -236,7 +236,10 @@ struct VaultSearchView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if groups.isEmpty {
                 ContentUnavailableView {
-                    Label("No Matches", systemImage: "magnifyingglass")
+                    Label(
+                        "No Matches for “\(model.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines))”",
+                        systemImage: "magnifyingglass"
+                    )
                 } description: {
                     Text(model.vaultSearchFilters.isActive
                          ? "No filtered entries match. Try clearing the filters."

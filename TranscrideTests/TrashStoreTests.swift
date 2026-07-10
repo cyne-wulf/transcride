@@ -279,4 +279,25 @@ struct TrashStoreTests {
         #expect(restored == "orphan-folder")
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "orphan-folder").path))
     }
+
+    @Test func deleteAllPermanentlyEmptiesTheTrash() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+
+        // Two items of different kinds: a whole entry and a loose folder.
+        try store.trashItem(atRelativePath: entryRelPath)
+        let orphan = store.trashDirectory.appending(path: "orphan-folder")
+        try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+
+        let removed = try store.deleteAllPermanently()
+        #expect(removed == 2)
+        #expect(try store.items().isEmpty)
+        // Sidecars are gone with their items.
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: store.trashDirectory.path)
+        #expect(leftovers.filter { !$0.hasPrefix(".") }.isEmpty)
+
+        // Emptying an already-empty trash is a harmless no-op.
+        #expect(try store.deleteAllPermanently() == 0)
+    }
 }

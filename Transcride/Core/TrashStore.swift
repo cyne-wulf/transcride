@@ -279,6 +279,17 @@ struct TrashStore: Sendable {
         try? fm.removeItem(at: sidecarURL(forTrashedName: item.trashedName))
     }
 
+    /// Empties the trash entirely (Voice Memos' "Delete All"). Returns how
+    /// many items were removed. Callers own the confirmation dialog.
+    @discardableResult
+    func deleteAllPermanently() throws -> Int {
+        let all = try items()
+        for item in all {
+            try deletePermanently(item)
+        }
+        return all.count
+    }
+
     /// Deletes items older than the retention window. Returns how many were purged.
     @discardableResult
     func purge(olderThanDays days: Int = TrashStore.retentionDays, now: Date = Date()) throws -> Int {

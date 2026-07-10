@@ -33,6 +33,10 @@ struct TranscriptionQueueButton: View {
         }
         .accessibilityLabel("Transcription queue")
         .help("Transcription queue")
+        .onChange(of: model.queuePopoverRequestRevision) { _, _ in
+            // View → Transcription Queue opens the same toolbar popover.
+            showingQueue = true
+        }
         .popover(isPresented: $showingQueue, arrowEdge: .bottom) {
             TranscriptionQueuePopover(queue: queue)
         }

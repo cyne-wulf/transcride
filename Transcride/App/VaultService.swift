@@ -388,6 +388,10 @@ actor VaultService {
         try trash.deletePermanently(item)
     }
 
+    func emptyTrash() throws -> Int {
+        try trash.deleteAllPermanently()
+    }
+
     func purgeTrash() throws -> Int {
         try trash.purge(olderThanDays: settings.trashRetentionDays())
     }

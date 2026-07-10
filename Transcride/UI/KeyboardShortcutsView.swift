@@ -31,6 +31,11 @@ struct KeyboardShortcutsView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     shortcutSection("Recording", rows: [
                         ShortcutRow(
+                            keys: ["⌘", "N"],
+                            title: "New recording",
+                            detail: "Starts recording into the selected folder."
+                        ),
+                        ShortcutRow(
                             keys: ["⇧", "Space"],
                             title: "Start or stop recording",
                             detail: "Available throughout the app."
@@ -40,9 +45,19 @@ struct KeyboardShortcutsView: View {
                             title: "Pause or resume recording",
                             detail: "When no recording is active, controls playback instead."
                         ),
+                        ShortcutRow(
+                            keys: ["Z"],
+                            title: "Enter Zen mode",
+                            detail: "Distraction-free recording. Esc leaves once the recording is stopped."
+                        ),
                     ])
 
                     shortcutSection("Playback", rows: [
+                        ShortcutRow(
+                            keys: ["Space"],
+                            title: "Play or pause",
+                            detail: "While no recording is active."
+                        ),
                         ShortcutRow(
                             keys: ["["],
                             title: "Slower playback",
@@ -60,36 +75,71 @@ struct KeyboardShortcutsView: View {
                         ),
                     ])
 
-                    shortcutSection("Zen Mode", rows: [
+                    shortcutSection("Notes", rows: [
                         ShortcutRow(
-                            keys: ["Z"],
-                            title: "Enter Zen mode",
-                            detail: "Text fields keep normal typing behavior."
+                            keys: ["⌘", "E"],
+                            title: "Edit or save the note",
+                            detail: "Starts editing the Markdown layer; while editing, saves and finishes."
                         ),
                         ShortcutRow(
-                            keys: ["esc"],
-                            title: "Leave Zen mode",
-                            detail: "Stop the recording first."
+                            keys: ["⌘", "⇧", "C"],
+                            title: "Copy as Markdown",
+                            detail: "Copies the viewed layer without frontmatter."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌘", "F"],
+                            title: "Find in note",
+                            detail: "Return and ⇧Return cycle matches; matches follow the viewed layer."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌘", "⇧", "E"],
+                            title: "Export Markdown…",
+                            detail: "Writes the note as a clean .md file into a folder you choose."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌘", "I"],
+                            title: "Show entry info",
+                            detail: "Created date, duration, engine, and location."
                         ),
                     ])
 
-                    shortcutSection("Library", rows: [
+                    shortcutSection("Library & Search", rows: [
+                        ShortcutRow(
+                            keys: ["⌘", "⇧", "F"],
+                            title: "Search the vault",
+                            detail: "Every transcript, with fuzzy matching and filters."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌘", "D"],
+                            title: "Favorite or unfavorite",
+                            detail: "Favorites collect under the sidebar's star filter."
+                        ),
                         ShortcutRow(
                             keys: ["⌘", "⇧", "I"],
                             title: "Import audio",
                             detail: "Choose one or more supported audio or video files."
                         ),
                         ShortcutRow(
+                            keys: ["⌘", "⇧", "N"],
+                            title: "New folder",
+                            detail: "Creates a folder inside the selected one."
+                        ),
+                        ShortcutRow(
                             keys: ["⇧", "⌫"],
                             title: "Move selected entry to Recently Deleted",
-                            detail: "The entry remains restorable for 30 days."
+                            detail: "Restorable until the retention window ends."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌘", "?"],
+                            title: "Show this window",
+                            detail: "Every action is also in the menu bar."
                         ),
                     ])
                 }
             }
         }
         .padding(28)
-        .frame(width: 560, height: 520, alignment: .topLeading)
+        .frame(width: 560, height: 620, alignment: .topLeading)
     }
 
     private func shortcutSection(_ title: String, rows: [ShortcutRow]) -> some View {

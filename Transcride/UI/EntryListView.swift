@@ -21,14 +21,14 @@ struct EntryListView: View {
                 ContentUnavailableView {
                     Label("No Favorites", systemImage: "star")
                 } description: {
-                    Text("Star an entry to see it here.")
+                    Text("Star an entry — the ☆ in its toolbar or ⌘D — and it appears here.")
                 }
             } else if isFavoritesView || folder != nil {
                 if entries.isEmpty {
-                    ContentUnavailableView {
-                        Label("No Entries", systemImage: "waveform")
-                    } description: {
-                        Text("Entries in “\(folder.map(folderTitle) ?? "this folder")” will appear here.")
+                    if vaultIsEmpty {
+                        emptyVaultState
+                    } else {
+                        emptyFolderState
                     }
                 } else {
                     List(selection: $model.selectedEntryID) {
@@ -44,6 +44,10 @@ struct EntryListView: View {
             }
         }
         .navigationTitle(isFavoritesView ? "Favorites" : folder.map(folderTitle) ?? "Entries")
+        .onChange(of: model.renameEntryRequestRevision) { _, _ in
+            // Entry → Rename… routes here; same prompt as the context menu.
+            if let entry = model.selectedEntry { beginRename(entry) }
+        }
         .toolbar {
             ToolbarItem {
                 Menu {
@@ -75,6 +79,48 @@ struct EntryListView: View {
 
     private func folderTitle(_ folder: FolderNode) -> String {
         folder.relativePath.isEmpty ? (model.vaultURL?.lastPathComponent ?? "Vault") : folder.name
+    }
+
+    // MARK: - Empty states
+
+    private var vaultIsEmpty: Bool {
+        model.snapshot?.allEntries.isEmpty ?? true
+    }
+
+    /// First-run feel: a brand-new vault greets rather than reports absence.
+    private var emptyVaultState: some View {
+        ContentUnavailableView {
+            Label("Your Vault Is Ready", systemImage: "waveform.and.mic")
+        } description: {
+            Text("Everything you say becomes a searchable, editable note — stored as plain files in this folder.")
+        } actions: {
+            Button {
+                Task { await model.startRecording() }
+            } label: {
+                Label("Start Recording", systemImage: "record.circle")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.recorder.isActive)
+
+            Button("Import Audio…") {
+                model.importViaPanel()
+            }
+        }
+    }
+
+    private var emptyFolderState: some View {
+        ContentUnavailableView {
+            Label("No Entries", systemImage: "folder")
+        } description: {
+            Text("“\(folder.map(folderTitle) ?? "This folder")” is empty. New recordings land in the selected folder — or drop audio files anywhere in the window to import.")
+        } actions: {
+            Button {
+                Task { await model.startRecording() }
+            } label: {
+                Label("Record Here", systemImage: "record.circle")
+            }
+            .disabled(model.recorder.isActive)
+        }
     }
 
     // MARK: - Row
