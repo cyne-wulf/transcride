@@ -154,7 +154,7 @@ struct TranscriptWorkbenchView: View {
             ZStack(alignment: .topTrailing) {
                 layerContent
 
-                if followingPaused, viewedLayer == .original {
+                if followingPaused, viewedLayer == .original, model.player.isPlaying {
                     Button {
                         followingPaused = false
                     } label: {

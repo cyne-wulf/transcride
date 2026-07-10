@@ -97,10 +97,8 @@ private struct ModelRow: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "magnifyingglass.circle")
-                        .foregroundStyle(.secondary)
+                    Label("Show in Finder", systemImage: "folder")
                 }
-                .buttonStyle(.plain)
                 .help("Show in Finder")
                 Button("Delete", role: .destructive) {
                     Task { await model.modelManager.delete(info.id) }
