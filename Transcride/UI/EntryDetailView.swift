@@ -91,10 +91,10 @@ struct EntryDetailView: View {
                 .frame(maxWidth: .infinity)
 
                 if loadedEntryPath == entry.relativePath, document != nil || original != nil {
+                    // Full pane width: the workbench pins its action row to the
+                    // pane's top-right corner and centers the note column itself.
                     TranscriptWorkbenchView(entry: entry, original: original, document: $document)
-                        .frame(maxWidth: 900, maxHeight: .infinity)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 36)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .layoutPriority(1)
                 } else if loadedEntryPath != entry.relativePath {
                     ProgressView("Loading transcript…")

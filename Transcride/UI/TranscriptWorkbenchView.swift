@@ -170,31 +170,39 @@ struct TranscriptWorkbenchView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // The action row spans the whole pane so its trailing controls sit
+            // in the window's top-right corner (master PRD §7); the note
+            // content below keeps its own centered max-width column.
             noteToolbar
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 6)
 
-            if showingFind {
-                findBar
-                    .frame(height: 42)
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
-            }
+            VStack(spacing: 0) {
+                if showingFind {
+                    findBar
+                        .frame(height: 42)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
 
-            ZStack(alignment: .topTrailing) {
-                layerContent
+                ZStack(alignment: .topTrailing) {
+                    layerContent
 
-                if followingPaused, viewedLayer == .original, model.player.isPlaying {
-                    Button {
-                        followingPaused = false
-                    } label: {
-                        Label("Resume Following", systemImage: "location.fill")
+                    if followingPaused, viewedLayer == .original, model.player.isPlaying {
+                        Button {
+                            followingPaused = false
+                        } label: {
+                            Label("Resume Following", systemImage: "location.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(12)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .padding(12)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
+            .frame(maxWidth: 900, maxHeight: .infinity)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 36)
         }
         .background(.clear)
         .onChange(of: model.player.seekRevision) { _, _ in
