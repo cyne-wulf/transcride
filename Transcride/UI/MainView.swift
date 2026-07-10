@@ -7,31 +7,30 @@ struct MainView: View {
 
     var body: some View {
         @Bindable var model = model
-        NavigationSplitView {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240)
-        } content: {
-            Group {
-                switch model.sidebarSelection {
-                case .recentlyDeleted:
-                    RecentlyDeletedView()
-                case .folder, .none:
-                    EntryListView()
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                SidebarView()
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 240)
+            } content: {
+                Group {
+                    switch model.sidebarSelection {
+                    case .recentlyDeleted:
+                        RecentlyDeletedView()
+                    case .folder, .none:
+                        EntryListView()
+                    }
                 }
+                .navigationSplitViewColumnWidth(min: 260, ideal: 320)
+            } detail: {
+                EntryDetailView()
             }
-            .navigationSplitViewColumnWidth(min: 260, ideal: 320)
-        } detail: {
-            EntryDetailView()
+
+            if !model.recorder.isZenMode {
+                LiveTranscriptStrip(transcriber: model.liveTranscriber)
+            }
+            RecorderBar()
         }
         .navigationTitle(model.vaultURL?.lastPathComponent ?? "Transcride")
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                if !model.recorder.isZenMode {
-                    LiveTranscriptStrip(transcriber: model.liveTranscriber)
-                }
-                RecorderBar()
-            }
-        }
         // Drag-and-drop import: anywhere on the window makes a new entry per file.
         .dropDestination(for: URL.self) { urls, _ in
             guard !urls.isEmpty else { return false }

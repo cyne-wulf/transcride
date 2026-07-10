@@ -50,68 +50,71 @@ struct EntryDetailView: View {
 
     @ViewBuilder
     private func entryDetail(_ entry: Entry) -> some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 3) {
-                Text(entry.displayTitle)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                VStack(spacing: 3) {
+                    Text(entry.displayTitle)
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
 
-                HStack(spacing: 8) {
-                    Text(entry.created.formatted(date: .omitted, time: .shortened))
-                    if let duration = entry.duration {
-                        Text("·")
-                            .foregroundStyle(.tertiary)
-                        Text(EntryListView.formatDuration(duration))
+                    HStack(spacing: 8) {
+                        Text(entry.created.formatted(date: .omitted, time: .shortened))
+                        if let duration = entry.duration {
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Text(EntryListView.formatDuration(duration))
+                        }
                     }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
                 }
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 32)
-            .padding(.top, 24)
-            .padding(.bottom, 12)
-            .frame(maxWidth: .infinity)
+                .padding(.horizontal, 32)
+                .padding(.top, 24)
+                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity)
 
-            if loadedEntryPath == entry.relativePath, document != nil || original != nil {
-                TranscriptWorkbenchView(entry: entry, original: original, document: $document)
-                    .frame(maxWidth: 900, maxHeight: .infinity)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 36)
-                    .layoutPriority(1)
-            } else if loadedEntryPath != entry.relativePath {
-                ProgressView("Loading transcript…")
+                if loadedEntryPath == entry.relativePath, document != nil || original != nil {
+                    TranscriptWorkbenchView(entry: entry, original: original, document: $document)
+                        .frame(maxWidth: 900, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 36)
+                        .layoutPriority(1)
+                } else if loadedEntryPath != entry.relativePath {
+                    ProgressView("Loading transcript…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if entry.hasTranscript {
+                    ContentUnavailableView(
+                        "Transcript Is Empty",
+                        systemImage: "text.document",
+                        description: Text("Check the transcription queue in the toolbar.")
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if entry.hasTranscript {
-                ContentUnavailableView(
-                    "Transcript Is Empty",
-                    systemImage: "text.document",
-                    description: Text("Check the transcription queue in the toolbar.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ContentUnavailableView(
-                    "No Transcript",
-                    systemImage: "text.badge.xmark",
-                    description: Text("This entry does not have a transcript file yet.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+                } else {
+                    ContentUnavailableView(
+                        "No Transcript",
+                        systemImage: "text.badge.xmark",
+                        description: Text("This entry does not have a transcript file yet.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
 
-            if let queue = model.transcriptionQueue,
-               let queueItem = queue.items.first(where: { $0.entryRelativePath == entry.relativePath }) {
-                transcriptionStatus(queueItem, queue: queue)
-                    .padding(.horizontal, 36)
-                    .padding(.top, 6)
-                    .frame(maxWidth: 900)
+                if let queue = model.transcriptionQueue,
+                   let queueItem = queue.items.first(where: { $0.entryRelativePath == entry.relativePath }) {
+                    transcriptionStatus(queueItem, queue: queue)
+                        .padding(.horizontal, 36)
+                        .padding(.top, 6)
+                        .frame(maxWidth: 900)
+                }
             }
-
-            if entry.hasAudio {
-                PlaybackSection(entry: entry)
-                    .frame(maxWidth: 900)
-                    .padding(.horizontal, 36)
-                    .padding(.top, 10)
-                    .padding(.bottom, 18)
+            // Keep playback out of the transcript's vertical stack. This local
+            // inset reserves the shelf above MainView's recorder inset, so the
+            // native transcript scroller is proposed only the space between
+            // the title and playback controls and cannot push either bar away.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if entry.hasAudio {
+                    playbackShelf(entry, availableHeight: proxy.size.height)
+                }
             }
         }
         .contentShape(Rectangle())
@@ -156,6 +159,20 @@ struct EntryDetailView: View {
         .sheet(isPresented: $showingRetranscribe) {
             RetranscribeSheet(entry: entry)
         }
+    }
+
+    private func playbackShelf(_ entry: Entry, availableHeight: CGFloat) -> some View {
+        let compact = availableHeight < 620
+        return PlaybackSection(entry: entry, availableHeight: availableHeight)
+            .frame(maxWidth: 900)
+            .padding(.horizontal, 36)
+            .padding(.top, compact ? 6 : 10)
+            .padding(.bottom, compact ? 8 : 18)
+            .frame(maxWidth: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(alignment: .top) { Divider() }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("detail-playback-shelf")
     }
 
     /// Inline transcription state for the open entry (TRN-3): the queue
@@ -234,6 +251,7 @@ struct EntryDetailView: View {
 private struct PlaybackSection: View {
     @Environment(AppModel.self) private var model
     let entry: Entry
+    let availableHeight: CGFloat
 
     @State private var waveform: WaveformData?
     @State private var waveformError: String?
@@ -244,7 +262,17 @@ private struct PlaybackSection: View {
     /// Controls grow modestly with the detail column while preserving the
     /// compact proportions of Voice Memos' lower playback shelf.
     private var controlScale: CGFloat {
-        min(max(sectionWidth / 620, 0.9), 1.15)
+        min(max(sectionWidth / 620, 0.9), 1.15) * heightScale
+    }
+
+    /// Preserve the full Voice Memos hierarchy while leaving a useful text
+    /// viewport in short windows. This scales proportions instead of assigning
+    /// any fixed transcript height, so large windows retain the spacious shelf.
+    private var heightScale: CGFloat {
+        if availableHeight < 420 { return 0.74 }
+        if availableHeight < 520 { return 0.84 }
+        if availableHeight < 620 { return 0.92 }
+        return 1
     }
 
     var body: some View {
@@ -347,6 +375,8 @@ private struct PlaybackSection: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(.separator.opacity(0.7), lineWidth: 1))
         .fixedSize()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("playback-transport")
     }
 
     static func speedLabel(_ speed: Float) -> String {
