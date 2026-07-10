@@ -47,6 +47,18 @@ struct Entry: Identifiable, Hashable, Sendable {
     var parentRelativePath: RelativePath { relativePath.parentRelativePath }
     var hasAudio: Bool { audioFileName != nil }
 
+    /// Why audio-dependent actions (retranscribe, trim, speaker detection,
+    /// share audio) are greyed out; nil when the entry's audio is available.
+    /// The disk is the source of truth: a restored audio file re-enables the
+    /// actions even if a stale `audio_deleted` flag lingers in frontmatter.
+    var audioUnavailableExplanation: String? {
+        if hasAudio { return nil }
+        if audioDeleted {
+            return "The audio was deleted. Restore it from Recently Deleted to use audio features."
+        }
+        return "This entry has no audio file."
+    }
+
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
         if let slug = folderName.slug {

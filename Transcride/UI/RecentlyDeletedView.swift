@@ -14,7 +14,7 @@ struct RecentlyDeletedView: View {
                 ContentUnavailableView {
                     Label("Recently Deleted Is Empty", systemImage: "trash")
                 } description: {
-                    Text("Deleted entries and folders are kept here for \(TrashStore.retentionDays) days.")
+                    Text("Deleted entries, folders, and audio files are kept here for \(TrashStore.retentionDays) days.")
                 }
             } else {
                 List {
@@ -45,7 +45,7 @@ struct RecentlyDeletedView: View {
     @ViewBuilder
     private func trashRow(_ item: TrashItem) -> some View {
         HStack {
-            Image(systemName: item.isEntry ? "waveform" : "folder")
+            Image(systemName: iconName(for: item))
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.displayName)
@@ -76,6 +76,13 @@ struct RecentlyDeletedView: View {
                 permanentlyDeleting = item
                 showDeletePrompt = true
             }
+        }
+    }
+
+    private func iconName(for item: TrashItem) -> String {
+        switch item.kind {
+        case .entryAudio: "waveform.badge.minus"
+        case .item: item.isEntry ? "waveform" : "folder"
         }
     }
 

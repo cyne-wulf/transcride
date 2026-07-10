@@ -150,9 +150,11 @@ extension FrontmatterDocument {
         set { setValue(newValue ? "true" : "false", for: "favorite") }
     }
 
+    /// Set when the entry's audio was deleted (AUD-1). Clearing removes the
+    /// key rather than writing `false`, so ordinary entries never carry it.
     var audioDeleted: Bool {
         get { Self.bool(value(for: "audio_deleted")) }
-        set { setValue(newValue ? "true" : "false", for: "audio_deleted") }
+        set { setValue(newValue ? "true" : nil, for: "audio_deleted") }
     }
 
     var source: String? {

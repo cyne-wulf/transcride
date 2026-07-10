@@ -711,6 +711,25 @@ final class AppModel {
         )
     }
 
+    // MARK: - Intents (audio lifecycle, AUD-1)
+
+    func audioFileByteSize(for entry: Entry) async -> Int64? {
+        await service?.audioFileByteSize(atEntryPath: entry.relativePath)
+    }
+
+    /// Delete audio, keep transcript: the audio and waveform cache move to
+    /// Recently Deleted (30-day recovery) and the entry becomes a plain note.
+    func deleteAudio(for entry: Entry) async {
+        // The player holds an open handle and would happily keep playing the
+        // trashed file; a queued/running transcription reads it. Both must
+        // let go before the move.
+        if player.url == audioURL(for: entry) { player.unload() }
+        transcriptionQueue?.evictItems(underPath: entry.relativePath)
+        await perform("deleteAudio [\(entry.relativePath)]") { service in
+            try await service.deleteAudio(atEntryPath: entry.relativePath)
+        }
+    }
+
     // MARK: - Intents (trash)
 
     func restoreTrashItem(_ item: TrashItem) async {

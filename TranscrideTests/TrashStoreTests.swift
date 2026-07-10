@@ -110,6 +110,158 @@ struct TrashStoreTests {
         #expect(remaining[0].trashedName == freshRelPath)
     }
 
+    // MARK: - Delete audio, keep transcript (AUD-1/AUD-2)
+
+    /// Adds an audio file and waveform cache to the fixture entry.
+    private func addAudio(toEntryAt entryRelPath: String, inVault root: URL) throws {
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        try Data("fake-aac-bytes".utf8).write(to: entryURL.appending(path: "audio.m4a"))
+        try Data("{\"version\":1}".utf8).write(to: entryURL.appending(path: "waveform.json"))
+    }
+
+    private func transcriptText(ofEntryAt entryRelPath: String, inVault root: URL) throws -> String {
+        let url = try #require(TranscriptFile.url(inEntry: root.appendingRelativePath(entryRelPath)))
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    @Test func deleteAudioMovesFilesWritesSidecarAndSetsFlag() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let store = TrashStore(vaultRoot: root)
+
+        let trashedName = try store.trashEntryAudio(atEntryPath: entryRelPath)
+
+        // Audio and waveform left the entry; the transcript stayed.
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        #expect(!FileManager.default.fileExists(atPath: entryURL.appending(path: "audio.m4a").path))
+        #expect(!FileManager.default.fileExists(atPath: entryURL.appending(path: "waveform.json").path))
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "transcript.md").path))
+
+        // Both files sit in one wrapper item in the trash.
+        let wrapper = store.trashDirectory.appending(path: trashedName)
+        #expect(FileManager.default.fileExists(atPath: wrapper.appending(path: "audio.m4a").path))
+        #expect(FileManager.default.fileExists(atPath: wrapper.appending(path: "waveform.json").path))
+
+        let info = try #require(store.readInfo(forTrashedName: trashedName))
+        #expect(info.kind == .entryAudio)
+        #expect(info.originalPath == entryRelPath)
+
+        // Frontmatter records the state; the scanner reads it from here.
+        let doc = FrontmatterDocument.parse(try transcriptText(ofEntryAt: entryRelPath, inVault: root))
+        #expect(doc.audioDeleted)
+
+        let item = try #require(try store.items().first)
+        #expect(item.kind == .entryAudio)
+        #expect(!item.isEntry)
+        #expect(item.displayName == "Audio — Test Note")
+    }
+
+    @Test func restoreAudioFullyReversesTheDeletion() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let store = TrashStore(vaultRoot: root)
+
+        try store.trashEntryAudio(atEntryPath: entryRelPath)
+        let item = try #require(try store.items().first)
+        let restoredPath = try store.restore(item)
+
+        #expect(restoredPath == entryRelPath)
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "audio.m4a").path))
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "waveform.json").path))
+        #expect(try store.items().isEmpty)
+
+        // The flag is cleared by removing the key, not by writing `false`.
+        let text = try transcriptText(ofEntryAt: entryRelPath, inVault: root)
+        #expect(!text.contains("audio_deleted"))
+        #expect(!FrontmatterDocument.parse(text).audioDeleted)
+    }
+
+    @Test func restoreAudioCollisionSuffixesAudioAndDropsStaleWaveform() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let store = TrashStore(vaultRoot: root)
+
+        try store.trashEntryAudio(atEntryPath: entryRelPath)
+        // The entry re-acquired audio (e.g. copied in externally) meanwhile.
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+
+        let item = try #require(try store.items().first)
+        _ = try store.restore(item)
+
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "audio.m4a").path))
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "audio-2.m4a").path))
+        // Exactly one waveform cache: the trashed copy was stale and dropped.
+        let names = try FileManager.default.contentsOfDirectory(atPath: entryURL.path)
+        #expect(names.filter { $0 == "waveform.json" }.count == 1)
+        #expect(try store.items().isEmpty)
+    }
+
+    @Test func deleteAudioWithoutTranscriptCreatesFlaggedStub() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-vault-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryRelPath = "transcride-2026-07-01T10-00-00"
+        try FileManager.default.createDirectory(
+            at: root.appendingRelativePath(entryRelPath), withIntermediateDirectories: true
+        )
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let store = TrashStore(vaultRoot: root)
+
+        try store.trashEntryAudio(atEntryPath: entryRelPath)
+
+        let doc = FrontmatterDocument.parse(try transcriptText(ofEntryAt: entryRelPath, inVault: root))
+        #expect(doc.audioDeleted)
+        #expect(doc.created != nil)
+    }
+
+    @Test func deleteAudioWithNoAudioFileThrowsNotFound() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+        #expect(throws: VaultError.self) {
+            try store.trashEntryAudio(atEntryPath: entryRelPath)
+        }
+    }
+
+    @Test func purgeCoversAudioOnlyItems() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let store = TrashStore(vaultRoot: root)
+
+        let old = Date().addingTimeInterval(-31 * 24 * 3600)
+        let trashedName = try store.trashEntryAudio(atEntryPath: entryRelPath, deletedAt: old)
+
+        let purged = try store.purge(olderThanDays: 30, now: Date())
+        #expect(purged == 1)
+        #expect(try store.items().isEmpty)
+        #expect(!FileManager.default.fileExists(
+            atPath: store.trashDirectory.appending(path: trashedName).path
+        ))
+    }
+
+    @Test func legacySidecarWithoutKindListsAsPlainItem() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+
+        let trashedName = try store.trashItem(atRelativePath: entryRelPath)
+        // Rewrite the sidecar in the M1 shape (no `kind` key).
+        let legacy = """
+        {"deletedAt":"2026-07-01T10:00:00Z","originalPath":"\(entryRelPath)"}
+        """
+        try Data(legacy.utf8).write(to: store.sidecarURL(forTrashedName: trashedName))
+
+        let item = try #require(try store.items().first)
+        #expect(item.kind == .item)
+        #expect(item.isEntry)
+    }
+
     @Test func itemWithoutSidecarStillListsAndRestoresToRoot() throws {
         let (root, _) = try makeVault()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -217,6 +217,25 @@ actor VaultService {
         return outcome
     }
 
+    // MARK: - Audio lifecycle (AUD-1)
+
+    /// Byte size of the entry's audio file, for the Delete Audio warning.
+    func audioFileByteSize(atEntryPath relPath: RelativePath) -> Int64? {
+        guard let name = audioFileName(atEntryPath: relPath) else { return nil }
+        let url = rootURL.appendingRelativePath(relPath).appending(path: name)
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else {
+            return nil
+        }
+        return Int64(size)
+    }
+
+    /// Moves the entry's audio (and waveform cache) to Recently Deleted and
+    /// flags the frontmatter; the transcript stays behind as a plain note.
+    func deleteAudio(atEntryPath relPath: RelativePath) throws {
+        try trash.trashEntryAudio(atEntryPath: relPath)
+        synchronizeSearchIndex(relativePaths: [relPath])
+    }
+
     /// The entry's audio file name (canonical `audio.*` preferred), nil when
     /// the folder has no audio.
     func audioFileName(atEntryPath relPath: RelativePath) -> String? {

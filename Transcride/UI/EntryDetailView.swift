@@ -10,6 +10,10 @@ struct EntryDetailView: View {
     @State private var loadedEntryPath: RelativePath?
     @State private var showingInfo = false
     @State private var showingRetranscribe = false
+    // Payload separate from isPresented — SwiftUI clears the presentation
+    // binding before running dialog button actions.
+    @State private var showingDeleteAudio = false
+    @State private var deleteAudioByteSize: Int64?
 
     var body: some View {
         Group {
@@ -130,16 +134,33 @@ struct EntryDetailView: View {
         .contextMenu {
             Button("Show Info") { showingInfo = true }
             Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
+            if entry.hasAudio || entry.audioDeleted {
+                Divider()
+                Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
+                    .disabled(!canDeleteAudio(entry))
+            }
         }
         .toolbar {
-            if entry.hasAudio {
+            if entry.hasAudio || entry.audioDeleted {
                 ToolbarItem {
                     Button {
                         showingRetranscribe = true
                     } label: {
                         Label("Retranscribe", systemImage: "arrow.triangle.2.circlepath")
                     }
-                    .help("Retranscribe with a different model")
+                    .disabled(!entry.hasAudio)
+                    .help(entry.audioUnavailableExplanation
+                        ?? "Retranscribe with a different model")
+                }
+                ToolbarItem {
+                    Menu {
+                        Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
+                            .disabled(!canDeleteAudio(entry))
+                            .help(entry.audioUnavailableExplanation ?? "")
+                    } label: {
+                        Label("More", systemImage: "ellipsis.circle")
+                    }
+                    .help("More actions")
                 }
             }
             ToolbarItem {
@@ -165,6 +186,40 @@ struct EntryDetailView: View {
         .sheet(isPresented: $showingRetranscribe) {
             RetranscribeSheet(entry: entry)
         }
+        .confirmationDialog(
+            "Delete the audio from “\(entry.displayTitle)”?",
+            isPresented: $showingDeleteAudio,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Audio", role: .destructive) {
+                Task { await model.deleteAudio(for: entry) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(deleteAudioMessage)
+        }
+    }
+
+    // MARK: - Delete audio (AUD-1)
+
+    /// Deleting audio needs the file intact: not mid-recording, not vanished.
+    private func canDeleteAudio(_ entry: Entry) -> Bool {
+        entry.hasAudio && model.recorder.currentEntryPath != entry.relativePath
+    }
+
+    private func promptDeleteAudio(_ entry: Entry) {
+        Task {
+            deleteAudioByteSize = await model.audioFileByteSize(for: entry)
+            showingDeleteAudio = true
+        }
+    }
+
+    private var deleteAudioMessage: String {
+        let size = deleteAudioByteSize.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+        } ?? "its disk space"
+        return "This frees \(size). The transcript is kept, and the audio "
+            + "can be restored from Recently Deleted for \(TrashStore.retentionDays) days."
     }
 
     private func playbackShelf(_ entry: Entry, availableHeight: CGFloat) -> some View {
