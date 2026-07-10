@@ -208,11 +208,21 @@ final class AppModel {
     }
 
     func refresh() async {
+        await refresh(apply: nil)
+    }
+
+    /// `apply` runs in the same main-actor turn that publishes the new
+    /// snapshot. Selection changes that depend on the rescan (a just-stopped
+    /// recording, an auto-title rename) must land with it — resuming after
+    /// `await refresh()` is a separate job, and SwiftUI can render a frame in
+    /// between where the new row exists but nothing is selected.
+    private func refresh(apply: (@MainActor () -> Void)?) async {
         guard let service else { return }
         let snap = await service.snapshot()
         let trash = (try? await service.trashItems()) ?? []
         snapshot = snap
         trashItems = trash
+        apply?()
         // Drop selections that no longer exist on disk.
         if case .folder(let relPath)? = sidebarSelection, snap.folder(at: relPath) == nil {
             sidebarSelection = .folder("")
@@ -578,9 +588,10 @@ final class AppModel {
         stopLiveTranscription()
         guard let relPath = await recorder.stop() else { return }
         await service?.synchronizeSearchEntry(at: relPath)
-        await refresh()
-        selectedEntryID = relPath
+        // Enqueue before the rescan so the entry's first selected frame
+        // already carries its "waiting to transcribe" status row.
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
+        await refresh { self.selectedEntryID = relPath }
     }
 
     // MARK: - Live transcription (M3 addendum)
@@ -621,15 +632,23 @@ final class AppModel {
     /// A transcription landed: refresh, follow an auto-title rename, and let
     /// the detail view know its transcript changed on disk.
     private func entryTranscribed(originalPath: RelativePath, outcome: TranscriptionApplier.Outcome) {
-        transcriptRevision += 1
         if outcome.markdownLeftAlone {
             transcriptNoticeMessage = "The Original transcript was refreshed. Your Edited transcript was left untouched."
         }
-        if selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
-            selectedEntryID = outcome.entryRelativePath
-        }
         refreshVaultSearchIfVisible()
-        Task { await refresh() }
+        Task {
+            // One turn for the rescan, the reload trigger and any auto-title
+            // selection remap: the detail view sees a single taskKey change
+            // (remapping before the rescan lands would leave selectedEntry
+            // resolving to nil — a "No Entry Selected" flash — and bumping
+            // the revision separately would reload the transcript twice).
+            await refresh {
+                self.transcriptRevision += 1
+                if self.selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
+                    self.selectedEntryID = outcome.entryRelativePath
+                }
+            }
+        }
     }
 
     // MARK: - Intents (import)

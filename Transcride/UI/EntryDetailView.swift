@@ -17,10 +17,19 @@ struct EntryDetailView: View {
                 entryDetail(entry)
                     .task(id: taskKey(for: entry)) {
                         if loadedEntryPath != entry.relativePath {
-                            document = nil
-                            original = nil
-                            loadedEntryPath = nil
-                            model.player.setTranscriptForSilenceSkipping(nil)
+                            // A loaded path that vanished from the snapshot is
+                            // the same entry renamed (auto-title, retitle), not
+                            // a switch: keep the content up and swap in place
+                            // instead of dropping to the loading placeholder.
+                            if let loadedEntryPath, document != nil || original != nil,
+                               model.snapshot?.entry(withID: loadedEntryPath) == nil {
+                                self.loadedEntryPath = entry.relativePath
+                            } else {
+                                document = nil
+                                original = nil
+                                loadedEntryPath = nil
+                                model.player.setTranscriptForSilenceSkipping(nil)
+                            }
                         }
                         guard let content = await model.readTranscriptContent(for: entry),
                               !Task.isCancelled,
