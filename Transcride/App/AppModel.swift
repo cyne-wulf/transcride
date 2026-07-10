@@ -445,6 +445,7 @@ final class AppModel {
     private let findKeyCode: UInt16 = 3
     private let leftBracketKeyCode: UInt16 = 33
     private let rightBracketKeyCode: UInt16 = 30
+    private let backslashKeyCode: UInt16 = 42
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
@@ -474,11 +475,15 @@ final class AppModel {
             return true
         }
 
-        if keyCode == leftBracketKeyCode || keyCode == rightBracketKeyCode {
-            // [ and ] step playback speed whenever an entry with audio is
-            // open, matching the persistent speed control in the transport.
+        if keyCode == leftBracketKeyCode || keyCode == rightBracketKeyCode || keyCode == backslashKeyCode {
+            // [ and ] step playback speed and \ resets it to 1× whenever an
+            // entry with audio is open, matching the transport speed control.
             guard modifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            player.stepSpeed(keyCode == rightBracketKeyCode ? 1 : -1)
+            if keyCode == backslashKeyCode {
+                player.speed = 1.0
+            } else {
+                player.stepSpeed(keyCode == rightBracketKeyCode ? 1 : -1)
+            }
             return true
         }
 

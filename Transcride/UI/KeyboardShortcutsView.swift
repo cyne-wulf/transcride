@@ -53,6 +53,11 @@ struct KeyboardShortcutsView: View {
                             title: "Faster playback",
                             detail: "Steps up the speed ladder (0.5×–4×)."
                         ),
+                        ShortcutRow(
+                            keys: ["\\"],
+                            title: "Reset playback speed",
+                            detail: "Returns to 1×."
+                        ),
                     ])
 
                     shortcutSection("Zen Mode", rows: [

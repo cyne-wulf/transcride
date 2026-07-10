@@ -405,7 +405,7 @@ private struct PlaybackSection: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Playback speed — press [ for slower, ] for faster")
+        .help("Playback speed — press [ for slower, ] for faster, \\ for 1×")
         .accessibilityLabel("Playback speed, \(Self.speedLabel(player.speed))")
         .accessibilityIdentifier("playback-speed-menu")
     }
