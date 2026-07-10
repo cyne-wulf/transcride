@@ -7,6 +7,8 @@ struct RecentlyDeletedView: View {
     // binding before running dialog button actions.
     @State private var showDeletePrompt = false
     @State private var permanentlyDeleting: TrashItem?
+    @State private var showRestorePreTrimPrompt = false
+    @State private var restoringPreTrim: TrashItem?
 
     var body: some View {
         Group {
@@ -40,6 +42,32 @@ struct RecentlyDeletedView: View {
         } message: {
             Text("This cannot be undone.")
         }
+        .confirmationDialog(
+            "Restore the original audio of “\(restoringPreTrim?.displayName ?? "")”?",
+            isPresented: $showRestorePreTrimPrompt,
+            titleVisibility: .visible
+        ) {
+            Button("Restore Original Audio") {
+                if let item = restoringPreTrim {
+                    Task { await model.restoreTrashItem(item) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The entry's current trimmed audio moves to Recently Deleted, "
+                + "and the entry is re-transcribed to match the restored audio.")
+        }
+    }
+
+    /// Restoring pre-trim audio displaces the entry's current audio, so it
+    /// confirms first; every other kind restores immediately.
+    private func requestRestore(_ item: TrashItem) {
+        if item.kind == .preTrimAudio {
+            restoringPreTrim = item
+            showRestorePreTrimPrompt = true
+        } else {
+            Task { await model.restoreTrashItem(item) }
+        }
     }
 
     @ViewBuilder
@@ -56,9 +84,7 @@ struct RecentlyDeletedView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Restore") {
-                Task { await model.restoreTrashItem(item) }
-            }
+            Button("Restore") { requestRestore(item) }
             Button(role: .destructive) {
                 permanentlyDeleting = item
                 showDeletePrompt = true
@@ -69,7 +95,7 @@ struct RecentlyDeletedView: View {
         }
         .padding(.vertical, 4)
         .contextMenu {
-            Button("Restore") { Task { await model.restoreTrashItem(item) } }
+            Button("Restore") { requestRestore(item) }
             Button("Reveal in Finder") { model.revealTrashItemInFinder(item) }
             Divider()
             Button("Delete Permanently…", role: .destructive) {
@@ -82,6 +108,7 @@ struct RecentlyDeletedView: View {
     private func iconName(for item: TrashItem) -> String {
         switch item.kind {
         case .entryAudio: "waveform.badge.minus"
+        case .preTrimAudio: "scissors"
         case .item: item.isEntry ? "waveform" : "folder"
         }
     }

@@ -236,6 +236,30 @@ actor VaultService {
         synchronizeSearchIndex(relativePaths: [relPath])
     }
 
+    /// Trim (AUD-3): exports the kept range, stages the pre-trim audio in
+    /// Recently Deleted, swaps the trimmed file in, and updates the
+    /// frontmatter duration. The caller enqueues the retranscription.
+    func trimAudio(atEntryPath relPath: RelativePath, selection: TrimSelection) async throws -> TrimApplier.Outcome {
+        guard let audioName = audioFileName(atEntryPath: relPath) else {
+            throw VaultError.notFound(relPath.appendingComponent("audio"))
+        }
+        let audioURL = rootURL.appendingRelativePath(relPath).appending(path: audioName)
+        let exported = try await AudioTrimExport.export(from: audioURL, keeping: selection)
+        defer { try? FileManager.default.removeItem(at: exported.url.deletingLastPathComponent()) }
+        // The exporter trims on packet boundaries; probe the real duration
+        // rather than trusting the requested range.
+        let newDuration = (try? await AudioImportFormat.probeDuration(of: exported.url))
+            ?? selection.length
+        let outcome = try TrimApplier(vaultRoot: rootURL).apply(
+            trimmedFileAt: exported.url,
+            fileName: exported.fileName,
+            newDuration: newDuration,
+            toEntryAt: relPath
+        )
+        synchronizeSearchIndex(relativePaths: [relPath])
+        return outcome
+    }
+
     /// The entry's audio file name (canonical `audio.*` preferred), nil when
     /// the folder has no audio.
     func audioFileName(atEntryPath relPath: RelativePath) -> String? {

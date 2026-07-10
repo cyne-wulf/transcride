@@ -14,6 +14,7 @@ struct EntryDetailView: View {
     // binding before running dialog button actions.
     @State private var showingDeleteAudio = false
     @State private var deleteAudioByteSize: Int64?
+    @State private var isTrimming = false
 
     var body: some View {
         Group {
@@ -32,6 +33,7 @@ struct EntryDetailView: View {
                                 document = nil
                                 original = nil
                                 loadedEntryPath = nil
+                                isTrimming = false
                                 model.player.setTranscriptForSilenceSkipping(nil)
                             }
                         }
@@ -154,6 +156,11 @@ struct EntryDetailView: View {
                 }
                 ToolbarItem {
                     Menu {
+                        Button("Trim Audio…") { isTrimming = true }
+                            .disabled(!canTrim(entry))
+                            .help(entry.audioUnavailableExplanation
+                                ?? "Select the range of audio to keep")
+                        Divider()
                         Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
                             .disabled(!canDeleteAudio(entry))
                             .help(entry.audioUnavailableExplanation ?? "")
@@ -207,6 +214,16 @@ struct EntryDetailView: View {
         entry.hasAudio && model.recorder.currentEntryPath != entry.relativePath
     }
 
+    // MARK: - Trim (AUD-3)
+
+    /// Trimming needs stable audio: not mid-recording and not being read by a
+    /// queued or running transcription.
+    private func canTrim(_ entry: Entry) -> Bool {
+        canDeleteAudio(entry)
+            && model.transcriptionQueue?.items
+                .contains(where: { $0.entryRelativePath == entry.relativePath }) != true
+    }
+
     private func promptDeleteAudio(_ entry: Entry) {
         Task {
             deleteAudioByteSize = await model.audioFileByteSize(for: entry)
@@ -224,7 +241,7 @@ struct EntryDetailView: View {
 
     private func playbackShelf(_ entry: Entry, availableHeight: CGFloat) -> some View {
         let compact = availableHeight < 620
-        return PlaybackSection(entry: entry, availableHeight: availableHeight)
+        return PlaybackSection(entry: entry, availableHeight: availableHeight, isTrimming: $isTrimming)
             .frame(maxWidth: 900)
             .padding(.horizontal, 36)
             .padding(.top, compact ? 6 : 10)
@@ -313,12 +330,41 @@ private struct PlaybackSection: View {
     @Environment(AppModel.self) private var model
     let entry: Entry
     let availableHeight: CGFloat
+    @Binding var isTrimming: Bool
 
     @State private var waveform: WaveformData?
     @State private var waveformError: String?
     @State private var sectionWidth: CGFloat = 420
+    @State private var trimStart: Double = 0
+    @State private var trimEnd: Double = 0
+    @State private var showingTrimConfirm = false
 
     private var player: PlayerService { model.player }
+
+    /// Best-known audio length for trim math (the waveform cache carries the
+    /// decoded duration; the player's may still be loading).
+    private var trimDuration: Double {
+        waveform?.duration ?? (player.duration > 0 ? player.duration : entry.duration ?? 0)
+    }
+
+    private var trimSelection: TrimSelection {
+        TrimSelection(start: trimStart, end: trimEnd)
+    }
+
+    /// Why trim mode can't start right now; nil when it can.
+    private var trimBlockedReason: String? {
+        if model.recorder.currentEntryPath == entry.relativePath {
+            return "Stop the recording before trimming."
+        }
+        if model.transcriptionQueue?.items
+            .contains(where: { $0.entryRelativePath == entry.relativePath }) == true {
+            return "Wait for the transcription to finish before trimming."
+        }
+        if trimDuration <= TrimSelection.minimumKeptSeconds {
+            return "This audio is too short to trim."
+        }
+        return nil
+    }
 
     /// Controls grow modestly with the detail column while preserving the
     /// compact proportions of Voice Memos' lower playback shelf.
@@ -352,7 +398,7 @@ private struct PlaybackSection: View {
         } action: { width in
             sectionWidth = width
         }
-        .task(id: "\(entry.relativePath)|\(entry.audioFileName ?? "")") {
+        .task(id: "\(entry.relativePath)|\(entry.audioFileName ?? "")|audio:\(model.audioRevision)") {
             if let url = model.audioURL(for: entry) {
                 player.load(url: url, knownDuration: entry.duration)
             }
@@ -366,6 +412,36 @@ private struct PlaybackSection: View {
                 waveformError = error.localizedDescription
             }
         }
+        .onChange(of: isTrimming) { _, trimming in
+            guard trimming else { return }
+            guard trimBlockedReason == nil else {
+                isTrimming = false
+                return
+            }
+            trimStart = 0
+            trimEnd = trimDuration
+        }
+        .confirmationDialog(
+            "Trim “\(entry.displayTitle)” to the selected range?",
+            isPresented: $showingTrimConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Trim and Retranscribe", role: .destructive) {
+                let selection = trimSelection
+                isTrimming = false
+                Task { await model.trimAudio(for: entry, selection: selection) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(trimConfirmMessage)
+        }
+    }
+
+    private var trimConfirmMessage: String {
+        "This keeps \(EntryListView.formatDuration(trimSelection.length)) of "
+            + "\(EntryListView.formatDuration(trimDuration)) and re-transcribes the audio "
+            + "(a hand-edited note is never overwritten). The original audio can be restored "
+            + "from Recently Deleted for \(TrashStore.retentionDays) days."
     }
 
     private var waveformShelf: some View {
@@ -375,15 +451,47 @@ private struct PlaybackSection: View {
                 .padding(.horizontal, 8)
                 .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
                 .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    if isTrimming, waveform != nil {
+                        TrimSelectionOverlay(start: $trimStart, end: $trimEnd, duration: trimDuration)
+                            .padding(.horizontal, 8)
+                    }
+                }
 
-            HStack {
-                Text("0:00")
-                Spacer()
-                Text(EntryListView.formatDuration(player.duration))
+            if isTrimming {
+                trimControls
+            } else {
+                HStack {
+                    Text("0:00")
+                    Spacer()
+                    Text(EntryListView.formatDuration(player.duration))
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
         }
+    }
+
+    /// Replaces the caption row while selecting a range to keep (AUD-3).
+    private var trimControls: some View {
+        HStack(spacing: 12) {
+            Button("Cancel") { isTrimming = false }
+            Spacer()
+            Text("Keep \(EntryListView.formatDuration(trimStart)) – "
+                + "\(EntryListView.formatDuration(trimEnd)) · "
+                + EntryListView.formatDuration(trimSelection.length))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Trim…") { showingTrimConfirm = true }
+                .disabled(!trimSelection.isValidCrop(ofDuration: trimDuration))
+                .help(trimSelection.isValidCrop(ofDuration: trimDuration)
+                    ? "Crop the audio to the selected range"
+                    : "Drag the yellow handles inward to choose what to keep")
+        }
+        .controlSize(.small)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("trim-controls")
     }
 
     @ViewBuilder
@@ -392,6 +500,8 @@ private struct PlaybackSection: View {
             WaveformView(peaks: waveform.peaks, progress: player.progress) { fraction in
                 player.seek(toFraction: fraction)
             }
+            // In trim mode the drag handles own the waveform surface.
+            .allowsHitTesting(!isTrimming)
         } else if let waveformError {
             ContentUnavailableView {
                 Label("No Waveform", systemImage: "waveform.slash")
@@ -434,6 +544,8 @@ private struct PlaybackSection: View {
             }
 
             skipSilenceControl
+
+            trimControl
         }
         .padding(.horizontal, 22 * controlScale)
         .padding(.vertical, 7 * controlScale)
@@ -472,6 +584,27 @@ private struct PlaybackSection: View {
         .help("Playback speed — press [ for slower, ] for faster, \\ for 1×")
         .accessibilityLabel("Playback speed, \(Self.speedLabel(player.speed))")
         .accessibilityIdentifier("playback-speed-menu")
+    }
+
+    private var trimControl: some View {
+        TransportButton(
+            systemImage: "scissors",
+            size: 15 * controlScale,
+            help: trimBlockedReason
+                ?? (isTrimming ? "Trimming — drag the yellow handles, then press Trim…"
+                               : "Trim — crop the audio to a selected range"),
+            tint: isTrimming
+                ? AnyShapeStyle(Color.yellow)
+                : AnyShapeStyle(trimBlockedReason == nil ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+        ) {
+            if isTrimming {
+                isTrimming = false
+            } else if trimBlockedReason == nil {
+                isTrimming = true
+            }
+        }
+        .accessibilityLabel("Trim")
+        .accessibilityIdentifier("trim-toggle")
     }
 
     private var skipSilenceControl: some View {

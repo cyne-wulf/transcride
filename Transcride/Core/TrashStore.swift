@@ -8,6 +8,12 @@ enum TrashItemKind: String, Codable, Sendable {
     /// An entry's audio (plus its waveform cache), removed via Delete Audio…
     /// (AUD-1); `originalPath` is the entry folder the audio came from.
     case entryAudio
+    /// The pre-trim audio (plus its waveform cache) displaced by a trim
+    /// (AUD-3). Restoring swaps it back into the entry and stages the trimmed
+    /// audio here as a regular `entryAudio` item.
+    case preTrimAudio
+
+    var isAudio: Bool { self == .entryAudio || self == .preTrimAudio }
 }
 
 /// Sidecar written next to each trashed item, recording where it came from.
@@ -34,6 +40,9 @@ struct TrashItem: Identifiable, Hashable, Sendable {
     var displayName: String {
         if kind == .entryAudio {
             return "Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
+        }
+        if kind == .preTrimAudio {
+            return "Original Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
         }
         if isEntry, let slugName = Self.entrySlugName(fromFolderName: trashedName) {
             return slugName
@@ -103,6 +112,32 @@ struct TrashStore: Sendable {
     /// entry becomes a plain note. Returns the item's name in the trash.
     @discardableResult
     func trashEntryAudio(atEntryPath entryPath: RelativePath, deletedAt: Date = Date()) throws -> String {
+        let trashedName = try trashAudioFiles(
+            atEntryPath: entryPath, wrapperPrefix: "audio-", kind: .entryAudio, deletedAt: deletedAt
+        )
+        try setAudioDeletedFlag(true, inEntry: vaultRoot.appendingRelativePath(entryPath))
+        return trashedName
+    }
+
+    /// Trim (AUD-3): stages the pre-trim audio and its now-stale waveform
+    /// cache as one restorable item. Unlike Delete Audio this sets no
+    /// frontmatter flag — the entry is getting replacement audio, not losing it.
+    @discardableResult
+    func trashPreTrimAudio(atEntryPath entryPath: RelativePath, deletedAt: Date = Date()) throws -> String {
+        try trashAudioFiles(
+            atEntryPath: entryPath, wrapperPrefix: "original-audio-",
+            kind: .preTrimAudio, deletedAt: deletedAt
+        )
+    }
+
+    /// Moves the entry's audio file and waveform cache into a single trash
+    /// wrapper (one Recently Deleted row, one-click restore).
+    private func trashAudioFiles(
+        atEntryPath entryPath: RelativePath,
+        wrapperPrefix: String,
+        kind: TrashItemKind,
+        deletedAt: Date
+    ) throws -> String {
         let entryURL = vaultRoot.appendingRelativePath(entryPath)
         let fileNames = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
             .filter { !$0.hasPrefix(".") }
@@ -111,7 +146,7 @@ struct TrashStore: Sendable {
         }
         try fm.createDirectory(at: trashDirectory, withIntermediateDirectories: true)
 
-        let trashedName = availableName(for: "audio-" + entryPath.lastComponent)
+        let trashedName = availableName(for: wrapperPrefix + entryPath.lastComponent)
         let wrapperURL = trashDirectory.appending(path: trashedName, directoryHint: .isDirectory)
         try fm.createDirectory(at: wrapperURL, withIntermediateDirectories: false)
         try fm.moveItem(
@@ -123,10 +158,9 @@ struct TrashStore: Sendable {
             try? fm.moveItem(at: waveformURL, to: wrapperURL.appending(path: WaveformData.fileName))
         }
 
-        let info = TrashInfo(originalPath: entryPath, deletedAt: deletedAt, kind: .entryAudio)
+        let info = TrashInfo(originalPath: entryPath, deletedAt: deletedAt, kind: kind)
         let data = try Self.makeEncoder().encode(info)
         try AtomicFile.write(data, to: sidecarURL(forTrashedName: trashedName))
-        try setAudioDeletedFlag(true, inEntry: entryURL)
         return trashedName
     }
 
@@ -159,7 +193,7 @@ struct TrashStore: Sendable {
     /// Returns the vault-relative path it was restored to.
     @discardableResult
     func restore(_ item: TrashItem) throws -> RelativePath {
-        if item.kind == .entryAudio {
+        if item.kind.isAudio {
             return try restoreEntryAudio(item)
         }
         let sourceURL = trashDirectory.appending(path: item.trashedName)
@@ -191,6 +225,9 @@ struct TrashStore: Sendable {
 
     /// Puts a trashed audio item's files back into their entry folder and
     /// clears the `audio_deleted` flag, fully reversing `trashEntryAudio`.
+    /// For a pre-trim item the trimmed audio currently in the entry is
+    /// displaced first — staged as a regular audio item, never hard-deleted —
+    /// and the frontmatter duration follows the restored waveform cache.
     private func restoreEntryAudio(_ item: TrashItem) throws -> RelativePath {
         let wrapperURL = trashDirectory.appending(path: item.trashedName, directoryHint: .isDirectory)
         guard fm.fileExists(atPath: wrapperURL.path) else {
@@ -198,6 +235,15 @@ struct TrashStore: Sendable {
         }
         let entryURL = vaultRoot.appendingRelativePath(item.originalPath)
         try fm.createDirectory(at: entryURL, withIntermediateDirectories: true)
+
+        if item.kind == .preTrimAudio {
+            // Swallow notFound: the trimmed audio may itself have been
+            // deleted meanwhile, and the swap-back is still valid.
+            _ = try? trashAudioFiles(
+                atEntryPath: item.originalPath, wrapperPrefix: "audio-",
+                kind: .entryAudio, deletedAt: Date()
+            )
+        }
 
         let names = ((try? fm.contentsOfDirectory(atPath: wrapperURL.path)) ?? [])
             .filter { !$0.hasPrefix(".") }
@@ -214,6 +260,10 @@ struct TrashStore: Sendable {
             } else {
                 try fm.moveItem(at: wrapperURL.appending(path: name), to: destination)
             }
+        }
+        if item.kind == .preTrimAudio,
+           let waveform = WaveformData.load(from: WaveformData.url(inEntry: entryURL)) {
+            try? EntryMetadata.setDuration(waveform.duration, inEntry: entryURL)
         }
         try setAudioDeletedFlag(false, inEntry: entryURL)
         try? fm.removeItem(at: wrapperURL)

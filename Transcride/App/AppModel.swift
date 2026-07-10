@@ -57,6 +57,10 @@ final class AppModel {
     /// in-app autosave must not reload the active editor, because an earlier
     /// debounced save may finish while newer keystrokes are still unsaved.
     private(set) var externalVaultRevision = 0
+    /// Bumped when an entry's audio file is replaced in place (trim, restore):
+    /// the playback shelf must reload the player and waveform even though the
+    /// entry path and audio file name are unchanged.
+    private(set) var audioRevision = 0
 
     var isVaultSearchPresented = false
     var vaultSearchQuery = ""
@@ -730,11 +734,53 @@ final class AppModel {
         }
     }
 
+    /// Trim to selection (AUD-3): the pre-trim audio is staged in Recently
+    /// Deleted, the trimmed file becomes the entry's audio, and a
+    /// retranscription is enqueued — word timings from the old audio are
+    /// meaningless against the new file.
+    func trimAudio(for entry: Entry, selection: TrimSelection) async {
+        if player.url == audioURL(for: entry) { player.unload() }
+        transcriptionQueue?.evictItems(underPath: entry.relativePath)
+        await perform("trimAudio [\(entry.relativePath)]") { service in
+            _ = try await service.trimAudio(atEntryPath: entry.relativePath, selection: selection)
+            await MainActor.run {
+                self.audioRevision &+= 1
+                self.transcriptionQueue?.enqueue(
+                    entryRelativePath: entry.relativePath,
+                    source: "trim",
+                    isRetranscribe: true
+                )
+            }
+        }
+    }
+
     // MARK: - Intents (trash)
 
     func restoreTrashItem(_ item: TrashItem) async {
+        // An audio restore rearranges files the player or a running
+        // transcription may hold open; both must let go first.
+        if item.kind.isAudio, let vaultURL,
+           player.url?.deletingLastPathComponent().path
+               == vaultURL.appendingRelativePath(item.originalPath).path {
+            player.unload()
+        }
+        if item.kind == .preTrimAudio {
+            transcriptionQueue?.evictItems(underPath: item.originalPath)
+        }
         await perform("restore [\(item.trashedName)]") { service in
             _ = try await service.restore(item)
+            await MainActor.run {
+                self.audioRevision &+= 1
+                if item.kind == .preTrimAudio {
+                    // The transcript still matches the displaced trimmed
+                    // audio; bring the text back in line with the disk.
+                    self.transcriptionQueue?.enqueue(
+                        entryRelativePath: item.originalPath,
+                        source: "trim-restore",
+                        isRetranscribe: true
+                    )
+                }
+            }
         }
     }
 
