@@ -148,8 +148,12 @@ struct EntryDetailView: View {
                     .disabled(!canDeleteAudio(entry))
             }
         }
+        // `.primaryAction` right-aligns the entry actions to the window's
+        // top-right corner; they appear only while an entry is selected, so
+        // the corner empties out (leaving just the queue ring at the pane's
+        // leading edge) when nothing is.
         .toolbar {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task { await model.toggleFavorite(for: entry) }
                 } label: {
@@ -161,7 +165,7 @@ struct EntryDetailView: View {
                 .help(entry.favorite ? "Remove from Favorites" : "Add to Favorites")
             }
             if entry.hasAudio || entry.audioDeleted {
-                ToolbarItem {
+                ToolbarItem(placement: .primaryAction) {
                     Button {
                         showingRetranscribe = true
                     } label: {
@@ -172,7 +176,7 @@ struct EntryDetailView: View {
                         ?? "Retranscribe with a different model")
                 }
             }
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 Menu {
                     if entry.hasAudio || entry.audioDeleted {
                         Button("Trim Audio…") { isTrimming = true }
@@ -210,7 +214,7 @@ struct EntryDetailView: View {
                 }
                 .help("More actions")
             }
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingInfo.toggle()
                 } label: {
@@ -221,7 +225,7 @@ struct EntryDetailView: View {
                     infoPopover(entry)
                 }
             }
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     model.revealInFinder(relativePath: entry.relativePath)
                 } label: {
