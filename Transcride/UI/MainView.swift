@@ -7,12 +7,6 @@ struct MainView: View {
 
     var body: some View {
         @Bindable var model = model
-        // Read here, not in the toolbar closure: observation only tracks
-        // reads made during body, and the ToolbarContentBuilder closure is
-        // not re-evaluated when the queue mutates — reading `items` only
-        // there leaves the button stuck until body re-runs for another
-        // reason.
-        let queueHasItems = model.transcriptionQueue?.items.isEmpty == false
         NavigationSplitView {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
@@ -51,7 +45,10 @@ struct MainView: View {
         }
         .toolbar(model.recorder.isZenMode ? .hidden : .automatic, for: .windowToolbar)
         .toolbar {
-            if let queue = model.transcriptionQueue, queueHasItems {
+            // Keep the queue discoverable even when it is empty. The popover
+            // explains the idle state and the same ring becomes live progress
+            // as soon as transcription work appears.
+            if let queue = model.transcriptionQueue {
                 ToolbarItem {
                     TranscriptionQueueButton(queue: queue)
                 }

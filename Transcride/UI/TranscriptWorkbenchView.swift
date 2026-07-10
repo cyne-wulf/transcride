@@ -84,17 +84,14 @@ struct TranscriptWorkbenchView: View {
     var body: some View {
         VStack(spacing: 0) {
             noteToolbar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.bar)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 6)
 
             if showingFind {
                 findBar
                     .frame(height: 42)
-                    .background(.bar)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
-
-            Divider()
 
             ZStack(alignment: .topTrailing) {
                 layerContent
@@ -112,9 +109,7 @@ struct TranscriptWorkbenchView: View {
                 }
             }
         }
-        .background(.background)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator, lineWidth: 1))
+        .background(.clear)
         .onChange(of: model.player.seekRevision) { _, _ in
             // Word clicks, waveform scrubs and transport skips all restore
             // follow. Silence skipping intentionally does not increment this.
@@ -532,10 +527,11 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
             highlightedWordIndex = nil
             navigationRange = nil
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineSpacing = 4
-            paragraph.paragraphSpacing = 8
+            paragraph.alignment = .center
+            paragraph.lineSpacing = 6
+            paragraph.paragraphSpacing = 12
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.preferredFont(forTextStyle: .body),
+                .font: NSFont.systemFont(ofSize: 17, weight: .medium),
                 .foregroundColor: NSColor.labelColor,
                 .paragraphStyle: paragraph,
             ]

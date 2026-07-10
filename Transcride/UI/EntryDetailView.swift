@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Milestone-1 placeholder detail view. The transcript body is the first-class
-/// content; entry metadata is tucked behind "Show Info" (right-click or the
-/// toolbar ⓘ button).
+/// Voice Memos-style detail workbench: transcript first, playback shelf below,
+/// with entry metadata tucked behind Show Info.
 struct EntryDetailView: View {
     @Environment(AppModel.self) private var model
 
@@ -51,44 +50,35 @@ struct EntryDetailView: View {
 
     @ViewBuilder
     private func entryDetail(_ entry: Entry) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.displayTitle)
-                        .font(.title2.bold())
-                    HStack(spacing: 8) {
-                        Text(entry.created.formatted(date: .abbreviated, time: .shortened))
-                        if let duration = entry.duration {
-                            Text("·")
-                            Text(EntryListView.formatDuration(duration))
-                        }
+        VStack(spacing: 0) {
+            VStack(spacing: 3) {
+                Text(entry.displayTitle)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+
+                HStack(spacing: 8) {
+                    Text(entry.created.formatted(date: .omitted, time: .shortened))
+                    if let duration = entry.duration {
+                        Text("·")
+                            .foregroundStyle(.tertiary)
+                        Text(EntryListView.formatDuration(duration))
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 }
-
-                if entry.hasAudio {
-                    PlaybackSection(entry: entry)
-                        .padding(.vertical, 8)
-                }
-
-                if let queue = model.transcriptionQueue,
-                   let queueItem = queue.items.first(where: { $0.entryRelativePath == entry.relativePath }) {
-                    transcriptionStatus(queueItem, queue: queue)
-                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 20)
+            .padding(.horizontal, 32)
+            .padding(.top, 24)
             .padding(.bottom, 12)
-            .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity)
 
             if loadedEntryPath == entry.relativePath, document != nil || original != nil {
                 TranscriptWorkbenchView(entry: entry, original: original, document: $document)
-                    .frame(maxWidth: 820, maxHeight: .infinity)
+                    .frame(maxWidth: 900, maxHeight: .infinity)
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 20)
+                    .padding(.horizontal, 36)
+                    .layoutPriority(1)
             } else if loadedEntryPath != entry.relativePath {
                 ProgressView("Loading transcript…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -107,6 +97,22 @@ struct EntryDetailView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
+            if let queue = model.transcriptionQueue,
+               let queueItem = queue.items.first(where: { $0.entryRelativePath == entry.relativePath }) {
+                transcriptionStatus(queueItem, queue: queue)
+                    .padding(.horizontal, 36)
+                    .padding(.top, 6)
+                    .frame(maxWidth: 900)
+            }
+
+            if entry.hasAudio {
+                PlaybackSection(entry: entry)
+                    .frame(maxWidth: 900)
+                    .padding(.horizontal, 36)
+                    .padding(.top, 10)
+                    .padding(.bottom, 18)
+            }
         }
         .contentShape(Rectangle())
         .contextMenu {
@@ -115,6 +121,9 @@ struct EntryDetailView: View {
         }
         .toolbar {
             if entry.hasAudio {
+                ToolbarItem {
+                    PlaybackOptionsButton()
+                }
                 ToolbarItem {
                     Button {
                         showingRetranscribe = true
@@ -232,21 +241,23 @@ private struct PlaybackSection: View {
 
     private var player: PlayerService { model.player }
 
-    /// Transport controls grow with the window (1× at 420pt up to 1.5×) so
-    /// they stay comfortable to click in a large window.
+    /// Controls grow modestly with the detail column while preserving the
+    /// compact proportions of Voice Memos' lower playback shelf.
     private var controlScale: CGFloat {
-        min(max(sectionWidth / 420, 1.0), 1.5)
+        min(max(sectionWidth / 620, 0.9), 1.15)
     }
 
     var body: some View {
-        VStack(spacing: 10 * controlScale) {
-            waveformArea
-                .frame(height: 72 * controlScale)
-                .frame(maxWidth: .infinity)
+        VStack(spacing: 8 * controlScale) {
+            waveformShelf
+
+            Text(Self.playheadLabel(player.currentTime))
+                .font(.system(size: 36 * controlScale, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+
             transport
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
         } action: { width in
@@ -265,6 +276,24 @@ private struct PlaybackSection: View {
             } catch {
                 waveformError = error.localizedDescription
             }
+        }
+    }
+
+    private var waveformShelf: some View {
+        VStack(spacing: 5) {
+            waveformArea
+                .frame(height: 56 * controlScale)
+                .padding(.horizontal, 8)
+                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            HStack {
+                Text("0:00")
+                Spacer()
+                Text(EntryListView.formatDuration(player.duration))
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -292,78 +321,51 @@ private struct PlaybackSection: View {
     }
 
     private var transport: some View {
-        HStack(spacing: 14 * controlScale) {
-            Text(EntryListView.formatDuration(player.currentTime))
-                .font(.system(size: 11 * controlScale).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 44 * controlScale, alignment: .leading)
-
-            Spacer()
-
+        HStack(spacing: 23 * controlScale) {
             TransportButton(
-                systemImage: "gobackward.15", size: 17 * controlScale, help: "Back 15 seconds"
+                systemImage: "gobackward.15", size: 19 * controlScale, help: "Back 15 seconds"
             ) {
                 player.skip(-15)
             }
 
             TransportButton(
-                systemImage: player.isPlaying ? "pause.circle.fill" : "play.circle.fill",
-                size: 34 * controlScale,
-                help: player.isPlaying ? "Pause (Space)" : "Play (Space)",
-                isProminent: true
+                systemImage: player.isPlaying ? "pause.fill" : "play.fill",
+                size: 27 * controlScale,
+                help: player.isPlaying ? "Pause (Space)" : "Play (Space)"
             ) {
                 player.togglePlayPause()
             }
 
             TransportButton(
-                systemImage: "goforward.15", size: 17 * controlScale, help: "Forward 15 seconds"
+                systemImage: "goforward.15", size: 19 * controlScale, help: "Forward 15 seconds"
             ) {
                 player.skip(15)
             }
-
-            Spacer()
-
-            Toggle(isOn: Binding(
-                get: { player.skipSilence },
-                set: { player.skipSilence = $0 }
-            )) {
-                Label("Skip Silence", systemImage: "forward.end.fill")
-                    .font(.system(size: 11 * controlScale, weight: .medium))
-            }
-            .toggleStyle(.button)
-            .controlSize(.small)
-            .help("Jump pauses longer than \(SilenceGap.defaultThreshold, specifier: "%.1f") seconds")
-
-            speedMenu
-
-            Text(EntryListView.formatDuration(player.duration))
-                .font(.system(size: 11 * controlScale).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 44 * controlScale, alignment: .trailing)
         }
-    }
-
-    private var speedMenu: some View {
-        SpeedChip(scale: controlScale) {
-            Picker("Playback Speed", selection: Binding(
-                get: { player.speed },
-                set: { player.speed = $0 }
-            )) {
-                ForEach(PlayerService.speeds, id: \.self) { speed in
-                    Text(Self.speedLabel(speed)).tag(speed)
-                }
-            }
-            .pickerStyle(.inline)
-            .labelsHidden()
-        } label: {
-            Text(Self.speedLabel(player.speed))
-        }
+        .padding(.horizontal, 22 * controlScale)
+        .padding(.vertical, 7 * controlScale)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.separator.opacity(0.7), lineWidth: 1))
+        .fixedSize()
     }
 
     static func speedLabel(_ speed: Float) -> String {
         // Float description is the shortest exact form: "0.75", "1.5", "2.0".
         let text = speed == speed.rounded() ? String(format: "%.0f", speed) : "\(speed)"
         return text + "×"
+    }
+
+    static func playheadLabel(_ seconds: Double) -> String {
+        let totalCentiseconds = max(0, Int((seconds * 100).rounded(.down)))
+        let centiseconds = totalCentiseconds % 100
+        let totalSeconds = totalCentiseconds / 100
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let wholeSeconds = totalSeconds % 60
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d.%02d", hours, minutes, wholeSeconds, centiseconds)
+        }
+        return String(format: "%02d:%02d.%02d", minutes, wholeSeconds, centiseconds)
     }
 }
 
@@ -373,7 +375,6 @@ private struct TransportButton: View {
     let systemImage: String
     let size: CGFloat
     let help: String
-    var isProminent = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -382,7 +383,7 @@ private struct TransportButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: size))
-                .foregroundStyle(isProminent ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                .foregroundStyle(.primary)
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: size + 16, height: size + 14)
                 .background(
@@ -399,40 +400,59 @@ private struct TransportButton: View {
     }
 }
 
-/// Bordered capsule chip for the speed menu: looks like a button, so the
-/// clickable area is obvious.
-private struct SpeedChip<Content: View, Label: View>: View {
-    let scale: CGFloat
-    @ViewBuilder let content: Content
-    @ViewBuilder let label: Label
-
-    @State private var hovering = false
+/// Voice Memos-style playback panel in the detail toolbar. Playback rate and
+/// Skip Silence live together here instead of competing with the transport.
+private struct PlaybackOptionsButton: View {
+    @Environment(AppModel.self) private var model
+    @State private var showingOptions = false
 
     var body: some View {
-        Menu {
-            content
+        Button {
+            showingOptions.toggle()
         } label: {
-            HStack(spacing: 6 * scale) {
-                label
-                    .font(.system(size: 13 * scale, weight: .medium).monospacedDigit())
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9 * scale, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 16 * scale)
-            .frame(minWidth: 64 * scale)
-            .frame(height: 32 * scale)
+            Label("Playback Controls", systemImage: "slider.horizontal.3")
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .background(
-            Capsule()
-                .fill(.background.opacity(hovering ? 0.9 : 0.6))
-                .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
-        )
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .help("Playback speed (pitch preserved)")
+        .accessibilityLabel("Playback Controls")
+        .accessibilityIdentifier("playback-controls-menu")
+        .help("Playback speed and Skip Silence")
+        .popover(isPresented: $showingOptions, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Playback Controls")
+                    .font(.headline)
+
+                HStack(spacing: 12) {
+                    Label("Playback Speed", systemImage: "gauge.with.dots.needle.50percent")
+                    Spacer()
+                    Picker("Playback Speed", selection: Binding(
+                        get: { model.player.speed },
+                        set: { model.player.speed = $0 }
+                    )) {
+                        ForEach(PlayerService.speeds, id: \.self) { speed in
+                            Text(PlaybackSection.speedLabel(speed)).tag(speed)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 92)
+                }
+
+                Divider()
+
+                Toggle(isOn: Binding(
+                    get: { model.player.skipSilence },
+                    set: { model.player.skipSilence = $0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Skip Silence")
+                        Text("Jump pauses longer than \(SilenceGap.defaultThreshold, specifier: "%.1f") seconds")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.checkbox)
+            }
+            .padding(16)
+            .frame(width: 300)
+        }
     }
 }

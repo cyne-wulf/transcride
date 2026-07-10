@@ -1,11 +1,9 @@
 import SwiftUI
 
-/// Toolbar button + popover for the transcription queue (TRN-3). The button
-/// only appears while the queue has items and reads as background activity —
-/// a filling progress ring around the item count — so it can't be mistaken
-/// for the entry-level Retranscribe action (which keeps the circular-arrows
-/// symbol). Each popover row shows the entry, model, and state, with retry on
-/// failures and remove/cancel on every row.
+/// Always-discoverable toolbar button + popover for the transcription queue
+/// (TRN-3). Active work appears as a filling progress ring around the item
+/// count; the idle popover explains that nothing is waiting. Each row shows
+/// the entry, model, and state, with retry and remove/cancel actions.
 struct TranscriptionQueueButton: View {
     @Environment(AppModel.self) private var model
     let queue: TranscriptionQueue
@@ -50,11 +48,12 @@ private struct QueueProgressRing: View {
     var count: Int
 
     var body: some View {
+        let visibleFraction = count == 0 ? 0 : max(0.04, fraction ?? 0.04)
         ZStack {
             Circle()
                 .stroke(.tertiary, lineWidth: 2)
             Circle()
-                .trim(from: 0, to: max(0.04, fraction ?? 0.04))
+                .trim(from: 0, to: visibleFraction)
                 .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .animation(.linear(duration: 0.25), value: fraction)
