@@ -264,7 +264,7 @@ struct AppCommands: Commands {
         CommandGroup(before: .sidebar) {
             Picker("Sort Entries By", selection: Binding(
                 get: { model.entrySortOrder },
-                set: { model.entrySortOrder = $0 }
+                set: { model.selectEntrySortOrder($0) }
             )) {
                 ForEach(EntrySortOrder.allCases, id: \.self) { order in
                     Text(order.displayName).tag(order)

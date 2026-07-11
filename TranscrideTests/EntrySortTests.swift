@@ -35,12 +35,27 @@ struct EntrySortTests {
         #expect(EntrySortOrder.dateNewest.sorted([old, new]).map(\.id) == ["b", "a"])
     }
 
+    @Test func dateDirectionReversesPrimaryOrder() {
+        let old = makeEntry(path: "a", created: base)
+        let new = makeEntry(path: "b", created: base.addingTimeInterval(60))
+        #expect(EntrySortOrder.dateNewest.sorted([old, new], direction: .ascending).map(\.id) == ["a", "b"])
+        #expect(EntrySortOrder.dateNewest.sorted([old, new], direction: .descending).map(\.id) == ["b", "a"])
+    }
+
     @Test func durationSortsLongestFirstAndMissingLast() {
         let short = makeEntry(path: "short", created: base, duration: 10)
         let long = makeEntry(path: "long", created: base, duration: 500)
         let none = makeEntry(path: "none", created: base.addingTimeInterval(999))
         let sorted = EntrySortOrder.duration.sorted([none, short, long])
         #expect(sorted.map(\.id) == ["long", "short", "none"])
+    }
+
+    @Test func durationDirectionKeepsMissingLast() {
+        let short = makeEntry(path: "short", created: base, duration: 10)
+        let long = makeEntry(path: "long", created: base, duration: 500)
+        let none = makeEntry(path: "none", created: base.addingTimeInterval(999))
+        #expect(EntrySortOrder.duration.sorted([none, long, short], direction: .ascending).map(\.id) == ["short", "long", "none"])
+        #expect(EntrySortOrder.duration.sorted([none, short, long], direction: .descending).map(\.id) == ["long", "short", "none"])
     }
 
     @Test func titleSortsCaseInsensitivelyAndNumerically() {
@@ -50,6 +65,20 @@ struct EntrySortTests {
         let ten = makeEntry(path: "4", title: "Entry 10", created: base)
         let sorted = EntrySortOrder.title.sorted([ten, b, two, a])
         #expect(sorted.map(\.title) == ["Apple", "banana", "Entry 2", "Entry 10"])
+    }
+
+    @Test func titleDirectionReversesPrimaryOrder() {
+        let a = makeEntry(path: "a", title: "Apple", created: base)
+        let b = makeEntry(path: "b", title: "Banana", created: base)
+        #expect(EntrySortOrder.title.sorted([b, a], direction: .ascending).map(\.id) == ["a", "b"])
+        #expect(EntrySortOrder.title.sorted([a, b], direction: .descending).map(\.id) == ["b", "a"])
+    }
+
+    @Test func naturalDefaultDirectionMatchesField() {
+        #expect(EntrySortOrder.title.defaultDirection == .ascending)
+        #expect(EntrySortOrder.dateNewest.defaultDirection == .descending)
+        #expect(EntrySortOrder.duration.defaultDirection == .descending)
+        #expect(EntrySortOrder.recentlyEdited.defaultDirection == .descending)
     }
 
     @Test func equalTitlesFallBackToNewestCreated() {

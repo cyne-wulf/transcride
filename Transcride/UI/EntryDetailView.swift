@@ -60,7 +60,13 @@ struct EntryDetailView: View {
             }
         }
         .toolbar {
-            if #unavailable(macOS 26.0) {
+            // The middle/detail boundary must exist independently of selection.
+            // Putting this spacer inside entryDetail makes SwiftUI remove the
+            // detail toolbar section on a fresh launch, so EntryListView's Queue
+            // and Sort controls drift to the window's trailing edge.
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.flexible)
+            } else {
                 ToolbarItem(id: "detailAnchor") {
                     Color.clear
                         .frame(width: 0, height: 0)
@@ -207,9 +213,6 @@ struct EntryDetailView: View {
             }
         }
         .toolbar {
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.flexible)
-            }
             ToolbarItem(id: "detailFavorite", placement: .primaryAction) {
                 Button {
                     Task { await model.toggleFavorite(for: entry) }

@@ -9,6 +9,7 @@ struct EntryListView: View {
     @State private var showRenamePrompt = false
     @State private var renamingEntry: Entry?
     @State private var renameDraft = ""
+    @State private var sortPopover = SortPopoverController()
     @FocusState private var entryListHasFocus: Bool
 
     private var folder: FolderNode? { model.selectedFolder }
@@ -61,23 +62,32 @@ struct EntryListView: View {
         .toolbar {
             if let queue = model.transcriptionQueue {
                 ToolbarItem(id: "middleQueue") {
-                    TranscriptionQueueButton(queue: queue)
+                    TranscriptionQueueButton(queue: queue) {
+                        sortPopover.dismiss()
+                    }
                 }
             }
 
             ToolbarItem(id: "middleSort") {
-                Menu {
-                    Picker("Sort By", selection: $model.entrySortOrder) {
-                        ForEach(EntrySortOrder.allCases, id: \.self) { order in
-                            Text(order.displayName).tag(order)
-                        }
-                    }
-                    .pickerStyle(.inline)
+                Button {
+                    model.toggleEntrySortDirection()
+                    sortPopover.presentOrKeepOpen()
                 } label: {
                     Label("Sort", systemImage: "arrow.up.arrow.down")
+                        .background {
+                            SortPopoverAnchor(controller: sortPopover)
+                        }
                 }
-                .help("Sort entries by \(model.entrySortOrder.displayName.lowercased())")
+                .help("Sort entries by \(model.entrySortOrder.displayName.lowercased()), \(model.entrySortDirection.rawValue)")
+                .accessibilityLabel("Sort entries")
+                .accessibilityIdentifier("middleSort")
             }
+        }
+        .onAppear {
+            configureSortPopover()
+        }
+        .onChange(of: model.entrySortOrder) { _, _ in
+            configureSortPopover()
         }
         .alert("Rename Entry", isPresented: $showRenamePrompt) {
             TextField("Title", text: $renameDraft)
@@ -90,6 +100,12 @@ struct EntryListView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The title is saved into the entry’s frontmatter and appended to its folder name as a slug.")
+        }
+    }
+
+    private func configureSortPopover() {
+        sortPopover.configure(selection: model.entrySortOrder) { order in
+            model.selectEntrySortOrder(order)
         }
     }
 

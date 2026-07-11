@@ -7,6 +7,7 @@ import SwiftUI
 struct TranscriptionQueueButton: View {
     @Environment(AppModel.self) private var model
     let queue: TranscriptionQueue
+    var onOpen: () -> Void = {}
 
     @State private var showingQueue = false
 
@@ -22,6 +23,7 @@ struct TranscriptionQueueButton: View {
 
     var body: some View {
         Button {
+            onOpen()
             showingQueue.toggle()
         } label: {
             if hasFailure {
@@ -35,6 +37,7 @@ struct TranscriptionQueueButton: View {
         .help("Transcription queue")
         .onChange(of: model.queuePopoverRequestRevision) { _, _ in
             // View → Transcription Queue opens the same toolbar popover.
+            onOpen()
             showingQueue = true
         }
         .popover(isPresented: $showingQueue, arrowEdge: .bottom) {

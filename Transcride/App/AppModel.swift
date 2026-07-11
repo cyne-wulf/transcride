@@ -38,6 +38,7 @@ final class AppModel {
         static let preferredMicUID = "preferredMicUID"
         static let fuzzyVaultSearch = "fuzzyVaultSearch"
         static let entrySortOrder = "entrySortOrder"
+        static let entrySortDirection = "entrySortDirection"
     }
 
     private(set) var phase: Phase = .launching
@@ -186,6 +187,24 @@ final class AppModel {
             UserDefaults.standard.set(entrySortOrder.rawValue, forKey: PreferenceKey.entrySortOrder)
         }
     }
+    var entrySortDirection = EntrySortDirection(
+        rawValue: UserDefaults.standard.string(forKey: PreferenceKey.entrySortDirection) ?? ""
+    ) ?? (EntrySortOrder(
+        rawValue: UserDefaults.standard.string(forKey: PreferenceKey.entrySortOrder) ?? ""
+    ) ?? .dateNewest).defaultDirection {
+        didSet {
+            UserDefaults.standard.set(entrySortDirection.rawValue, forKey: PreferenceKey.entrySortDirection)
+        }
+    }
+
+    func selectEntrySortOrder(_ order: EntrySortOrder) {
+        entrySortOrder = order
+        entrySortDirection = order.defaultDirection
+    }
+
+    func toggleEntrySortDirection() {
+        entrySortDirection = entrySortDirection.toggled
+    }
     var selectedEntryID: String? {
         didSet {
             // PLY: switching entries stops playback; returning doesn't resume.
@@ -233,9 +252,12 @@ final class AppModel {
     var displayedEntries: [Entry] {
         switch sidebarSelection {
         case .folder:
-            return entrySortOrder.sorted(selectedFolder?.entries ?? [])
+            return entrySortOrder.sorted(
+                selectedFolder?.entries ?? [],
+                direction: entrySortDirection
+            )
         case .favorites:
-            return entrySortOrder.sorted(favoriteEntries)
+            return entrySortOrder.sorted(favoriteEntries, direction: entrySortDirection)
         case .recentlyDeleted, .none:
             return []
         }
