@@ -15,6 +15,8 @@ struct EntryDetailView: View {
     @State private var showingDeleteAudio = false
     @State private var deleteAudioByteSize: Int64?
     @State private var isTrimming = false
+    @State private var showingRestoreOriginal = false
+    @State private var restoringOriginalItem: TrashItem?
     @State private var showingExport = false
 
     var body: some View {
@@ -44,7 +46,10 @@ struct EntryDetailView: View {
                         document = content.edited
                         original = content.original
                         loadedEntryPath = entry.relativePath
-                        model.player.setTranscriptForSilenceSkipping(content.original)
+                        model.player.setTranscriptForSilenceSkipping(
+                            content.original,
+                            duration: entry.duration
+                        )
                     }
             } else {
                 ContentUnavailableView(
@@ -52,6 +57,15 @@ struct EntryDetailView: View {
                     systemImage: "waveform",
                     description: Text("Select an entry to see its transcript — or start talking with a new recording.")
                 )
+            }
+        }
+        .toolbar {
+            if #unavailable(macOS 26.0) {
+                ToolbarItem(id: "detailAnchor") {
+                    Color.clear
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                }
             }
         }
     }
@@ -62,6 +76,35 @@ struct EntryDetailView: View {
     /// save could otherwise overwrite newer unsaved keystrokes.
     private func taskKey(for entry: Entry) -> String {
         "\(entry.relativePath)|\(entry.title ?? "")|external:\(model.externalVaultRevision)|transcription:\(model.transcriptRevision)"
+    }
+
+    private func infoPopover(_ entry: Entry) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            infoRow("Created", entry.created.formatted(date: .complete, time: .standard))
+            if let duration = entry.duration {
+                infoRow("Duration", EntryListView.formatDuration(duration))
+            }
+            infoRow("Audio", entry.hasAudio ? "Yes" : (entry.audioDeleted ? "Deleted" : "None"))
+            if let source = document?.source { infoRow("Source", source) }
+            if let engine = document?.engine { infoRow("Engine", engine) }
+            infoRow("Favorite", entry.favorite ? "Yes" : "No")
+            infoRow("Folder", entry.parentRelativePath.isEmpty ? "Vault Root" : entry.parentRelativePath)
+            infoRow("Entry ID", entry.folderName.string)
+        }
+        .font(.callout)
+        .padding(16)
+        .frame(minWidth: 280, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            Text(value)
+                .textSelection(.enabled)
+        }
     }
 
     @ViewBuilder
@@ -134,6 +177,18 @@ struct EntryDetailView: View {
             }
         }
         .contentShape(Rectangle())
+        .onExitCommand {
+            if isTrimming { isTrimming = false }
+        }
+        .onChange(of: isTrimming) { _, active in
+            model.setTrimModeActive(active)
+        }
+        .onChange(of: model.cancelTrimRequestRevision) { _, _ in
+            if isTrimming { isTrimming = false }
+        }
+        .onDisappear {
+            model.setTrimModeActive(false)
+        }
         .contextMenu {
             Button(entry.favorite ? "Unfavorite" : "Favorite") {
                 Task { await model.toggleFavorite(for: entry) }
@@ -142,18 +197,20 @@ struct EntryDetailView: View {
             Divider()
             Button("Show Info") { showingInfo = true }
             Button("Reveal in Finder") { model.revealInFinder(relativePath: entry.relativePath) }
+            if model.originalAudioTrashItem(for: entry) != nil {
+                Button("Restore Original Audio…") { promptRestoreOriginal(entry) }
+            }
             if entry.hasAudio || entry.audioDeleted {
                 Divider()
                 Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
                     .disabled(!canDeleteAudio(entry))
             }
         }
-        // `.primaryAction` right-aligns the entry actions to the window's
-        // top-right corner; they appear only while an entry is selected, so
-        // the corner empties out (leaving just the queue ring at the pane's
-        // leading edge) when nothing is.
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.flexible)
+            }
+            ToolbarItem(id: "detailFavorite", placement: .primaryAction) {
                 Button {
                     Task { await model.toggleFavorite(for: entry) }
                 } label: {
@@ -164,25 +221,48 @@ struct EntryDetailView: View {
                 }
                 .help(entry.favorite ? "Remove from Favorites" : "Add to Favorites")
             }
-            if entry.hasAudio || entry.audioDeleted {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showingRetranscribe = true
-                    } label: {
-                        Label("Retranscribe", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(!entry.hasAudio)
-                    .help(entry.audioUnavailableExplanation
-                        ?? "Retranscribe with a different model")
+            ToolbarItem(id: "detailRetranscribe", placement: .primaryAction) {
+                Button {
+                    showingRetranscribe = true
+                } label: {
+                    Label("Retranscribe", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(!entry.hasAudio)
+                .help(entry.audioUnavailableExplanation
+                    ?? (entry.hasAudio
+                        ? "Retranscribe with a different model"
+                        : "No audio is available to retranscribe"))
+            }
+            ToolbarItem(id: "detailInfo", placement: .primaryAction) {
+                Button {
+                    showingInfo.toggle()
+                } label: {
+                    Label("Show Info", systemImage: "info.circle")
+                }
+                .help("Show Info")
+                .popover(isPresented: $showingInfo, arrowEdge: .bottom) {
+                    infoPopover(entry)
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(id: "detailReveal", placement: .primaryAction) {
+                Button {
+                    model.revealInFinder(relativePath: entry.relativePath)
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder")
+                }
+                .help("Reveal in Finder")
+            }
+            ToolbarItem(id: "detailMore", placement: .primaryAction) {
                 Menu {
                     if entry.hasAudio || entry.audioDeleted {
                         Button("Trim Audio…") { isTrimming = true }
                             .disabled(!canTrim(entry))
                             .help(entry.audioUnavailableExplanation
                                 ?? "Select the range of audio to keep")
+                    }
+                    if model.originalAudioTrashItem(for: entry) != nil {
+                        Button("Restore Original Audio…") { promptRestoreOriginal(entry) }
+                            .help("Undo trimming and restore the full retained clip")
                     }
                     Button("Duplicate Entry") { Task { await model.duplicateEntry(entry) } }
                     Divider()
@@ -214,25 +294,6 @@ struct EntryDetailView: View {
                 }
                 .help("More actions")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingInfo.toggle()
-                } label: {
-                    Label("Show Info", systemImage: "info.circle")
-                }
-                .help("Show Info")
-                .popover(isPresented: $showingInfo, arrowEdge: .bottom) {
-                    infoPopover(entry)
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.revealInFinder(relativePath: entry.relativePath)
-                } label: {
-                    Label("Reveal in Finder", systemImage: "folder")
-                }
-                .help("Reveal in Finder")
-            }
         }
         .onChange(of: model.entryActionRevision) { _, _ in
             // Menu-bar items reach this view's sheets/prompts through the
@@ -242,6 +303,8 @@ struct EntryDetailView: View {
                 if entry.hasAudio { showingRetranscribe = true }
             case .trim:
                 if canTrim(entry) { isTrimming = true }
+            case .restoreOriginalAudio:
+                promptRestoreOriginal(entry)
             case .exportMarkdown:
                 if original != nil || document != nil { showingExport = true }
             case .deleteAudio:
@@ -257,6 +320,22 @@ struct EntryDetailView: View {
         }
         .sheet(isPresented: $showingExport) {
             ExportMarkdownSheet(entry: entry, original: original, document: document)
+        }
+        .confirmationDialog(
+            "Restore the full original audio of “\(entry.displayTitle)”?",
+            isPresented: $showingRestoreOriginal,
+            titleVisibility: .visible
+        ) {
+            Button("Restore Original Audio") {
+                if let item = restoringOriginalItem {
+                    isTrimming = false
+                    Task { await model.restoreTrashItem(item) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The current trimmed audio moves to Recently Deleted, and the entry "
+                + "is re-transcribed to match the restored full clip. Your Edited layer is not overwritten.")
         }
         .confirmationDialog(
             "Delete the audio from “\(entry.displayTitle)”?",
@@ -294,6 +373,12 @@ struct EntryDetailView: View {
             deleteAudioByteSize = await model.audioFileByteSize(for: entry)
             showingDeleteAudio = true
         }
+    }
+
+    private func promptRestoreOriginal(_ entry: Entry) {
+        guard let item = model.originalAudioTrashItem(for: entry) else { return }
+        restoringOriginalItem = item
+        showingRestoreOriginal = true
     }
 
     private var deleteAudioMessage: String {
@@ -356,41 +441,6 @@ struct EntryDetailView: View {
         .foregroundStyle(.secondary)
     }
 
-    // MARK: - Info popover
-
-    @ViewBuilder
-    private func infoPopover(_ entry: Entry) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-            infoRow("Created", entry.created.formatted(date: .complete, time: .standard))
-            if let duration = entry.duration {
-                infoRow("Duration", EntryListView.formatDuration(duration))
-            }
-            infoRow("Audio", entry.hasAudio ? "Yes" : (entry.audioDeleted ? "Deleted" : "None"))
-            if let source = document?.source {
-                infoRow("Source", source)
-            }
-            if let engine = document?.engine {
-                infoRow("Engine", engine)
-            }
-            infoRow("Favorite", entry.favorite ? "Yes" : "No")
-            infoRow("Folder", entry.parentRelativePath.isEmpty ? "Vault Root" : entry.parentRelativePath)
-            infoRow("Entry ID", entry.folderName.string)
-        }
-        .font(.callout)
-        .padding(16)
-        .frame(minWidth: 280, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func infoRow(_ label: String, _ value: String) -> some View {
-        GridRow {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .gridColumnAlignment(.trailing)
-            Text(value)
-                .textSelection(.enabled)
-        }
-    }
 }
 
 /// Waveform + transport for an entry with audio (PLY-3, PLY-4). The waveform
@@ -563,22 +613,43 @@ private struct PlaybackSection: View {
 
     /// Replaces the caption row while selecting a range to keep (AUD-3).
     private var trimControls: some View {
-        HStack(spacing: 12) {
-            Button("Cancel") { isTrimming = false }
-            Spacer()
+        VStack(spacing: 9) {
             Text("Keep \(EntryListView.formatDuration(trimStart)) – "
                 + "\(EntryListView.formatDuration(trimEnd)) · "
                 + EntryListView.formatDuration(trimSelection.length))
-                .font(.caption.monospacedDigit())
+                .font(.callout.weight(.semibold).monospacedDigit())
                 .foregroundStyle(.secondary)
-            Spacer()
-            Button("Trim…") { showingTrimConfirm = true }
+
+            HStack(spacing: 12) {
+                Button {
+                    isTrimming = false
+                } label: {
+                    Label("Cancel", systemImage: "xmark")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    showingTrimConfirm = true
+                } label: {
+                    Label("Trim…", systemImage: "scissors")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.yellow)
+                .foregroundStyle(.black)
                 .disabled(!trimSelection.isValidCrop(ofDuration: trimDuration))
                 .help(trimSelection.isValidCrop(ofDuration: trimDuration)
                     ? "Crop the audio to the selected range"
                     : "Drag the yellow handles inward to choose what to keep")
+            }
+            .controlSize(.large)
         }
-        .controlSize(.small)
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 5)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("trim-controls")
     }
@@ -766,4 +837,3 @@ private struct TransportButton: View {
         .help(help)
     }
 }
-

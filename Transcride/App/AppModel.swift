@@ -109,7 +109,7 @@ final class AppModel {
     // pattern as in-note find) and the owning view fulfills it.
 
     enum EntryActionRequest {
-        case retranscribe, trim, exportMarkdown, deleteAudio, showInfo
+        case retranscribe, trim, restoreOriginalAudio, exportMarkdown, deleteAudio, showInfo
     }
 
     enum WorkbenchActionRequest {
@@ -134,6 +134,8 @@ final class AppModel {
     private(set) var newFolderRequestRevision = 0
     private(set) var renameEntryRequestRevision = 0
     private(set) var queuePopoverRequestRevision = 0
+    private(set) var cancelTrimRequestRevision = 0
+    private(set) var trimModeActive = false
     var workbenchUIState = WorkbenchUIState()
 
     func requestEntryAction(_ request: EntryActionRequest) {
@@ -163,7 +165,19 @@ final class AppModel {
         queuePopoverRequestRevision &+= 1
     }
 
-    var sidebarSelection: SidebarSelection? = .folder("")
+    func setTrimModeActive(_ active: Bool) {
+        trimModeActive = active
+    }
+
+    var sidebarSelection: SidebarSelection? = .folder("") {
+        didSet {
+            guard sidebarSelection != oldValue, let selectedEntryID else { return }
+            let selectionStillVisible = displayedEntries.contains { $0.id == selectedEntryID }
+            if !selectionStillVisible {
+                self.selectedEntryID = nil
+            }
+        }
+    }
     /// Entry-list sort (LIB-4), persisted across launches.
     var entrySortOrder = EntrySortOrder(
         rawValue: UserDefaults.standard.string(forKey: PreferenceKey.entrySortOrder) ?? ""
@@ -193,6 +207,14 @@ final class AppModel {
     var selectedEntry: Entry? {
         guard let selectedEntryID else { return nil }
         return snapshot?.entry(withID: selectedEntryID)
+    }
+
+    /// The oldest retained pre-trim version is the entry's full original
+    /// clip. Newer items may represent intermediate trims.
+    func originalAudioTrashItem(for entry: Entry) -> TrashItem? {
+        trashItems
+            .filter { $0.kind == .preTrimAudio && $0.originalPath == entry.relativePath }
+            .min { $0.deletedAt < $1.deletedAt }
     }
 
     var selectedFolder: FolderNode? {
@@ -597,7 +619,7 @@ final class AppModel {
         }
     }
 
-    // MARK: - Keyboard (search / find / Z / Space / Shift+Space / Shift+Delete / brackets)
+    // MARK: - Keyboard (search / find / Z / Space / arrows / Shift+Delete / brackets)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -616,12 +638,17 @@ final class AppModel {
     }
 
     private let spaceKeyCode: UInt16 = 49
+    private let escapeKeyCode: UInt16 = 53
     private let deleteKeyCode: UInt16 = 51
     private let zenKeyCode: UInt16 = 6
     private let findKeyCode: UInt16 = 3
     private let leftBracketKeyCode: UInt16 = 33
     private let rightBracketKeyCode: UInt16 = 30
     private let backslashKeyCode: UInt16 = 42
+    private let leftArrowKeyCode: UInt16 = 123
+    private let rightArrowKeyCode: UInt16 = 124
+    private let downArrowKeyCode: UInt16 = 125
+    private let upArrowKeyCode: UInt16 = 126
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
@@ -643,6 +670,11 @@ final class AppModel {
             return selectedEntry != nil
         }
 
+        if keyCode == escapeKeyCode, modifiers.isEmpty, trimModeActive {
+            cancelTrimRequestRevision &+= 1
+            return true
+        }
+
         if keyCode == zenKeyCode {
             // Plain Z enters Zen from anywhere except text input. Once Zen is
             // active, Escape remains the deliberate exit control.
@@ -661,6 +693,28 @@ final class AppModel {
                 player.stepSpeed(keyCode == rightBracketKeyCode ? 1 : -1)
             }
             return true
+        }
+
+        if keyCode == leftArrowKeyCode || keyCode == rightArrowKeyCode {
+            // Left/Right skip the loaded audio by 15 seconds. Up/Down are
+            // deliberately not intercepted so list clip selection keeps its
+            // native keyboard behavior.
+            // AppKit marks arrow events as numeric-pad/function keys even on
+            // the built-in keyboard; those implicit flags are not user-held
+            // modifiers and must not block the shortcut.
+            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
+            guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
+            player.skip(keyCode == rightArrowKeyCode ? 15 : -15)
+            return true
+        }
+
+        if keyCode == upArrowKeyCode || keyCode == downArrowKeyCode {
+            // Option-Up/Down navigates the far-left folder/sidebar pane while
+            // leaving keyboard focus in the clip list. Plain Up/Down falls
+            // through to the List's native adjacent-clip selection.
+            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
+            guard explicitModifiers == .option, editingTextView == nil else { return false }
+            return moveSidebarSelection(by: keyCode == downArrowKeyCode ? 1 : -1)
         }
 
         if keyCode == deleteKeyCode {
@@ -703,6 +757,21 @@ final class AppModel {
             }
         }
         return false
+    }
+
+    private func moveSidebarSelection(by offset: Int) -> Bool {
+        guard let root = snapshot?.root else { return false }
+        // OutlineGroup owns expansion state internally, so descendants of a
+        // collapsed folder are not visible navigation targets. Restrict the
+        // global shortcut to the sidebar's always-visible rows.
+        let visibleFolders = [root] + root.subfolders
+        let destinations = visibleFolders.map { SidebarSelection.folder($0.relativePath) }
+            + [.favorites, .recentlyDeleted]
+        guard !destinations.isEmpty else { return false }
+        let currentIndex = sidebarSelection.flatMap { destinations.firstIndex(of: $0) } ?? 0
+        let nextIndex = min(destinations.count - 1, max(0, currentIndex + offset))
+        sidebarSelection = destinations[nextIndex]
+        return true
     }
 
     // MARK: - Intents (recording)

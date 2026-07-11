@@ -173,6 +173,11 @@ struct AppCommands: Commands {
             }
             .disabled(entry?.hasAudio != true)
 
+            Button("Restore Original Audio…") {
+                model.requestEntryAction(.restoreOriginalAudio)
+            }
+            .disabled(entry.map { model.originalAudioTrashItem(for: $0) == nil } ?? true)
+
             Button("Rename Speakers…") {
                 model.requestWorkbenchAction(.renameSpeakers)
             }
@@ -203,7 +208,8 @@ struct AppCommands: Commands {
 
     private var playbackCommands: some Commands {
         CommandMenu("Playback") {
-            // Space, [, ], and \ are key-monitor shortcuts (see header note).
+            // Space, Left/Right Arrow, [, ], and \ are key-monitor shortcuts
+            // (see header note).
             Button(model.player.isPlaying ? "Pause" : "Play") {
                 model.player.togglePlayPause()
             }

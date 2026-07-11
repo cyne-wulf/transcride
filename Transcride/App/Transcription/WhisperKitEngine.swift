@@ -116,6 +116,14 @@ actor WhisperKitEngine: TranscriptionEngine {
             throw TranscriptionError.modelNotDownloaded(info.displayName)
         }
         let pipe = try await loadedPipe()
+        let audioDuration: TimeInterval
+        do {
+            audioDuration = try await AudioImportFormat.probeDuration(of: audioURL)
+        } catch {
+            throw TranscriptionError.engineFailure(
+                "Could not read the audio duration: \(error.localizedDescription)"
+            )
+        }
 
         var decodeOptions = DecodingOptions()
         decodeOptions.task = .transcribe
@@ -148,7 +156,7 @@ actor WhisperKitEngine: TranscriptionEngine {
                 audioPath: audioURL.path,
                 decodeOptions: decodeOptions,
                 callback: { _ in
-                    progress(min(0.999, overallProgress.fractionCompleted))
+                    progress(min(0.499, overallProgress.fractionCompleted * 0.5))
                     return Task.isCancelled ? false : nil // false = stop early
                 }
             )
@@ -158,7 +166,6 @@ actor WhisperKitEngine: TranscriptionEngine {
             throw TranscriptionError.engineFailure(error.localizedDescription)
         }
         try Task.checkCancellation()
-        progress(1.0)
 
         let segments = Self.segments(from: results)
         guard !segments.isEmpty else {
@@ -166,7 +173,52 @@ actor WhisperKitEngine: TranscriptionEngine {
                 "The model produced no transcription for this audio."
             )
         }
-        return segments
+        let firstPass = TranscriptTimingRepair.repair(
+            segments: segments,
+            duration: audioDuration
+        )
+        guard firstPass.globallyDegraded else {
+            progress(1.0)
+            return firstPass.segments
+        }
+
+        // Some Whisper models occasionally return a collapsed word-alignment
+        // stream even though their segment timestamps are healthy. Decode once
+        // more without alignment and synthesize positive word spans inside the
+        // returned segment bounds.
+        decodeOptions.wordTimestamps = false
+        let fallbackResults: [TranscriptionResult]
+        do {
+            fallbackResults = try await pipe.transcribe(
+                audioPath: audioURL.path,
+                decodeOptions: decodeOptions,
+                callback: { _ in
+                    progress(min(0.999, 0.5 + overallProgress.fractionCompleted * 0.5))
+                    return Task.isCancelled ? false : nil
+                }
+            )
+        } catch is CancellationError {
+            throw TranscriptionError.cancelled
+        } catch {
+            throw TranscriptionError.engineFailure(error.localizedDescription)
+        }
+        try Task.checkCancellation()
+        let fallbackSegments = Self.segments(
+            from: fallbackResults,
+            derivingWordTimingsWithin: audioDuration
+        )
+        guard !fallbackSegments.isEmpty else {
+            // The aligned pass still contained usable text. Its deterministic
+            // whole-file repair is safer than discarding the transcription.
+            progress(1.0)
+            return firstPass.segments
+        }
+        let fallback = TranscriptTimingRepair.repair(
+            segments: fallbackSegments,
+            duration: audioDuration
+        )
+        progress(1.0)
+        return fallback.segments
     }
 
     private func loadedPipe() async throws -> WhisperKit {
@@ -192,13 +244,16 @@ actor WhisperKitEngine: TranscriptionEngine {
 
     /// Maps WhisperKit segments/word timings onto the transcript schema.
     /// Whisper word texts carry leading spaces; segments without word timings
-    /// (rare fallback) become one word spanning the segment.
-    private static func segments(from results: [TranscriptionResult]) -> [TranscriptOriginal.Segment] {
+    /// are split on whitespace so fallback timing can advance word by word.
+    private static func segments(
+        from results: [TranscriptionResult],
+        derivingWordTimingsWithin audioDuration: TimeInterval? = nil
+    ) -> [TranscriptOriginal.Segment] {
         var out: [TranscriptOriginal.Segment] = []
         for result in results {
             for segment in result.segments {
                 let words: [TranscriptOriginal.Word]
-                if let timings = segment.words, !timings.isEmpty {
+                if audioDuration == nil, let timings = segment.words, !timings.isEmpty {
                     words = timings.compactMap { timing in
                         let text = timing.word.trimmingCharacters(in: .whitespaces)
                         return text.isEmpty ? nil : TranscriptOriginal.Word(
@@ -207,11 +262,27 @@ actor WhisperKitEngine: TranscriptionEngine {
                     }
                 } else {
                     // Segment text (unlike word timings) carries decoder
-                    // control tokens — strip them before the fallback word.
+                    // control tokens — strip them before fallback timing.
                     let text = SegmentBuilder.strippingSpecialTokens(segment.text)
-                    words = text.isEmpty ? [] : [TranscriptOriginal.Word(
-                        text: text, start: Double(segment.start), end: Double(segment.end)
-                    )]
+                    let texts = text.split(whereSeparator: \.isWhitespace).map(String.init)
+                    let untimed = texts.map {
+                        TranscriptOriginal.Word(
+                            text: $0,
+                            start: Double(segment.start),
+                            end: Double(segment.end)
+                        )
+                    }
+                    if let audioDuration {
+                        let start = min(max(0, Double(segment.start)), audioDuration)
+                        let end = min(max(start, Double(segment.end)), audioDuration)
+                        words = TranscriptTimingRepair.distribute(
+                            words: untimed,
+                            from: start,
+                            to: end
+                        )
+                    } else {
+                        words = untimed
+                    }
                 }
                 guard !words.isEmpty else { continue }
                 out.append(TranscriptOriginal.Segment(

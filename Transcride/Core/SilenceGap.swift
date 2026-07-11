@@ -13,9 +13,14 @@ struct SilenceGap: Equatable, Sendable {
 
     static func compute(
         from transcript: TranscriptOriginal,
+        duration: TimeInterval? = nil,
         threshold: TimeInterval = defaultThreshold
     ) -> [SilenceGap] {
-        let words = transcript.allWords.enumerated().filter {
+        let effectiveWords = duration.map {
+            TranscriptTimingRepair.repair(segments: transcript.segments, duration: $0)
+                .segments.flatMap(\.words)
+        } ?? transcript.allWords
+        let words = effectiveWords.enumerated().filter {
             !$0.element.text.trimmingCharacters(in: .whitespaces).isEmpty
         }
         guard words.count > 1 else { return [] }

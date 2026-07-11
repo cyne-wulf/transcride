@@ -140,8 +140,11 @@ final class PlayerService {
 
     /// Installs timing gaps for the currently loaded entry. Passing nil (or a
     /// transcript with fewer than two words) simply disables gap jumping.
-    func setTranscriptForSilenceSkipping(_ transcript: TranscriptOriginal?) {
-        silenceGaps = transcript.map { SilenceGap.compute(from: $0) } ?? []
+    func setTranscriptForSilenceSkipping(
+        _ transcript: TranscriptOriginal?,
+        duration: TimeInterval? = nil
+    ) {
+        silenceGaps = transcript.map { SilenceGap.compute(from: $0, duration: duration) } ?? []
     }
 
     private func seekInternally(to seconds: Double) {

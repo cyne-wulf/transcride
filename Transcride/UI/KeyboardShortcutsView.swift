@@ -59,6 +59,21 @@ struct KeyboardShortcutsView: View {
                             detail: "While no recording is active."
                         ),
                         ShortcutRow(
+                            keys: ["←"],
+                            title: "Back 15 seconds",
+                            detail: "Moves the playback position back without changing clip selection."
+                        ),
+                        ShortcutRow(
+                            keys: ["→"],
+                            title: "Forward 15 seconds",
+                            detail: "Moves the playback position forward without changing clip selection."
+                        ),
+                        ShortcutRow(
+                            keys: ["Esc"],
+                            title: "Cancel trimming",
+                            detail: "Leaves trim mode without changing the audio."
+                        ),
+                        ShortcutRow(
                             keys: ["["],
                             title: "Slower playback",
                             detail: "Steps down the speed ladder (0.5×–4×)."
@@ -104,6 +119,16 @@ struct KeyboardShortcutsView: View {
                     ])
 
                     shortcutSection("Library & Search", rows: [
+                        ShortcutRow(
+                            keys: ["↑", "↓"],
+                            title: "Select previous or next clip",
+                            detail: "The vault list has keyboard focus when the app opens."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌥", "↑ / ↓"],
+                            title: "Select previous or next folder",
+                            detail: "Moves through the far-left sidebar without taking focus from the clip list."
+                        ),
                         ShortcutRow(
                             keys: ["⌘", "⇧", "F"],
                             title: "Search the vault",

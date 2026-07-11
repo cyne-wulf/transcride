@@ -9,6 +9,7 @@ struct EntryListView: View {
     @State private var showRenamePrompt = false
     @State private var renamingEntry: Entry?
     @State private var renameDraft = ""
+    @FocusState private var entryListHasFocus: Bool
 
     private var folder: FolderNode? { model.selectedFolder }
     private var isFavoritesView: Bool { model.sidebarSelection == .favorites }
@@ -38,6 +39,15 @@ struct EntryListView: View {
                         }
                     }
                     .listStyle(.inset)
+                    .focused($entryListHasFocus)
+                    .defaultFocus($entryListHasFocus, true)
+                    .task {
+                        // Make the vault immediately keyboard-navigable after
+                        // launch. Native List handling keeps Up/Down selection;
+                        // AppModel routes Option-Up/Down to the folder sidebar.
+                        await Task.yield()
+                        entryListHasFocus = true
+                    }
                 }
             } else {
                 ContentUnavailableView("No Folder Selected", systemImage: "folder")
@@ -49,7 +59,13 @@ struct EntryListView: View {
             if let entry = model.selectedEntry { beginRename(entry) }
         }
         .toolbar {
-            ToolbarItem {
+            if let queue = model.transcriptionQueue {
+                ToolbarItem(id: "middleQueue") {
+                    TranscriptionQueueButton(queue: queue)
+                }
+            }
+
+            ToolbarItem(id: "middleSort") {
                 Menu {
                     Picker("Sort By", selection: $model.entrySortOrder) {
                         ForEach(EntrySortOrder.allCases, id: \.self) { order in

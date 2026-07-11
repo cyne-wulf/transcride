@@ -43,14 +43,12 @@ struct MainView: View {
             }
         }
         .toolbar(model.recorder.isZenMode ? .hidden : .automatic, for: .windowToolbar)
-        .toolbar {
-            // Keep the queue discoverable even when it is empty. The popover
-            // explains the idle state and the same ring becomes live progress
-            // as soon as transcription work appears.
-            if let queue = model.transcriptionQueue {
-                ToolbarItem {
-                    TranscriptionQueueButton(queue: queue)
-                }
+        .background {
+            if #unavailable(macOS 26.0) {
+                ToolbarFlexibleSpaceInstaller(
+                    reconciliationToken: toolbarReconciliationToken
+                )
+                    .frame(width: 0, height: 0)
             }
         }
         .sheet(isPresented: $model.isVaultSearchPresented) {
@@ -72,6 +70,18 @@ struct MainView: View {
             You can manage models anytime in Settings → Transcription.
             """)
         }
+    }
+
+    private var toolbarReconciliationToken: String {
+        let entry = model.selectedEntry
+        let sidebar: String
+        switch model.sidebarSelection {
+        case .folder(let path): sidebar = "folder:\(path)"
+        case .favorites: sidebar = "favorites"
+        case .recentlyDeleted: sidebar = "recentlyDeleted"
+        case .none: sidebar = "none"
+        }
+        return "\(sidebar)|\(entry?.relativePath ?? "")|audio:\(entry?.hasAudio == true)|deleted:\(entry?.audioDeleted == true)"
     }
 
     /// Shows the one-time Parakeet download offer (ENG-2). The flag is set as

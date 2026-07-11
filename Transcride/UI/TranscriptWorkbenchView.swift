@@ -98,7 +98,19 @@ struct TranscriptWorkbenchView: View {
     }
 
     private var wordMap: TranscriptWordMap? {
-        original.map { TranscriptWordMap(transcript: $0, speakerNames: speakerNames) }
+        original.map {
+            TranscriptWordMap(
+                transcript: $0,
+                duration: entry.duration ?? positivePlayerDuration,
+                speakerNames: speakerNames
+            )
+        }
+    }
+
+    /// Frontmatter normally carries duration. Fall back to the loaded asset
+    /// so legacy entries missing that field still receive timing repair.
+    private var positivePlayerDuration: TimeInterval? {
+        model.player.duration > 0 ? model.player.duration : nil
     }
 
     private var hasSpeakers: Bool {
@@ -136,7 +148,8 @@ struct TranscriptWorkbenchView: View {
     }
 
     private var currentWordIndex: Int? {
-        wordMap?.wordIndex(atTime: model.player.currentTime)
+        guard entry.hasAudio, model.player.url != nil else { return nil }
+        return wordMap?.wordIndex(atTime: model.player.currentTime)
     }
 
     private var activeNavigationRange: NSRange? {

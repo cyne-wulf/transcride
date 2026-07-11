@@ -1,6 +1,107 @@
 import Foundation
 import Testing
 
+@Suite("Transcript timing repair")
+struct TranscriptTimingRepairTests {
+    private func segment(_ words: [(String, Double, Double)]) -> TranscriptOriginal.Segment {
+        let mapped = words.map { TranscriptOriginal.Word(text: $0.0, start: $0.1, end: $0.2) }
+        return .init(
+            start: mapped.first?.start ?? 0,
+            end: mapped.last?.end ?? 0,
+            words: mapped
+        )
+    }
+
+    @Test func healthyTimingsRemainExactlyUnchanged() {
+        let segments = [segment([
+            ("Healthy", 0.12, 0.42), ("engine", 0.5, 0.88), ("timing", 1.0, 1.4),
+        ])]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 2)
+        #expect(outcome.segments == segments)
+        #expect(!outcome.didRepair)
+        #expect(!outcome.globallyDegraded)
+    }
+
+    @Test func realCollapsedTwentyOneWordShapeGetsPositiveMonotonicSpans() {
+        let words = (0..<21).map { index in
+            TranscriptOriginal.Word(
+                text: index == 10 ? "substantially-longer" : "w\(index)",
+                start: 7.25,
+                end: index == 0 ? 7.5 : 7.25
+            )
+        }
+        let segments = [TranscriptOriginal.Segment(start: 7.25, end: 99, words: words)]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 12)
+        let repaired = outcome.segments[0].words
+
+        #expect(outcome.didRepair)
+        #expect(outcome.globallyDegraded)
+        #expect(repaired.count == 21)
+        #expect(repaired.first?.start == 0)
+        #expect(repaired.last?.end == 12)
+        #expect(repaired.allSatisfy { $0.end > $0.start })
+        #expect(zip(repaired, repaired.dropFirst()).allSatisfy { pair in
+            pair.0.end == pair.1.start
+        })
+        #expect((repaired[10].end - repaired[10].start) > (repaired[9].end - repaired[9].start))
+        #expect(repaired.map(\.text) == words.map(\.text))
+    }
+
+    @Test func isolatedCollapsedRunIsRepairedBetweenHealthyAnchors() {
+        let segments = [segment([
+            ("one", 0, 0.4),
+            ("bad", 1, 1), ("timing", 1, 1), ("run", 1, 1),
+            ("five", 4, 4.4), ("six", 4.5, 4.9), ("seven", 5, 5.4), ("eight", 5.5, 5.9),
+        ])]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 6)
+        let words = outcome.segments[0].words
+
+        #expect(!outcome.globallyDegraded)
+        #expect(words[0] == segments[0].words[0])
+        #expect(words[4...] == segments[0].words[4...])
+        #expect(words[1].start == 0.4)
+        #expect(words[3].end == 4)
+        #expect(words[1...3].allSatisfy { $0.end > $0.start })
+    }
+
+    @Test func outOfBoundsAndBackwardsWordsAreRepairedAndClamped() {
+        let segments = [segment([
+            ("one", 0, 0.3),
+            ("backwards", -1, -0.5),
+            ("three", 1.2, 1.5),
+            ("four", 1.6, 1.9),
+            ("outside", 8, 9),
+        ])]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 3)
+        let words = outcome.segments[0].words
+
+        #expect(!outcome.globallyDegraded)
+        #expect(words[0] == segments[0].words[0])
+        #expect(words[2] == segments[0].words[2])
+        #expect(words[1].start == 0.3)
+        #expect(words[1].end == 1.2)
+        #expect(words[4].start == 1.9)
+        #expect(words[4].end == 3)
+    }
+
+    @Test func decreasingEndTimeIsTreatedAsNonMonotonic() {
+        let segments = [segment([
+            ("one", 0, 0.8),
+            ("backwards", 0.5, 0.6),
+            ("three", 1.2, 1.5),
+            ("four", 1.6, 1.9),
+        ])]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 2)
+        let words = outcome.segments[0].words
+
+        #expect(!outcome.globallyDegraded)
+        #expect(words[0] == segments[0].words[0])
+        #expect(words[1].start == 0.8)
+        #expect(words[1].end == 1.2)
+        #expect(words[2] == segments[0].words[2])
+    }
+}
+
 @Suite("Transcript word mapping")
 struct TranscriptWordMapTests {
     private func transcript(_ words: [(String, Double, Double)]) -> TranscriptOriginal {
@@ -111,6 +212,51 @@ struct TranscriptWordMapTests {
         #expect(map.startTime(forMatch: 0..<999, inEditedBody: body) == nil)
         #expect(map.startTime(forMatch: 5..<6, inEditedBody: body) == nil)
     }
+
+    @Test func repairedCollapsedMapAdvancesAcrossPlaybackAndScrubTimes() {
+        let value = transcript((0..<21).map { ("word\($0)", 5.0, 5.0) })
+        let map = TranscriptWordMap(transcript: value, duration: 21)
+        let early = map.wordIndex(atTime: 0.1)
+        let middle = map.wordIndex(atTime: 10.5)
+        let late = map.wordIndex(atTime: 20.9)
+
+        #expect(early != nil)
+        #expect(middle != nil)
+        #expect(late != nil)
+        #expect(early! < middle!)
+        #expect(middle! < late!)
+    }
+
+    @Test func timingRepairDoesNotShiftUTF16WordOrSpeakerRanges() throws {
+        let value = TranscriptOriginal(
+            engine: .init(engine: "test", model: "test", options: [:], created: "", appVersion: ""),
+            segments: [
+                .init(start: 8, end: 8, speaker: "speaker_0", words: [
+                    .init(text: "Hi", start: 8, end: 8),
+                    .init(text: "👋🏽", start: 8, end: 8),
+                    .init(text: "Ashan", start: 8, end: 8),
+                ]),
+                .init(start: 9, end: 9.4, speaker: "speaker_1", words: [
+                    .init(text: "reply", start: 9, end: 9.4),
+                ]),
+            ]
+        )
+        let original = TranscriptWordMap(
+            transcript: value,
+            speakerNames: ["speaker_0": "Ashan", "speaker_1": "Guest"]
+        )
+        let repaired = TranscriptWordMap(
+            transcript: value,
+            duration: 10,
+            speakerNames: ["speaker_0": "Ashan", "speaker_1": "Guest"]
+        )
+
+        #expect(repaired.renderedText == original.renderedText)
+        #expect(repaired.spans.map(\.range) == original.spans.map(\.range))
+        #expect(repaired.spans.map(\.wordIndex) == original.spans.map(\.wordIndex))
+        #expect(repaired.speakerLabels == original.speakerLabels)
+        #expect(try #require(repaired.range(forWordAt: 1)).count == 4)
+    }
 }
 
 @Suite("Silence gap computation")
@@ -158,5 +304,13 @@ struct SilenceGapTests {
         #expect(gap.nextWordIndex == 2)
         #expect(gap.start == 0.2)
         #expect(gap.end == 2.0)
+    }
+
+    @Test func malformedLegacyTimingIsRepairedBeforeGapDetection() {
+        let value = transcript([
+            ("one", 20, 20), ("two", 20, 20), ("three", 20, 20), ("four", 20, 20),
+        ])
+        let gaps = SilenceGap.compute(from: value, duration: 4)
+        #expect(gaps.isEmpty)
     }
 }
