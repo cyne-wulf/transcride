@@ -142,4 +142,34 @@ struct SearchFiltersTests {
         wrong.created = now.addingTimeInterval(-40 * 86_400)
         #expect(!filters.matches(wrong, now: now, calendar: calendar))
     }
+
+    @Test func metadataFiltersRunBeforeDisplayedResultLimit() {
+        let noteEntries = (0..<VaultSearchFilters.displayedResultLimit).map { index in
+            makeEntry(path: "note-\(index)", createdDaysAgo: 1)
+        }
+        let audioEntry = makeEntry(
+            path: "Work/audio-match", createdDaysAgo: 1, hasAudio: true
+        )
+        let hits = (noteEntries + [audioEntry]).map { entry in
+            SearchHit(
+                entryPath: entry.relativePath,
+                layer: .original,
+                title: "Test",
+                snippet: "test",
+                matchKind: .content,
+                matchRange: 0..<4,
+                snippetMatchRange: 0..<4,
+                score: 0
+            )
+        }
+
+        var filters = VaultSearchFilters()
+        filters.folder = "Work"
+        filters.audio = .hasAudio
+        let filtered = filters.apply(
+            to: hits, entries: noteEntries + [audioEntry], now: now
+        )
+
+        #expect(filtered.map(\.entryPath) == [audioEntry.relativePath])
+    }
 }

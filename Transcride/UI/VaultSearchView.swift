@@ -263,7 +263,7 @@ struct VaultSearchView: View {
         List {
             ForEach(groups) { group in
                 Section {
-                    ForEach(Array(group.hits.enumerated()), id: \.offset) { _, hit in
+                    ForEach(group.hits, id: \.self) { hit in
                         Button {
                             model.selectSearchHit(hit)
                         } label: {
@@ -297,9 +297,13 @@ struct VaultSearchView: View {
 
     private func resultRow(_ hit: SearchHit) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Text(hit.layer == .edited ? "Edited" : "Original")
+            Text(hit.matchKind == .title
+                 ? "Title"
+                 : (hit.layer == .edited ? "Edited" : "Original"))
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(hit.layer == .edited
+                .foregroundStyle(hit.matchKind == .title
+                                 ? AnyShapeStyle(.secondary)
+                                 : hit.layer == .edited
                                  ? AnyShapeStyle(.tint)
                                  : AnyShapeStyle(.secondary))
                 .padding(.horizontal, 7)

@@ -4,6 +4,8 @@ import Foundation
 /// text query runs: hits are matched against entry metadata from the vault
 /// snapshot, so the search index schema stays a pure text cache.
 struct VaultSearchFilters: Equatable, Sendable {
+    static let displayedResultLimit = 150
+
     enum AudioPresence: String, CaseIterable, Sendable {
         case any
         case hasAudio
@@ -67,6 +69,26 @@ struct VaultSearchFilters: Equatable, Sendable {
         return dateRange(now: now, calendar: calendar).map {
             $0.contains(entry.created)
         } ?? true
+    }
+
+    /// Applies metadata filters before the UI result cap. This ordering is
+    /// essential for common words: hundreds of unfiltered note-only hits must
+    /// not hide a later audio hit from the Has Audio result set.
+    func apply(
+        to hits: [SearchHit],
+        entries: [Entry],
+        now: Date = .now,
+        limit: Int = displayedResultLimit
+    ) -> [SearchHit] {
+        guard limit > 0 else { return [] }
+        guard isActive else { return Array(hits.prefix(limit)) }
+        let entriesByPath = Dictionary(uniqueKeysWithValues: entries.map {
+            ($0.relativePath, $0)
+        })
+        return Array(hits.lazy.filter { hit in
+            guard let entry = entriesByPath[hit.entryPath] else { return false }
+            return matches(entry, now: now)
+        }.prefix(limit))
     }
 
     /// The created-date window the preset describes; nil = unrestricted.

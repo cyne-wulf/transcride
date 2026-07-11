@@ -58,6 +58,29 @@ struct VaultSearchIndexTests {
         #expect(fuzzy.first?.score == 1)
     }
 
+    @Test func exactAndFuzzyQueriesMatchEntryTitles() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let index = try VaultSearchIndex(databaseURL: f.database)
+        try index.upsert([
+            SearchRecord(
+                entryPath: "a",
+                layer: .original,
+                title: "Quarterly Planning",
+                content: "The transcript body uses unrelated words."
+            ),
+        ])
+
+        let exact = try #require(try index.search("planning").first)
+        #expect(exact.matchKind == .title)
+        #expect(exact.snippet == "Quarterly Planning")
+        #expect(exact.snippetMatchRange == 10..<18)
+
+        let fuzzy = try #require(try index.search("planing", fuzzy: true).first)
+        #expect(fuzzy.matchKind == .title)
+        #expect(fuzzy.score == 1)
+    }
+
     @Test func bothLayersAreIndexedAndEditedHitsAlwaysRankFirst() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }

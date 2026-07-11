@@ -568,7 +568,11 @@ final class AppModel {
         player.pause()
         sidebarSelection = .folder(hit.entryPath.parentRelativePath)
         selectedEntryID = hit.entryPath
-        transcriptNavigationRequest = TranscriptNavigationRequest(hit: hit)
+        // A title match selects the entry itself; its UTF-16 range does not
+        // belong to either transcript layer and must not drive text/audio cueing.
+        transcriptNavigationRequest = hit.matchKind == .content
+            ? TranscriptNavigationRequest(hit: hit)
+            : nil
         isVaultSearchPresented = false
     }
 
@@ -601,7 +605,14 @@ final class AppModel {
             }
             guard !Task.isCancelled else { return }
             do {
-                let hits = try await service.search(query, fuzzy: fuzzy)
+                // Metadata filters run outside the text-only SQLite cache.
+                // Fetch every text candidate when filtering, then cap the
+                // filtered list; otherwise early note-only hits can hide a
+                // later Has Audio match for a common query.
+                let candidateLimit = filters.isActive ? Int.max : VaultSearchFilters.displayedResultLimit
+                let hits = try await service.search(
+                    query, fuzzy: fuzzy, limit: candidateLimit
+                )
                 guard !Task.isCancelled, self?.service === service,
                       self?.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query,
                       self?.fuzzyVaultSearch == fuzzy,
@@ -629,16 +640,8 @@ final class AppModel {
     private func applyingSearchFilters(
         _ filters: VaultSearchFilters, to hits: [SearchHit]
     ) -> [SearchHit] {
-        guard filters.isActive, let snapshot else { return hits }
-        var entriesByPath: [RelativePath: Entry] = [:]
-        for entry in snapshot.allEntries {
-            entriesByPath[entry.relativePath] = entry
-        }
-        let now = Date.now
-        return hits.filter { hit in
-            guard let entry = entriesByPath[hit.entryPath] else { return false }
-            return filters.matches(entry, now: now)
-        }
+        guard let snapshot else { return hits }
+        return filters.apply(to: hits, entries: snapshot.allEntries)
     }
 
     // MARK: - Keyboard (search / find / Z / Space / arrows / Shift+Delete / brackets)

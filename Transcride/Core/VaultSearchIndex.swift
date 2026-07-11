@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-enum SearchLayer: String, Codable, Equatable, Sendable {
+enum SearchLayer: String, Codable, Hashable, Sendable {
     case edited
     case original
 
@@ -15,12 +15,19 @@ struct SearchRecord: Equatable, Sendable {
     var content: String
 }
 
-struct SearchHit: Equatable, Sendable {
+enum SearchMatchKind: Hashable, Sendable {
+    case content
+    case title
+}
+
+struct SearchHit: Hashable, Sendable {
     var entryPath: RelativePath
     var layer: SearchLayer
     var title: String
     var snippet: String
-    /// UTF-16 range in the complete layer content.
+    /// Whether the match belongs to the transcript layer or entry title.
+    var matchKind: SearchMatchKind
+    /// UTF-16 range in the complete layer content, or in `title` for a title hit.
     var matchRange: Range<Int>
     /// UTF-16 range in `snippet` for direct highlighting.
     var snippetMatchRange: Range<Int>
@@ -217,7 +224,9 @@ final class VaultSearchIndex: @unchecked Sendable {
                 content: columnText(statement, 3)
             )
             if let match = Self.match(query, in: record.content, fuzzy: fuzzy) {
-                hits.append(Self.hit(for: record, match: match))
+                hits.append(Self.hit(for: record, match: match, kind: .content))
+            } else if let match = Self.match(query, in: record.title, fuzzy: fuzzy) {
+                hits.append(Self.hit(for: record, match: match, kind: .title))
             }
         }
         try checkStep(statement)
@@ -489,8 +498,13 @@ final class VaultSearchIndex: @unchecked Sendable {
         return previous[b.count]
     }
 
-    private static func hit(for record: SearchRecord, match: Match) -> SearchHit {
-        let source = record.content as NSString
+    private static func hit(
+        for record: SearchRecord,
+        match: Match,
+        kind: SearchMatchKind
+    ) -> SearchHit {
+        let sourceText = kind == .content ? record.content : record.title
+        let source = sourceText as NSString
         let matchLength = match.range.count
         let desiredStart = max(0, match.range.lowerBound - 60)
         let desiredEnd = min(
@@ -514,6 +528,7 @@ final class VaultSearchIndex: @unchecked Sendable {
             layer: record.layer,
             title: record.title,
             snippet: snippet,
+            matchKind: kind,
             matchRange: match.range,
             snippetMatchRange: localStart..<(localStart + matchLength),
             score: match.score
