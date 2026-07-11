@@ -43,6 +43,7 @@ final class AppModel {
 
     private(set) var phase: Phase = .launching
     private(set) var vaultURL: URL?
+    private(set) var recentVaults = VaultBookmark.resolveRecents()
     private(set) var snapshot: VaultSnapshot?
     private(set) var trashItems: [TrashItem] = []
     /// Recently Deleted retention (SET-2), loaded from the vault's settings
@@ -296,11 +297,20 @@ final class AppModel {
             scopedURL = url
         }
         DebugLog.append("openVault path=\(url.path) scoped=\(scopedURL != nil)")
+        // Only an explicit open/create/switch updates the MRU. A launch-time
+        // restore must not re-add a current vault the user deliberately
+        // removed from the recent list with its x button.
         if saveBookmark {
             do {
                 try VaultBookmark.save(url)
             } catch {
                 errorMessage = "Could not save vault access: \(error.localizedDescription)"
+            }
+            do {
+                try VaultBookmark.recordRecent(url)
+                recentVaults = VaultBookmark.resolveRecents()
+            } catch {
+                errorMessage = "Could not remember recent vault: \(error.localizedDescription)"
             }
         }
 
@@ -427,6 +437,15 @@ final class AppModel {
             return
         }
         Task { await openVault(at: url, isSecurityScoped: true, saveBookmark: true) }
+    }
+
+    func openRecentVault(_ recent: VaultBookmark.RecentVault) {
+        Task { await openVault(at: recent.url, isSecurityScoped: true, saveBookmark: true) }
+    }
+
+    func forgetRecentVault(_ recent: VaultBookmark.RecentVault) {
+        VaultBookmark.forgetRecent(recent)
+        recentVaults = VaultBookmark.resolveRecents()
     }
 
     // MARK: - Intents (folders)

@@ -1,5 +1,9 @@
 import SwiftUI
 
+private enum VaultSwitcherAction: Hashable {
+    case open, create, reveal
+}
+
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
@@ -14,6 +18,10 @@ struct SidebarView: View {
     @State private var renameFolderName = ""
     @State private var showDeletePrompt = false
     @State private var deletingFolderPath: RelativePath = ""
+    @State private var showVaultSwitcher = false
+    @State private var hoveredRecentVaultID: String?
+    @State private var hoveredForgetVaultID: String?
+    @State private var hoveredVaultAction: VaultSwitcherAction?
 
     var body: some View {
         @Bindable var model = model
@@ -97,36 +105,185 @@ struct SidebarView: View {
     private var vaultFooter: some View {
         VStack(spacing: 0) {
             Divider()
-            Menu {
-                Button("Open Another Vault…") { model.chooseExistingVault() }
-                Button("Create New Vault…") { model.createNewVault() }
-                if let url = model.vaultURL {
-                    Divider()
-                    Button("Reveal Vault in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "externaldrive")
-                        .foregroundStyle(.secondary)
-                    Text(model.vaultURL?.lastPathComponent ?? "No Vault")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                Image(systemName: "externaldrive")
+                    .foregroundStyle(.secondary)
+                Text(model.vaultURL?.lastPathComponent ?? "No Vault")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+            .contentShape(Rectangle())
+            .onTapGesture { showVaultSwitcher.toggle() }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { showVaultSwitcher.toggle() }
             .help("Current vault: \(model.vaultURL?.path ?? "none"). Click to switch.")
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            .popover(isPresented: $showVaultSwitcher, arrowEdge: .bottom) {
+                vaultSwitcherPopover
+            }
         }
         .background(.bar)
+    }
+
+    private var vaultSwitcherPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !model.recentVaults.isEmpty {
+                Text("Recent Vaults")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+
+                // Persistence stays newest-first; rendering oldest-first puts
+                // the current/most-recent vault next to the footer trigger.
+                ForEach(model.recentVaults.reversed()) { recent in
+                    let isCurrent = recent.url.standardizedFileURL == model.vaultURL?.standardizedFileURL
+                    HStack(spacing: 6) {
+                        Button {
+                            showVaultSwitcher = false
+                            if !isCurrent {
+                                model.openRecentVault(recent)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isCurrent ? "checkmark.circle.fill" : "externaldrive")
+                                    .foregroundStyle(isCurrent ? Color.accentColor : Color.secondary)
+                                    .frame(width: 16)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(recent.url.lastPathComponent)
+                                        .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
+                                        .lineLimit(1)
+                                    Text(recent.url.deletingLastPathComponent().path)
+                                        .font(.caption)
+                                        .foregroundStyle(
+                                            isCurrent ? Color.secondary : Color.secondary.opacity(0.7)
+                                        )
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 38)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .background {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(recentRowBackground(isCurrent: isCurrent, id: recent.id))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                        .focusEffectDisabled()
+                        .onHover { isInside in
+                            updateHover(&hoveredRecentVaultID, id: recent.id, isInside: isInside)
+                        }
+
+                        Button {
+                            model.forgetRecentVault(recent)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, height: 20)
+                                .background {
+                                    Circle()
+                                        .fill(
+                                            hoveredForgetVaultID == recent.id
+                                                ? Color.primary.opacity(0.12)
+                                                : Color.clear
+                                        )
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                        .focusEffectDisabled()
+                        .accessibilityLabel("Forget \(recent.url.lastPathComponent)")
+                        .help("Forget \(recent.url.lastPathComponent) (does not delete files)")
+                        .onHover { isInside in
+                            updateHover(&hoveredForgetVaultID, id: recent.id, isInside: isInside)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+
+                Divider()
+            }
+
+            vaultActionButton(.open, title: "Open Another Vault…", systemImage: "folder") {
+                showVaultSwitcher = false
+                model.chooseExistingVault()
+            }
+            vaultActionButton(.create, title: "Create New Vault…", systemImage: "folder.badge.plus") {
+                showVaultSwitcher = false
+                model.createNewVault()
+            }
+            if let url = model.vaultURL {
+                vaultActionButton(.reveal, title: "Reveal Vault in Finder", systemImage: "finder") {
+                    showVaultSwitcher = false
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(12)
+        .frame(width: 300)
+    }
+
+    private func recentRowBackground(isCurrent: Bool, id: String) -> Color {
+        if isCurrent { return Color.accentColor.opacity(0.12) }
+        if hoveredRecentVaultID == id { return Color.primary.opacity(0.07) }
+        return .clear
+    }
+
+    private func updateHover(_ hoveredID: inout String?, id: String, isInside: Bool) {
+        if isInside {
+            hoveredID = id
+        } else if hoveredID == id {
+            hoveredID = nil
+        }
+    }
+
+    private func vaultActionButton(
+        _ action: VaultSwitcherAction,
+        title: String,
+        systemImage: String,
+        perform: @escaping () -> Void
+    ) -> some View {
+        Button(action: perform) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .frame(width: 16)
+                Text(title)
+                Spacer()
+            }
+            .foregroundStyle(Color.primary)
+            .padding(.horizontal, 8)
+            .frame(height: 28)
+            .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(
+                        hoveredVaultAction == action
+                            ? Color.primary.opacity(0.09)
+                            : Color.clear
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .focusEffectDisabled()
+        .onHover { isInside in
+            if isInside {
+                hoveredVaultAction = action
+            } else if hoveredVaultAction == action {
+                hoveredVaultAction = nil
+            }
+        }
     }
 
     // MARK: - Rows
