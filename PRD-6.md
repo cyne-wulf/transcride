@@ -1,78 +1,118 @@
-# PRD-6 — Milestone 6: Command Layer & Navigation (the IDE skeleton)
+# PRD-6 — Milestone 6: Extend a Recording
 
-> **This document opens the post-v1 polish program (Milestones 6–9).** v1 (Milestones 1–5) made Transcride a complete, correct tool; Milestones 6–9 make it a *lively, high-quality workbench* — the difference between a utility and an IDE. The program is: **6** command layer & navigation, **7** editor depth (links, tags, live markdown, diff), **8** capture presence & audio finesse, **9** motion, insight & release polish. Product context lives in [master-prd-backup.md](master-prd-backup.md); IDs like `EXP-4`/`LIB-5` are that document's P2 requirements landing here; new ID families (`CMD-`, `NAV-`, `EDX-`, `LNK-`, `CAP-`, `MOT-`, `INS-`, `ONB-`, `ACC-`, `REL-`) are **defined in these milestone docs** — each requirement is written out in full where it appears, so no doc depends on another for its meaning.
->
-> **Before starting:** read `PROJECT-STATE.md` (the living architecture doc written at the end of Milestone 5). **Do not start until the human confirms Milestone 5's checklist is verified and v1 is tagged.** Each milestone doc is sized to be implementable in a single ~200K-token session by a fresh coding agent holding only that doc plus the previous handoff; if context runs low mid-milestone, adopt PRD-5's "Operating procedure — orchestrate to preserve context" (full-context forked subagents, sequential when they build, state recorded in memory after each package).
+> **Before starting:** read [PROJECT-STATE.md](PROJECT-STATE.md), especially the recording/playback, transcription, trim/recovery, and vault-format contracts. **Do not start until the human confirms Milestone 5 is verified.** This milestone adds one focused post-v1 capability. It must preserve every v1 guarantee: local-only operation, plain readable vault files, crash-tolerant capture, atomic mutation, and protection of hand-edited notes.
 
 ## Goal
 
-Give the app an IDE's *nervous system*: one canonical registry of every action, and instant keyboard-first movement between any two places in the vault. At the end of this milestone a user can operate Transcride for an entire session without touching the mouse — palette for actions, switcher for entries, history for backtracking, tabs and split for working sets — and every later milestone registers its features into this layer instead of scattering them.
+Let a user return to an existing recording and keep talking. A small red record control lives inside that entry's playback pill, visually distinct from the app's large New Recording button. Clicking it begins an extension at the end of the selected audio; stopping produces one continuous recording and refreshes its transcript.
+
+The interaction should feel as simple as pressing Record. The implementation must account for the fact that it is safely combining a new live capture with an existing, potentially transcribed and hand-edited artifact.
 
 ## Scope
 
-**In:** command registry, command palette, quick switcher, navigation history, entry tabs, split view, type-to-filter in the entry list, multi-select + batch operations, bulk export (EXP-4), status bar.
-**Out:** wikilinks/backlinks and tags (Milestone 7 — the switcher must not wait for them); editor improvements (Milestone 7); menu-bar capture (Milestone 8); animations beyond system defaults (Milestone 9 does the motion pass over these surfaces).
+**In:** the in-transport Extend Recording control; append-only capture; pause/resume/stop while extending; safe audio concatenation and replacement; duration/waveform refresh; full retranscription; Original/Edited layer handling; crash and failure recovery; accessibility and keyboard/menu discoverability.
 
-## Requirements
+**Out:** recording over a selected range; inserting audio in the middle; deleting a section; non-destructive multi-clip timelines; crossfades; automatic transcript splicing; AI cleanup or summarization. Extending always adds audio at the end.
 
-### Command registry (CMD-1) — the load-bearing contract; get this right
-- A single `CommandRegistry` (Core-adjacent, unit-testable) where every user-facing action is registered once: stable id, title, synonyms for fuzzy search, symbol/icon, keyboard shortcut, scope (global / entry-with-audio / editing / list-selection), and an availability predicate.
-- The menu bar, context menus, command palette, and Keyboard Shortcuts window all *render from the registry* — no action exists in only one surface. Migrate the M5 menu bar and AppModel key-monitor shortcuts to resolve through it (bare-key handling stays in the key monitor; the registry is the source of what the keys mean).
-- Milestones 7–9 must register their actions here — the handoff must document how in two sentences.
+## User experience
 
-### Command palette (CMD-2)
-- ⌘K opens a floating palette: fuzzy match over command titles + synonyms, shortcut hints on the right, recently-used commands first on empty query, ↑↓/Return to execute in the current context, Esc closes. Unavailable commands (predicate false) are hidden, not disabled.
-- Executing a command that needs further input (e.g. Move to Folder) chains into a second palette page rather than dumping the user into a dialog when a picker suffices.
+### Entry point and visual treatment (EXT-1)
 
-### Quick switcher (NAV-1)
-- ⌘O opens a switcher: fuzzy match over entry titles (and folder names, prefixed "Folder:"), most-recently-opened first on empty query, shows date + duration + snippet per row, Return opens in current tab, ⌘Return opens in a new tab. It must stay <50 ms per keystroke on a 1,000-entry vault (reuse the vault snapshot; no disk hits per keystroke).
+- Add a small solid red circle to the existing playback capsule that contains speed, skip-back, play/pause, skip-forward, Skip Silence, and trim controls.
+- The control is deliberately smaller and quieter than the main New Recording button. It has no pulse/breathing animation while idle and must not be mistaken for the global create-new-recording action.
+- Place it at the trailing end of the transport controls, separated enough from Trim to avoid accidental activation. Its tooltip and accessibility label are **"Extend Recording"**. Hover/focus treatment must make the hit target clear even though the visible red circle is small.
+- Show the control only for an entry with available audio. It is not shown for note-only entries or entries whose audio is in Recently Deleted.
+- The command is also reachable from the entry's More menu and the macOS menu bar. Any shortcut must be documented in the Keyboard Shortcuts window; do not assign a bare key that can fire while editing text.
 
-### Navigation history (NAV-2)
-- Every entry visit (selection, search hit, switcher jump, wikilink later) pushes onto a per-window history. ⌘[ / ⌘] (and toolbar back/forward buttons) move through it, restoring selection and scroll position. History survives within a session; it does not persist across relaunch.
+### Starting an extension (EXT-2)
 
-### Tabs (NAV-3) and split view (NAV-4)
-- An in-window tab bar (Obsidian-style, not macOS window tabs): ⌘-click or ⌘Return opens an entry in a new tab, ⌘W closes (never closes the window with one tab), ⌘⇧] / ⌘⇧[ cycle, drag to reorder. Each tab holds its own detail view state (layer, scroll, playhead paused-position). Open tabs restore on relaunch.
-- ⌘\ splits the detail area into two panes showing two tabs side by side (one split level only — no nested splits); drag a tab into either pane; focused pane gets keyboard/transport. Playback remains **one player app-wide**: the non-focused pane's transport controls the shared player only when its entry is loaded (simplest rule; document it).
+- Clicking Extend Recording starts capturing immediately after microphone permission and input validation succeed. There is no setup sheet or countdown.
+- Playback stops before capture starts. The operation always targets the physical end of the audio file, regardless of the current playhead position.
+- The selected entry and target audio identity are captured when the action begins. Renaming, moving, deleting, trimming, retranscribing, or replacing that entry is unavailable until the extension finishes or is discarded.
+- Only one recorder may be active app-wide. Extend Recording is unavailable while a new recording or another extension is recording, paused, or finalizing.
+- Extend Recording is unavailable while that entry is being transcribed, trimmed, restored, deleted, or otherwise mutated. The tooltip explains the specific reason instead of silently ignoring the click.
 
-### List filter, multi-select & batch ops (NAV-5, LIB-6, EXP-4)
-- **NAV-5:** a filter field atop the entry list narrows it as you type (title + snippet substring, local, instant) — distinct from ⌘⇧F vault search; Esc clears.
-- **LIB-6 (new):** ⌘-click/⇧-click multi-select in the entry list; context menu offers batch Move to Folder, Delete (one confirm, all staged to Recently Deleted), Favorite/Unfavorite, and Export.
-- **EXP-4 (master P2):** bulk export — the selection, a folder, or the whole vault exports via the M5 EXP-2 exporter (same options: layer, speaker labels, timestamps) into a destination folder, one `.md` per entry, collision-suffixed; a summary sheet reports count + skipped items.
+### Active extension state (EXT-3)
 
-### Status bar (NAV-6)
-- A slim bar under the detail view: word count of the viewed layer, entry duration, engine/model that produced the original, transcription-queue glance (item count, tap to open queue popover). Hidden in Zen mode.
+- Once capture begins, the playback pill changes into an unmistakable extension state for that entry: **"Extending"**, the newly recorded elapsed time, a live waveform tail, Pause/Resume, and Stop.
+- The time display shows the new segment duration, with the future combined duration available as secondary text. It must not imply that the existing recording is being replayed or overwritten.
+- The main window's existing recording status remains the app-wide source of truth. If the user changes windows or the detail view is temporarily obscured, Pause/Resume and Stop must remain reachable; there must never be an active extension with no visible way to stop it.
+- Space pauses/resumes while extending, following the existing active-recorder precedence. Escape does not discard or stop a recording. Closing the window or quitting while an extension is active uses the same protective confirmation/recovery behavior as a new recording.
+- Live transcription, when enabled, may show ghost text for the newly captured segment, but it remains display-only. It is discarded when the full combined audio is queued for authoritative batch transcription.
+
+### Stopping and transcript behavior (EXT-4)
+
+- Stop first finalizes the new segment independently. Only after the segment is valid does Transcride construct a combined audio file containing the old audio followed immediately by the new segment.
+- The finished entry remains one ordinary audio file in the vault, not a playlist or proprietary project. Prefer packet-preserving concatenation when the source formats permit it. If the formats require normalization, export a new M4A using the selected recording-quality setting and never replace the original until the export has completed and validated.
+- Validate that the combined file is readable and that its duration is plausibly the old duration plus the captured duration. Then perform an atomic/safe swap, update frontmatter duration, invalidate/regenerate `waveform.json`, bump the app's audio revision, reload the player, and synchronize the search/vault snapshot.
+- Queue one **full retranscription of the combined audio** through the existing persistent transcription seam. Do not splice new words into `transcript.original.json`: full retranscription keeps word timestamps, diarization, vocabulary correction, Skip Silence, karaoke highlighting, and search-to-audio mapping internally consistent across the join.
+- Retranscription follows the existing layer contract: archive the prior `transcript.original.json`; replace the Original layer when the new result lands; regenerate Markdown only if the note was never hand-edited; never overwrite a hand-edited Edited layer. For a hand-edited entry, show the existing clear notice that Original was refreshed and Edited was left untouched.
+- Until retranscription finishes, the existing transcript stays readable and editable but is visibly labeled as belonging to the pre-extension audio. Playback remains available for the combined audio; timed transcript highlighting is disabled beyond the old transcript's known duration rather than presenting incorrect word alignment.
+
+## Safety and recovery
+
+### Non-destructive file operation (EXT-5)
+
+- Record the new material into an extension-specific hidden partial inside the entry, separate from the normal new-recording partial. Never write directly into or truncate the existing audio file.
+- The existing audio remains untouched while recording, while finalizing the segment, and while constructing the combined output. The original is displaced only after the combined file passes validation.
+- Reuse the proven trim/trash safe-swap pattern. Once the combined file is installed, stage the pre-extension audio and its old waveform in Recently Deleted as a recoverable **pre-extension version**. Restoring it removes the appended material, stages the combined version in its place, restores duration/waveform state, and triggers a full retranscription under the same Edited-layer rules.
+- Temporary files use explicit names and lifecycle states so the vault scanner ignores them and recovery can distinguish: actively recording segment, finalized segment awaiting join, validated combined output awaiting swap, and abandoned temporary output.
+- A failed join, export, validation, metadata write, or swap leaves the last known-good audio playable. Surface a useful error and retain the finalized extension segment so the user can retry the join or export that segment before discarding it.
+
+### Crash and relaunch recovery (EXT-6)
+
+- If the app or Mac stops during capture, the extension partial remains recoverable without changing the existing audio.
+- On next vault open, detect recoverable extension artifacts and offer: **Finish Extending**, **Save Segment as a New Entry**, or **Discard Segment**. Never auto-append uncertain data and never delete a recoverable segment silently.
+- If the crash occurred after the safe swap, recovery converges on exactly one visible current audio file and one matching duration. Idempotent recovery must not append the same segment twice.
+- Recovery and retry are local-only and must work without a transcription engine being available. Audio recovery succeeds first; transcription can remain queued or failed independently.
+
+## Architecture requirements
+
+### Recorder and audio composition (EXT-7)
+
+- Extend `RecorderService` with an explicit session target/mode rather than branching on filenames throughout the service. New-entry recording and entry-extension recording share microphone selection, `@Sendable` tap safety, live tee, pause/resume, device-change recovery, and crash-tolerant CAF writing, but have separate finalization outcomes.
+- The recording sink must continue to write before forwarding buffers to live transcription. No extension or live-transcription failure may endanger captured audio.
+- Add a Core-level, unit-testable extension plan/state model and a dedicated audio-composition/safe-swap component. Keep filesystem and AVFoundation work out of SwiftUI views.
+- `AppModel` owns the user intent and app-wide state transition; `VaultService` owns entry mutation; `TranscriptionSeam` remains the only route that queues the combined audio.
+- Do not hard-code `audio.m4a` or `transcript.md`. Discover the current media and Markdown through the existing entry/`TranscriptFile` contracts, and preserve unknown frontmatter fields with `FrontmatterDocument`.
 
 ## Decisions already made (do not relitigate)
-- Palette is **⌘K**; switcher is **⌘O** (Obsidian muscle memory beats VS Code's ⌘P here — the vault is the mental model). ⌘[ / ⌘] for history does not collide with the bare-key `[`/`]` speed step (modifier distinguishes).
-- Tabs are a custom in-window tab bar; macOS window tabbing is disabled to avoid two tab concepts.
-- The registry lives in app-layer Swift (it references AppModel state) but its matching/ordering logic is a pure Core type with unit tests.
-- Recents ranking (palette + switcher) = simple recency list persisted in UserDefaults, not frecency — revisit post-9 if it feels wrong.
-- One shared player across panes (no simultaneous dual playback in v1.x).
+
+- Extend means **append at the physical end**, never insert at the playhead and never overwrite existing audio.
+- The small red circle lives inside the playback pill and is visually distinct from the main New Recording button.
+- Starting is immediate; stopping is explicit. There is no countdown.
+- The result is one normal audio file, not multiple clips hidden behind an app-only manifest.
+- Full retranscription is required after a successful append. Transcript splicing is out because it would weaken timing, diarization, and text/audio correctness.
+- A hand-edited layer is never overwritten.
+- The existing audio is never mutated in place. A validated combined file is safely swapped in, and the prior version is recoverable from Recently Deleted.
+- Extending imported audio is allowed when AVFoundation can read and export it. The resulting combined file may become M4A; the untouched pre-extension import remains recoverable. Unsupported/protected inputs show an explanatory disabled state.
 
 ## Definition of done
-- All requirements implemented; unit tests for: registry availability/scoping + fuzzy matcher ordering, switcher ranking, history push/back/forward semantics, batch-export planning (naming/collisions), filter predicate. `xcodebuild test` passes with no regressions.
-- Palette and switcher open in <100 ms; switcher keystroke <50 ms on the 1,000-entry fixture vault.
+
+- All requirements are implemented with no regression to new recording, import, playback, trim, audio deletion/restoration, transcription, or Edited-layer preservation.
+- Unit tests cover: extension state transitions; availability/block reasons; duration planning/tolerance; temporary-artifact recovery classification; idempotent safe-swap recovery; frontmatter preservation; restore-pre-extension behavior; queueing exactly one full retranscription.
+- Integration tests cover: compatible-format append; normalization append; zero/very-short segment cancellation; join/export failure preserving original audio; crash artifacts at each lifecycle phase; a hand-edited entry remaining byte-identical after append and retranscription.
+- `xcodebuild test` passes. A release-style build records, appends, relaunches, plays, and re-transcribes without relying on development paths or network access.
 
 ## Verification checklist (human-run)
 
-**Verification is interactive.** When implementation is complete, run this checklist as a step-by-step quiz: one item at a time, exact steps given, wait for pass/fail, tally; on a fail, fix and re-verify that item plus any already-passed items the fix could touch. Write the handoff only after every box is human-confirmed. *Preparation: generate `TestVault-1000` via `Scripts/make-fixture-vault.sh 1000` if absent.*
+**Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. Fix failures and re-verify affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [ ] ⌘K from every context (list focus, editor focus, Zen, empty vault) opens the palette; typing "retr" surfaces Retranscribe only when the selected entry has audio; Return executes it.
-- [ ] Palette empty-query shows your genuinely most-recent commands; executing from the palette updates recents.
-- [ ] Every menu-bar item, palette command, and Keyboard Shortcuts window row agree on names and shortcuts (spot-check 6 commands across all three surfaces — registry is single-source).
-- [ ] ⌘O, type 3 letters of a known entry's title: it's top-3; Return opens it; reopen ⌘O — that entry now leads the empty-query recents; ⌘Return opens another hit in a new tab.
-- [ ] Switcher stays instant (no visible lag per keystroke) on TestVault-1000.
-- [ ] Visit 4 entries via mixed routes (list click, switcher, search hit); ⌘[ walks back through all four restoring scroll position; ⌘] returns forward.
-- [ ] Tabs: open 3 tabs, reorder by drag, ⌘W closes only the active tab, per-tab layer/scroll state survives switching; quit and relaunch — tabs restore.
-- [ ] ⌘\ splits; two different entries visible side by side; editing in one pane while the other shows a different entry works; focused pane owns Space play/pause.
-- [ ] Type in the list filter: list narrows live; Esc clears; filter + Favorites sidebar filter compose.
-- [ ] Multi-select 5 entries; batch Move to a folder (all move, on disk too); batch Delete stages all 5 in Recently Deleted; restore all 5.
-- [ ] Bulk-export a folder of 10+ entries to a scratch destination: 10 clean `.md` files, options respected, summary sheet correct; two same-titled entries export without overwriting each other.
-- [ ] Status bar shows correct word count (compare a short entry by hand), duration, and engine; queue glance opens the queue popover.
-- [ ] Regression: recording → auto-transcription → karaoke playback → edit/save → vault search all behave exactly as in v1 (M2–M5 spot pass).
-- [ ] Regression: bare-key shortcuts (Space, Z, `[`/`]`, `\`) still work and still defer to editable text views.
+- [ ] Open an entry with audio: a small red circle appears inside the playback pill, reads as part of that transport, and is clearly not the main New Recording button. Tooltip and VoiceOver say "Extend Recording."
+- [ ] A note-only entry and an audio-deleted entry do not show the control. While another recording is active, the action is unavailable with a specific explanation.
+- [ ] Start while the playhead is in the middle: playback stops and recording begins immediately at the end, not at the playhead. Speak a recognizable final sentence, pause, resume, speak again, then stop.
+- [ ] During capture the UI says Extending, shows only the added elapsed time and live waveform, and keeps Pause/Resume and Stop reachable. Space pauses/resumes; Escape does not lose the capture.
+- [ ] After stopping, the audio plays continuously through the old/new boundary and includes both new phrases in order. Duration and waveform cover the full combined file after relaunch.
+- [ ] The full retranscription runs automatically. The new Original has valid word timing across the whole recording; click-to-seek, karaoke, Skip Silence, search jump-to-moment, and speaker labels still align after the join.
+- [ ] Repeat on a hand-edited entry: the prior Original is archived, the refreshed Original includes the extension, the Edited Markdown is byte-identical, and the app clearly says it was left untouched.
+- [ ] Extend a supported imported audio file: the combined result is playable and plain-file readable; if normalized to M4A, the UI explains the change and the original import is recoverable.
+- [ ] Restore the pre-extension version from Recently Deleted: appended audio disappears, duration/waveform revert, full retranscription runs, and a hand-edited layer remains untouched. Restore the combined version back again.
+- [ ] Force a join/export failure using the test seam: the original remains playable and the extension segment can be retried or saved as a new entry.
+- [ ] Use a recovery fixture for each interrupted phase: partial capture, finalized segment, combined output before swap, and swap before cleanup. Relaunch offers the correct recovery and never appends twice.
+- [ ] Regression: create a normal new recording, pause/resume, stop, auto-transcribe, trim it, delete/restore its audio, and play at a non-1× speed; all existing behavior still works.
+- [ ] VoiceOver and keyboard-only operation can start, pause/resume, and stop an extension and understand when finalization/retranscription is in progress.
 - [ ] `xcodebuild test` passes.
 
 ## Handoff (required, after the checklist is verified)
 
-Write **`PRD-7-start-here.md`**: one-paragraph state summary; build/run/test; updated file map (one line per new/changed source file); **the command-registry contract in full** (how Milestone 7 registers commands — signature, scoping, shortcut declaration — with a real registration example); the tab/split state model and how a new view participates; navigation-history API; where the switcher gets its data; deviations from this doc; known issues. Also append this milestone's deviations to `PROJECT-STATE.md`. Close with: "Assume the reader is a fresh model with zero context beyond PRD-7.md and this document."
+Write **`PRD-7-start-here.md`** with: state summary; build/run/test commands; changed file map; the extension session state machine; temporary filenames and recovery classification; safe-swap/restore invariants; how `RecorderService` distinguishes new-entry vs extension finalization; how the combined file reaches `TranscriptionSeam`; Edited-layer behavior; deviations; known issues. Append milestone deviations and new hook points to `PROJECT-STATE.md`. Close with the fresh-model assumption line used by prior milestone handoffs.

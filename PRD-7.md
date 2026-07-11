@@ -1,76 +1,152 @@
-# PRD-7 — Milestone 7: The Editor Becomes a Workbench
+# PRD-7 — Milestone 7: Replace a Selected Audio Region
 
-> **Before starting:** read `PRD-7-start-here.md` (written at the end of Milestone 6) and [master-prd-backup.md](master-prd-backup.md) §5.7, §5.10. **Do not start until the human confirms Milestone 6's checklist is verified.** This doc is sized for a single ~200K-token implementation session; orchestrate with full-context forks (PRD-5 procedure) if context runs low. New actions register in Milestone 6's CommandRegistry — no orphan shortcuts.
+> **Before starting:** read [PROJECT-STATE.md](PROJECT-STATE.md), `PRD-6-start-here.md`, and [PRD-6.md](PRD-6.md). **Do not start until the human confirms Milestone 6 is verified.** Reuse the existing trim range selector, recorder, waveform, safe-swap/Recently Deleted, transcription, and crash-safety contracts. This is intentionally a niche editing tool, not a new primary recording surface.
 
 ## Goal
 
-Make the markdown editor the reason the app feels like an IDE rather than a notepad: text that styles itself as you write, structure you can navigate (outline, links, tags), and honest tooling over the two-layer model (diff). At the end of this milestone the edited layer is somewhere a knowledge worker *prefers* to write, and notes connect to each other the way they do in Obsidian.
+Let a user select an exact region of a recording, make as many replacement takes as needed for that same region, audition them in context, and bake the chosen take into the audio.
+
+The replacement has exactly the selected duration, so the total recording length and every later timeline position remain stable. After baking, the user can invoke Replace again on any region—including a region already replaced—and repeat without a hard clip limit.
 
 ## Scope
 
-**In:** live markdown styling, smart list/task editing, find & replace, outline panel, editor typography preferences + focus mode, wikilinks with autocomplete + backlinks (LNK-1/2), tags (LIB-5), diff view (EDT-5).
-**Out:** motion/appearance polish of these panels (Milestone 9); menu-bar capture (Milestone 8); AI anything (post-program). Obsidian-syntax *preservation* is a v1 guarantee already — this milestone adds rendering/affordances on top, never new mangling.
+**In:** three-dot-menu entry point; reuse of the trim selector; exact-duration range locking; multiple temporary takes for one selection; take preview in context; choosing and baking a take; repeatable replacements; non-destructive edit recipe/source retention; safe composite rendering; duration/waveform/transcript refresh; crash-safe take capture; version recovery.
 
-## Requirements
+**Out:** a permanently visible Replace button; keyboard shortcut; global command; inserting audio that changes total duration; deleting time; stretching a take; automatic time-stretching; multitrack mixing; overlapping audible layers; fades/crossfades beyond tiny anti-click boundaries; a full DAW timeline.
 
-### Live markdown styling (EDX-1)
-- The `MarkdownBodyEditor` styles as you type — headings sized by level, **bold**/*italic* rendered with their delimiters dimmed (visible, never hidden: this is "live preview lite", not WYSIWYG), inline code in mono with a subtle background, blockquotes indented with a bar, links/wikilinks tinted. Styling is attribute-only over the plain text: the saved file remains byte-exact, undo/redo and the M4 dedicated undo manager are untouched, and styling latency must be imperceptible on a 10,000-word note (restyle only the edited paragraph ± neighbors, not the whole document, on each keystroke).
-- The read-only original layer gets the same visual treatment for its (speaker-label) markdown.
+## Entry point and selection
 
-### Smart editing (EDX-2)
-- Return inside a `- ` / `1. ` / `> ` block continues it; Return on an empty item ends the block. Tab/⇧Tab indent/outdent list items. `- [ ]` renders a real checkbox glyph; clicking it toggles `[ ]`↔`[x]` in the text (an edit like any other — forks/autosaves normally).
+### Niche menu-only feature (RPL-1)
 
-### Find & replace (EDX-3)
-- The M4 ⌘F bar gains a replace row (⌥⌘F): replace-one, replace-all (single undo step), match count, works only in the edited layer while editing (original is immutable — find still works there, replace controls hidden).
+- **Replace Audio…** is accessible only from the selected entry's three-dot More menu.
+- Do not add Replace to the playback pill, waveform toolbar, menu bar, context menu, Keyboard Shortcuts window, command palette, or global controls. The feature should remain discoverable for someone looking for advanced entry actions without making the normal recording interface more complex.
+- Show the action only for an entry with available, writable audio. Disable it with a specific explanation while that entry is recording/extending, transcribing, trimming, restoring, deleting, or otherwise mutating.
+- Choosing Replace Audio enters a focused replacement mode in the existing playback area. It does not begin microphone capture immediately.
 
-### Outline panel (EDX-4)
-- A toggleable sidebar panel listing the note's headings hierarchically; click scrolls the editor there; the current section highlights while scrolling. Works on both layers.
+### Reuse the trim selector (RPL-2)
 
-### Typography & focus (EDX-5)
-- Settings (and palette commands): editor font size (⌘+/⌘−/⌘0), line-width presets (narrow/wide/full), and a focus mode that dims all paragraphs but the one with the caret. All persist; Zen recording is untouched.
+- Reuse and, where necessary, generalize the existing `TrimSelectionOverlay`/trim range-selection component. Do not implement a second waveform selector with subtly different drag, keyboard, accessibility, or timing behavior.
+- The user drags the same start/end handles over the waveform to choose the region to replace. The selected duration is always shown prominently.
+- Replace selection uses time coordinates against the current baked composite. Because every replacement is duration-preserving, coordinates remain stable across unlimited later bakes.
+- Require a meaningful non-zero range. Use the shared selector's precision and clamping rules; add fine adjustment controls if the current handles cannot reliably select short spoken phrases.
+- Provide **Cancel** and **Record a Take** below the selector. Cancel leaves the audio and all transcript artifacts byte-unchanged.
 
-### Wikilinks (LNK-1) and backlinks (LNK-2) — new
-- **LNK-1:** typing `[[` in the editor pops fuzzy entry-title autocomplete (switcher-backed); `[[Title]]` and `[[Title|alias]]` are tinted and ⌘-clickable to open that entry (in a tab, pushing navigation history). Unresolved links render distinct (dotted underline); following one offers to create a note-only entry with that title. Links resolve by entry title, case-insensitive.
-- **LNK-2:** a "Linked mentions" panel on each entry lists every note whose edited layer links here, with snippet + click-to-open. Renaming an entry updates inbound `[[links]]` across the vault (single undoable pass, atomic per-file writes, hand-edited or not — links are user content); the confirm sheet lists affected notes. Index lives beside the search index (rebuildable cache; deleting it loses nothing).
+## Recording replacement takes
 
-### Tags (LIB-5, master P2)
-- `#tag` tokens in the edited layer (word-boundary, Obsidian rules: letters/digits/-/_/nested `a/b`) are tinted; a sidebar tag pane lists all tags with counts; clicking one filters the entry list; tags join the ⌘⇧F filter row (M5 SRCH-5) and combine with existing filters. Frontmatter `tags:` (a real YAML list, per the Obsidian-compat doc) is read and unioned with body tags; the tag pane writes frontmatter only through the line-preserving document.
+### Lock an exact region (RPL-3)
 
-### Diff view (EDT-5, master P2)
-- A "Compare Layers" command on forked entries: side-by-side original vs edited with word-level diff highlighting (insertions/deletions tinted), read-only, synchronized scrolling, a jump-to-next-change control. Uses the same whitespace normalization philosophy as `isGeneratedBody` so pure-reflow edits don't light up as changes.
+- Pressing Record a Take locks the start, end, and exact target duration for the take session. The handles cannot move while any attempts are retained.
+- A short visual countdown may prepare the user, but countdown audio is never included in the take.
+- Each attempt records from zero to the locked selected duration and stops automatically at the exact boundary. The progress display counts through the replacement duration rather than the entry's full duration.
+- Pause/resume is unavailable while recording a replacement take because it would break wall-clock alignment and create an ambiguous result.
+- If the user stops early, the microphone/input fails, or the app cannot capture the complete duration, retain the audio as an **Incomplete Take** for listening or export, but do not allow it to be baked. Never silently pad, loop, stretch, or truncate an incomplete take to make it eligible.
+- Use sample/frame counts—not UI timer ticks—to decide whether a take matches the target. The baked take must match the selected region to within one output sample/frame after format conversion.
+
+### Multiple attempts for one region (RPL-4)
+
+- The user can record unlimited attempts against the same locked region, subject only to available disk space.
+- List attempts as Take 1, Take 2, and so on with duration, creation time, status, Play, and Delete. The newest complete attempt becomes selected by default, but no take is baked automatically.
+- Recording another take does not overwrite prior attempts. Deleting an attempt requires no confirmation unless it is the only complete selected take; deleting captured files uses a safe local removal path.
+- **Try Again** records another attempt with the exact same start, end, and duration. **Change Region** first confirms that current temporary attempts will be discarded or saved separately, then unlocks the selector.
+- Take capture inherits PRD-6's crash-safe recording behavior. After relaunch, a recoverable replacement attempt returns to this take session when its entry and locked region can be identified safely; it is never baked automatically.
+
+### Audition in context (RPL-5)
+
+- A take can be played by itself or previewed **In Context** as: current composite before the selection, selected take in place of the region, then current composite after it.
+- Context preview is temporary. It must not write the entry, regenerate the waveform, enqueue transcription, or change the canonical player state irreversibly.
+- Clearly label whether the user is hearing Current Audio, Take N, or Preview in Context. Switching takes during preview must not mix them together.
+- Provide enough lead-in/lead-out context to judge timing while allowing the user to seek and replay the complete preview.
+
+## Baking and repeated composition
+
+### Bake the chosen take (RPL-6)
+
+- **Bake Selected Take** is enabled only for a complete take matching the locked duration.
+- The baked result is: current composite from its beginning to selection start + the selected take + current composite from selection end to its end.
+- The output duration must remain unchanged within one output sample/frame. Validate decodability, expected duration, and boundary integrity before replacing the current audio.
+- Apply very short sample-level anti-click ramps only when required to prevent discontinuity clicks at the two cut boundaries. They must not create an audible crossfade or alter timing.
+- Stop/unload playback before the safe swap. After validation, install the new composite atomically, regenerate `waveform.json`, preserve/update frontmatter, bump the audio revision, reload the player, refresh the vault snapshot, and clean up unchosen temporary attempts only after the bake succeeds.
+- Show a final confirmation before Bake explaining that the chosen take replaces the selected time range, the entry will be fully retranscribed, and any hand-edited note will remain untouched.
+
+### Unlimited subsequent replacements (RPL-7)
+
+- After a bake completes, Replace Audio… can be invoked again immediately on the new composite. There is no product-level maximum number of baked replacement clips.
+- Maintain a non-destructive replacement recipe and retained source material so repeated bakes render from stable sources rather than repeatedly transcoding the previous lossy output. This prevents cumulative quality degradation in untouched regions.
+- The recipe describes a duration-preserving timeline made of slices from the original master and baked replacement sources. Baking a new take updates/splits timeline slices deterministically; a new replacement supersedes any prior slices covered by its selected region.
+- Store recipe metadata and retained take sources in a hidden, versioned entry subdirectory ignored by the normal vault scanner. The currently baked canonical audio remains one ordinary playable file, so Finder, Quick Look, Obsidian, export/share, and other apps never require the recipe.
+- If the hidden edit sources or recipe are removed externally, the current canonical composite remains fully usable. Future Replace begins from that composite as a new stable master; deleting edit history must never make the current audio unreadable.
+- Unlimited means no arbitrary software cap. Surface a clear disk-space error before recording/rendering when the vault cannot safely hold a take, temporary composite, and rollback version.
+
+### Recovery and prior versions (RPL-8)
+
+- Reuse the trim/extension safe-swap pattern. The pre-bake canonical audio and matching waveform are staged in Recently Deleted as a recoverable **pre-replacement version** only after the new composite validates.
+- Restoring a pre-replacement version stages the current composite in its place, repairs duration/waveform state, and triggers the same full retranscription rules. Retained edit history must either roll back consistently with the audio version or restart from the restored file as a new master—never apply a recipe to the wrong canonical audio.
+- A failed recording, render, validation, metadata write, or swap leaves the last known-good canonical audio playable and all complete attempts available for retry.
+- Crash recovery is idempotent. Relaunch must never bake a take twice or confuse an audition preview with a committed replacement.
+
+## Transcript behavior
+
+### Full retranscription after bake (RPL-9)
+
+- Temporary attempts and previews do not affect transcripts.
+- A successful bake queues exactly one full retranscription of the new canonical composite through `TranscriptionSeam`. Do not splice replacement words into `transcript.original.json`.
+- Full retranscription re-establishes correct word timestamps, diarization, vocabulary corrections, karaoke highlighting, click-to-seek, Skip Silence, and search-to-audio mapping around the replacement boundaries.
+- Archive the prior Original before applying the new result. Regenerate Markdown only for a never-hand-edited entry. Never overwrite a hand-edited Edited layer; show the standard notice that Original was refreshed and Edited was left untouched.
+- While retranscription is pending, keep the prior transcript readable but clearly mark timed highlighting/search cues as stale for the replaced interval. Do not display knowingly incorrect word alignment inside that region.
+
+## Architecture requirements
+
+### Replacement edit model (RPL-10)
+
+- Refactor the trim selector into a shared range-selection component consumed by both Trim and Replace, with pure selection validation and coordinate conversion covered by Core tests.
+- Add pure, unit-testable types for locked take sessions, take eligibility, replacement recipes, timeline-slice splitting, overlap/supersession, render planning, and artifact/recovery classification.
+- Put microphone capture in `RecorderService` using an explicit replacement-take session mode. Keep its `@Sendable` sink-before-live-tee safety and crash-tolerant partial writing.
+- Put media reading/rendering, exact frame accounting, anti-click boundary processing, validation, and safe swap in dedicated audio components outside SwiftUI.
+- `AppModel` owns intents and serialized mutation state; `VaultService` owns vault writes; `TranscriptionSeam` remains the one transcription entry point.
+- Discover audio and Markdown through current entry/`TranscriptFile` contracts. Preserve unknown frontmatter fields with `FrontmatterDocument`; never hard-code `audio.m4a` or `transcript.md`.
 
 ## Decisions already made (do not relitigate)
-- Live preview never hides syntax characters (no cursor-proximity reveal tricks) — dimmed delimiters, v1 of the concept. WYSIWYG is explicitly out of the program.
-- Wikilinks resolve by title, not path; ambiguous titles resolve to most-recently-edited and the link gets a tooltip noting ambiguity. (Folder-qualified `[[Folder/Title]]` accepted but not auto-generated.)
-- Rename-updates-inbound-links is **on** and not optional; the link index must therefore be correct before rename commits (block rename with a progress state if the index is mid-rebuild).
-- Tags are parsed from the **edited layer and frontmatter only** (original is engine output — never scanned for tags).
-- Diff is read-only in this milestone (no partial-revert buttons; that's post-program if ever).
+
+- Replace Audio is a niche feature accessible only through the entry's three-dot menu.
+- Replace reuses the trim selector. There is one range-selection interaction, not two.
+- A take must have exactly the selected duration. Recording stops automatically at the boundary; incomplete takes cannot be baked.
+- Multiple attempts may be recorded for one locked region and auditioned before choosing one.
+- Baking replaces the selected region; it does not overlay simultaneous audio and never changes total duration.
+- After baking, Replace can be used again indefinitely, including over an already replaced region.
+- Stable source material plus a duration-preserving edit recipe prevents cumulative generational loss across repeated bakes.
+- The canonical result is always one ordinary playable audio file. Hidden edit history is supplementary and its loss cannot break the current result.
+- Every bake triggers full retranscription, and hand-edited Markdown is never overwritten.
 
 ## Definition of done
-- All requirements implemented; unit tests for: markdown-styling range invalidation (paragraph-local restyle), list-continuation/checkbox toggling edits, wikilink parsing/resolution/ambiguity, rename link-rewrite planning, tag extraction (body + frontmatter union), diff hunk computation. `xcodebuild test` passes, no regressions.
-- Styling keystroke latency imperceptible on a 10,000-word note; link index rebuild on TestVault-1000 < 5 s cold.
+
+- All requirements are implemented with no regression to playback, trim, extend, recording, audio deletion/restoration, transcription, search, or Edited-layer preservation.
+- Unit tests cover: shared selector bounds/precision; take exact-duration eligibility; incomplete takes; locked-region invariants; recipe slice splitting; overlapping and repeated replacements; duration preservation; render-plan determinism; source/recipe versioning; recovery classification; queueing one retranscription.
+- Integration tests cover: recording multiple real takes; contextual preview; exact-frame bake; short and long regions; compressed and lossless sources; repeated overlapping bakes; safe-swap failure; crash during take/render/swap; external deletion of hidden edit history; byte-identical hand-edited Markdown.
+- A stress fixture bakes at least 100 replacements across one recording without timing drift, arbitrary clip limits, cumulative corruption, or increasing loss in untouched source regions.
+- `xcodebuild test` passes and the installed app is used for microphone, listening, and repeated-bake verification.
 
 ## Verification checklist (human-run)
 
-**Interactive, one item at a time, human confirms each** (same protocol as prior milestones). *Preparation: TestVault-1000 fixture; one real entry with a long hand-edited note.*
+**Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. Fix failures and re-run affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [ ] Type a document using `#`/`##` headings, bold, italic, inline code, a blockquote, and a list: everything styles live as typed, delimiters dimmed but visible; the saved `.md` in Finder is byte-plain markdown.
-- [ ] Styling stays instant while typing mid-document in a very long note (paste a 10,000-word body first).
-- [ ] Return continues list and quote blocks; empty-item Return exits; Tab/⇧Tab re-nest a list item; a `- [ ]` checkbox click flips to `- [x]` in the file and forks/autosaves normally.
-- [ ] ⌥⌘F: replace one occurrence, then replace-all; a single ⌘Z undoes the replace-all; the original layer shows find but no replace controls.
-- [ ] Outline panel lists the note's headings; clicking jumps; scrolling tracks the current section; works on the original layer of a diarized entry.
-- [ ] ⌘+ / ⌘− / ⌘0 resize the editor; line-width presets apply; focus mode dims all but the caret paragraph; all survive relaunch.
-- [ ] Type `[[` and 3 letters: autocomplete offers the right entry; accept, ⌘-click the link — it opens in a new tab and ⌘[ returns. An `[[Unresolved Link]]` renders dotted; following it offers creation and creates a working note-only entry.
-- [ ] Link three notes to a target entry; the target's Linked-mentions panel lists all three with snippets; click one to jump.
-- [ ] Rename the target entry: confirm sheet lists the three linking notes; after rename all three files on disk show the new title in their links; ⌘Z in the renamed entry is unaffected.
-- [ ] Add `#projectx` in two entries and `tags: [projectx]` frontmatter in a third: tag pane shows projectx (3); clicking filters the list to those three; ⌘⇧F filtered to the tag + a text query narrows correctly.
-- [ ] Open the vault in Obsidian: wikilinks navigate, tags appear in its tag pane, checkboxes toggle — nothing Transcride wrote confuses it (Tier-2 compat holds).
-- [ ] Compare Layers on a hand-edited entry: word-level changes highlighted both sides, synced scroll, jump-to-next-change cycles; a whitespace-only edit shows an empty diff.
-- [ ] Regression: karaoke highlight, click-to-seek, search cue, and Copy as Markdown still correct on a diarized original layer (styling didn't shift coordinates).
-- [ ] Regression: external edit in Obsidian while Transcride runs still round-trips losslessly (unknown frontmatter, callouts, `==highlights==` survive).
-- [ ] All new commands appear in the palette and menu bar with working shortcuts (registry check).
+- [ ] Open an entry's three-dot menu: Replace Audio… appears there. Confirm it appears nowhere else—no playback-pill button, menu-bar command, shortcut listing, or global control.
+- [ ] Enter Replace: the waveform uses the same handles and behavior as Trim. Select a distinctive spoken phrase and verify the exact start, end, and duration are clear.
+- [ ] Record Take 1: after the countdown it records for exactly the selected duration and stops automatically. Record two more attempts; all three remain independently playable.
+- [ ] Stop one attempt early: it is labeled Incomplete, remains playable/exportable, and Bake is disabled for it rather than padding or stretching it silently.
+- [ ] Preview each complete take In Context: the lead-in and lead-out come from current audio, only the selected range changes, and no vault files/transcripts are committed during preview.
+- [ ] Choose Take 2 and bake it: the resulting audio contains Take 2 in exactly the range, the total duration is unchanged, both boundaries are free of clicks, and unchosen takes were not accidentally mixed.
+- [ ] Full retranscription runs once. The new Original matches the baked audio and word timing/click-to-seek/karaoke remain aligned before, inside, and after the replaced range.
+- [ ] Repeat on a hand-edited entry: the Edited Markdown is byte-identical and the app clearly says it was left untouched.
+- [ ] Invoke Replace again and bake a second region, then replace part of the first baked region. The newest take supersedes only its selected interval and all other baked edits remain audible.
+- [ ] Run the repeated-bake stress fixture: timeline duration and later cue positions do not drift, untouched regions do not accumulate audible transcoding damage, and no clip-count limit appears.
+- [ ] Remove the hidden replacement-history directory in a copy of the vault: the current composite still plays/exports normally and a future Replace can begin from it as a new master.
+- [ ] Restore a pre-replacement version from Recently Deleted: audio, waveform, edit-history baseline, and retranscription state return consistently.
+- [ ] Force a render/swap failure: the prior canonical audio remains playable and all complete takes remain available to retry.
+- [ ] Force-kill during take capture and during bake: relaunch retains recoverable audio, never auto-bakes an uncertain take, and never commits the same take twice.
+- [ ] VoiceOver and keyboard navigation can select a range precisely, record/switch/play takes, understand complete vs incomplete, and confirm Bake.
+- [ ] Regression: Trim still uses the shared selector correctly; normal Record, Extend, playback, delete/restore audio, and transcription still work.
 - [ ] `xcodebuild test` passes.
 
 ## Handoff (required, after the checklist is verified)
 
-Write **`PRD-8-start-here.md`**: state summary; build/run/test; updated file map; **the contracts Milestone 8 consumes** — the notification/queue hooks (where "transcription finished" lands, for CAP-2), the recording pipeline seams (`RecorderService` tap, seam function names, for REC-7/AUD-4/AUD-5), and the waveform-selection component from M5 trim (AUD-4 reuses it); link/tag index schema for completeness; deviations; known issues. Append deviations to `PROJECT-STATE.md`. Close with the fresh-model assumption line.
+Write **`PRD-8-start-here.md`** with: state summary; build/run/test commands; changed file map; shared Trim/Replace selector API; replacement take state machine; exact-duration/frame rules; recipe schema and source directory; slice overlap/supersession algorithm; render and safe-swap invariants; recovery phases; transcription behavior; deviations; known issues. Append milestone deviations and replacement-edit architecture to `PROJECT-STATE.md`. Close with the fresh-model assumption line used by prior milestone handoffs.
