@@ -5,7 +5,7 @@ import SwiftUI
 /// controls; sheets and prompts owned by views are reached via the request
 /// pattern (`requestEntryAction` & friends).
 ///
-/// Bare-key shortcuts (Space, Z, `[`, `]`, `\`, ⇧⌫) stay in AppModel's key
+/// Monitor-owned shortcuts (Space, Z, `[`, `]`, `\`, ⇧⌫, ⌘⌫) stay in AppModel's key
 /// monitor — giving menu items those key equivalents would fire them while
 /// the monitor deliberately defers to text editing. Their menu items carry no
 /// equivalent; the Help → Keyboard Shortcuts window documents the keys.
@@ -133,7 +133,7 @@ struct AppCommands: Commands {
             }
             .disabled(entry == nil)
 
-            // ⇧⌫ lives in the key monitor (it must defer to text editing).
+            // ⇧⌫ and ⌘⌫ live in the key monitor (they must defer to text editing).
             Button("Move to Recently Deleted") {
                 if let entry {
                     Task { await model.deleteItem(atRelativePath: entry.relativePath) }

@@ -150,7 +150,7 @@ struct KeyboardShortcutsView: View {
                             detail: "Creates a folder inside the selected one."
                         ),
                         ShortcutRow(
-                            keys: ["⇧", "⌫"],
+                            keys: ["⌘ / ⇧", "⌫"],
                             title: "Move selected entry to Recently Deleted",
                             detail: "Restorable until the retention window ends."
                         ),

@@ -663,7 +663,7 @@ final class AppModel {
         return filters.apply(to: hits, entries: snapshot.allEntries)
     }
 
-    // MARK: - Keyboard (search / find / Z / Space / arrows / Shift+Delete / brackets)
+    // MARK: - Keyboard (search / find / Z / Space / arrows / delete / brackets)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -762,9 +762,10 @@ final class AppModel {
         }
 
         if keyCode == deleteKeyCode {
-            // Shift+Delete: straight to Recently Deleted, no confirmation —
-            // it's restorable for 30 days, so there's nothing to warn about.
-            guard modifiers == .shift, editingTextView == nil,
+            // Command+Delete and Shift+Delete both move the selected clip
+            // straight to Recently Deleted. Text editing keeps ownership of
+            // either chord while an editable field or note has focus.
+            guard modifiers == .command || modifiers == .shift, editingTextView == nil,
                   let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath
             else { return false }
             Task { await deleteItem(atRelativePath: entry.relativePath) }
