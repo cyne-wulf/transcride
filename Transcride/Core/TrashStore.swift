@@ -12,8 +12,14 @@ enum TrashItemKind: String, Codable, Sendable {
     /// (AUD-3). Restoring swaps it back into the entry and stages the trimmed
     /// audio here as a regular `entryAudio` item.
     case preTrimAudio
+    /// One side of a reversible extension swap. Restoring it stages the
+    /// currently visible audio as another pre-extension version so the user
+    /// can move backward and forward without losing either file.
+    case preExtensionAudio
 
-    var isAudio: Bool { self == .entryAudio || self == .preTrimAudio }
+    var isAudio: Bool {
+        self == .entryAudio || self == .preTrimAudio || self == .preExtensionAudio
+    }
 }
 
 /// Sidecar written next to each trashed item, recording where it came from.
@@ -43,6 +49,9 @@ struct TrashItem: Identifiable, Hashable, Sendable {
         }
         if kind == .preTrimAudio {
             return "Original Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
+        }
+        if kind == .preExtensionAudio {
+            return "Pre-Extension Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
         }
         if isEntry, let slugName = Self.entrySlugName(fromFolderName: trashedName) {
             return slugName
@@ -127,6 +136,19 @@ struct TrashStore: Sendable {
         try trashAudioFiles(
             atEntryPath: entryPath, wrapperPrefix: "original-audio-",
             kind: .preTrimAudio, deletedAt: deletedAt
+        )
+    }
+
+    /// Extend Recording (EXT-5): stages the version being displaced. This is
+    /// symmetric on restore, unlike Delete Audio, because both versions are
+    /// complete and the user must be able to swap either one back.
+    @discardableResult
+    func trashPreExtensionAudio(
+        atEntryPath entryPath: RelativePath, deletedAt: Date = Date()
+    ) throws -> String {
+        try trashAudioFiles(
+            atEntryPath: entryPath, wrapperPrefix: "pre-extension-audio-",
+            kind: .preExtensionAudio, deletedAt: deletedAt
         )
     }
 
@@ -234,15 +256,26 @@ struct TrashStore: Sendable {
             throw VaultError.notFound(item.trashedName)
         }
         let entryURL = vaultRoot.appendingRelativePath(item.originalPath)
+        let priorTranscriptDuration: Double?
+        if let transcriptURL = TranscriptFile.url(inEntry: entryURL),
+           let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
+            priorTranscriptDuration = FrontmatterDocument.parse(text).duration
+        } else {
+            priorTranscriptDuration = nil
+        }
         try fm.createDirectory(at: entryURL, withIntermediateDirectories: true)
 
-        if item.kind == .preTrimAudio {
+        if item.kind == .preTrimAudio || item.kind == .preExtensionAudio {
             // Swallow notFound: the trimmed audio may itself have been
             // deleted meanwhile, and the swap-back is still valid.
-            _ = try? trashAudioFiles(
-                atEntryPath: item.originalPath, wrapperPrefix: "audio-",
-                kind: .entryAudio, deletedAt: Date()
-            )
+            if item.kind == .preExtensionAudio {
+                _ = try? trashPreExtensionAudio(atEntryPath: item.originalPath)
+            } else {
+                _ = try? trashAudioFiles(
+                    atEntryPath: item.originalPath, wrapperPrefix: "audio-",
+                    kind: .entryAudio, deletedAt: Date()
+                )
+            }
         }
 
         let names = ((try? fm.contentsOfDirectory(atPath: wrapperURL.path)) ?? [])
@@ -261,9 +294,16 @@ struct TrashStore: Sendable {
                 try fm.moveItem(at: wrapperURL.appending(path: name), to: destination)
             }
         }
-        if item.kind == .preTrimAudio,
+        if (item.kind == .preTrimAudio || item.kind == .preExtensionAudio),
            let waveform = WaveformData.load(from: WaveformData.url(inEntry: entryURL)) {
             try? EntryMetadata.setDuration(waveform.duration, inEntry: entryURL)
+            if item.kind == .preExtensionAudio {
+                try? ExtensionTranscriptState(
+                    knownTranscriptDuration: priorTranscriptDuration ?? waveform.duration,
+                    combinedAudioDuration: waveform.duration,
+                    normalizedToM4A: false
+                ).write(to: entryURL)
+            }
         }
         try setAudioDeletedFlag(false, inEntry: entryURL)
         try? fm.removeItem(at: wrapperURL)

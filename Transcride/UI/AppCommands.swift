@@ -5,7 +5,7 @@ import SwiftUI
 /// controls; sheets and prompts owned by views are reached via the request
 /// pattern (`requestEntryAction` & friends).
 ///
-/// Monitor-owned shortcuts (Space, Z, `[`, `]`, `\`, ⇧⌫, ⌘⌫) stay in AppModel's key
+/// Monitor-owned shortcuts (Space, E, Z, `[`, `]`, `\`, ⇧⌫, ⌘⌫) stay in AppModel's key
 /// monitor — giving menu items those key equivalents would fire them while
 /// the monitor deliberately defers to text editing. Their menu items carry no
 /// equivalent; the Help → Keyboard Shortcuts window documents the keys.
@@ -21,7 +21,31 @@ struct AppCommands: Commands {
         entryCommands
         playbackCommands
         viewCommands
+#if DEBUG
+        testingCommands
+#endif
     }
+
+#if DEBUG
+    private var testingCommands: some Commands {
+        CommandMenu("Testing") {
+            Button("Force Next Extension Composition Failure") {
+                AudioExtensionFailureInjector.shared.arm(.beforeComposition)
+            }
+            .disabled(!ready)
+
+            Button("Force Next Extension Safe-Swap Failure") {
+                AudioExtensionFailureInjector.shared.arm(.beforeSafeSwap)
+            }
+            .disabled(!ready)
+
+            Button("Force Next Post-Swap Recovery") {
+                AudioExtensionFailureInjector.shared.arm(.afterSafeSwap)
+            }
+            .disabled(!ready)
+        }
+    }
+#endif
 
     // MARK: - File
 
@@ -142,6 +166,12 @@ struct AppCommands: Commands {
             .disabled(entry == nil || model.recorder.currentEntryPath == entry?.relativePath)
 
             Divider()
+
+            Button("Extend Recording") {
+                model.requestEntryAction(.extendRecording)
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(entry.map { model.extensionBlockReason(for: $0) != nil } ?? true)
 
             Button(model.workbenchUIState.isEditing ? "Save Note" : "Edit Note") {
                 model.requestWorkbenchAction(.editOrSave)

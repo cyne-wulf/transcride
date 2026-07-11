@@ -70,6 +70,10 @@ struct TranscriptionApplier: Sendable {
         } else {
             markdownLeftAlone = true
         }
+        // The authoritative transcript now matches the combined audio. This
+        // hidden derived marker may be removed without touching hand-edited
+        // Markdown bytes.
+        try? FileManager.default.removeItem(at: ExtensionTranscriptState.url(inEntry: entryURL))
 
         // 4. Auto-title (TRN-7): only the recording placeholder is replaced;
         // user-set titles (and import filenames) are never overwritten.

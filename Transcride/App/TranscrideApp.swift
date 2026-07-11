@@ -3,12 +3,16 @@ import SwiftUI
 @main
 struct TranscrideApp: App {
     @State private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppTerminationDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
-                .task { await model.start() }
+                .task {
+                    AppTerminationDelegate.model = model
+                    await model.start()
+                }
         }
         .windowToolbarStyle(.unified)
         .commands {

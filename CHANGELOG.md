@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0 — 2026-07-11
+
+### Highlights
+
+- Extend an existing recording from the far-left control in its playback pill, or
+  press `E`; press `E` again to finish the extension.
+- Pause and resume an extension, see its live waveform and added duration, then
+  receive one continuous, ordinary audio file with a refreshed waveform.
+- Fully retranscribe combined audio while preserving hand-edited Markdown and
+  clearly marking the old timed transcript until its replacement arrives.
+- Recover interrupted extension segments by finishing the append, saving the
+  segment as a new entry, or discarding it.
+- Restore pre-extension audio from Recently Deleted through the same safe version
+  swap used by trim recovery.
+- Make ordinary recording capture genuinely crash-tolerant with a fixed-width PCM
+  journal that remains readable after abrupt process termination.
+- Add protective quit/window-close handling and deterministic Debug failure seams
+  for composition, safe-swap, and post-swap recovery testing.
+
+All 14 Milestone 6 verification checks passed, including the complete regression
+checklist and automated suite of 254 tests across 41 suites.
+
 ## 1.0.0 — 2026-07-11
 
 First complete release of Transcride.

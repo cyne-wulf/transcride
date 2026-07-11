@@ -38,5 +38,16 @@ struct RootView: View {
         } message: {
             Text(model.transcriptNoticeMessage ?? "")
         }
+        .alert(
+            "Recording Recovered",
+            isPresented: Binding(
+                get: { model.recordingRecoveryNoticeMessage != nil },
+                set: { if !$0 { model.recordingRecoveryNoticeMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.recordingRecoveryNoticeMessage ?? "")
+        }
     }
 }

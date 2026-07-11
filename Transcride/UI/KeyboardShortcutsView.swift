@@ -43,7 +43,12 @@ struct KeyboardShortcutsView: View {
                         ShortcutRow(
                             keys: ["Space"],
                             title: "Pause or resume recording",
-                            detail: "When no recording is active, controls playback instead."
+                            detail: "Also pauses or resumes an active extension. When idle, controls playback."
+                        ),
+                        ShortcutRow(
+                            keys: ["E"],
+                            title: "Start or finish extending",
+                            detail: "Starts extending the selected audio entry; press E again to finish and append. Typing in an editor still works normally."
                         ),
                         ShortcutRow(
                             keys: ["Z"],

@@ -183,6 +183,11 @@ struct TranscriptionApplierTests {
         doc.body = "\nMy own hand-written summary.\n"
         try doc.serialized().write(to: transcriptURL, atomically: true, encoding: .utf8)
         let editedText = try String(contentsOf: transcriptURL, encoding: .utf8)
+        try ExtensionTranscriptState(
+            knownTranscriptDuration: 10,
+            combinedAudioDuration: 12,
+            normalizedToM4A: false
+        ).write(to: entryURL)
 
         let outcome = try applier.apply(
             segments: [segment(["Second", "engine", "pass"])],
@@ -196,6 +201,7 @@ struct TranscriptionApplierTests {
         // Markdown byte-identical; original still replaced + archived.
         #expect(outcome.markdownLeftAlone)
         #expect(try String(contentsOf: transcriptURL, encoding: .utf8) == editedText)
+        #expect(ExtensionTranscriptState.load(from: entryURL) == nil)
         #expect(outcome.archivedOriginalName != nil)
         let current = try #require(TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL)))
         #expect(current.allWords.map(\.text) == ["Second", "engine", "pass"])

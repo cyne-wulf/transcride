@@ -26,7 +26,8 @@ struct RecorderBar: View {
             case .finalizing:
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
-                    Text("Finalizing recording…")
+                    Text(recorder.extensionSession == nil
+                        ? "Finalizing recording…" : "Appending extension safely…")
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -132,7 +133,7 @@ struct RecorderBar: View {
                     Circle()
                         .fill(recorder.state == .paused ? Color.orange : Color.red)
                         .frame(width: 10, height: 10)
-                    Text(recorder.state == .paused ? "Paused" : "Recording")
+                    Text(recorderLabel)
                         .foregroundStyle(.secondary)
                         .font(.callout.weight(.medium))
                 }
@@ -160,6 +161,13 @@ struct RecorderBar: View {
                 .accessibilityLabel(recorder.state == .paused ? "Paused recording waveform" : "Live recording waveform")
                 .accessibilityIdentifier("live-recording-waveform")
         }
+    }
+
+    private var recorderLabel: String {
+        if recorder.extensionSession != nil {
+            return recorder.state == .paused ? "Extension Paused" : "Extending"
+        }
+        return recorder.state == .paused ? "Paused" : "Recording"
     }
 
     private var pauseResumeButton: some View {

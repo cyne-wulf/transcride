@@ -5,11 +5,11 @@ workbench. Record or import audio, transcribe it on-device, edit the result as
 Markdown, search the whole vault, and delete the audio when the text is all you
 want to keep.
 
-Version 1.0 is built for Apple silicon and macOS 15 or later.
+Version 1.1 is built for Apple silicon and macOS 15 or later.
 
 ## Mac compatibility
 
-Transcride 1.0 is compatible with **every Apple-silicon M-series Mac (M1 or
+Transcride 1.1 is compatible with **every Apple-silicon M-series Mac (M1 or
 newer)** running macOS 15 or later, including all M-series MacBook Air,
 MacBook Pro, Mac mini, iMac, Mac Studio, and Mac Pro models. The downloadable
 beta app is a native `arm64` build. Intel Macs are not supported.
@@ -17,6 +17,7 @@ beta app is a native `arm64` build. Intel Macs are not supported.
 ## What it does
 
 - Records compressed AAC or lossless ALAC audio and imports common audio/video formats.
+- Extends an existing recording safely and keeps its pre-extension version recoverable.
 - Transcribes locally with Parakeet, WhisperKit, or Apple Speech where available.
 - Shows live transcription while recording, with a distraction-free Zen mode.
 - Keeps an immutable timed original beside an editable Markdown note.
@@ -65,8 +66,8 @@ and contributor handoff. Product intent and requirement history live in
 
 ## Release status
 
-Milestones 1–5 and the v1.0 acceptance workflow were human-verified on
-2026-07-11. The repository declares version `1.0.0` build `1`.
+Milestones 1–6 and the v1.1 acceptance workflow were human-verified on
+2026-07-11. The repository declares version `1.1.0` build `2`.
 
 Binary distribution still requires a Developer ID Application certificate and
 Apple notarization credentials; local builds are ad-hoc signed for development.

@@ -133,6 +133,7 @@ struct RecentlyDeletedView: View {
         switch item.kind {
         case .entryAudio: "waveform.badge.minus"
         case .preTrimAudio: "scissors"
+        case .preExtensionAudio: "record.circle"
         case .item: item.isEntry ? "waveform" : "folder"
         }
     }

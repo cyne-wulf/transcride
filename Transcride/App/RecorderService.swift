@@ -18,21 +18,13 @@ enum RecordingQuality: String, CaseIterable, Identifiable, Sendable {
 
     /// AVAudioFile settings: mono 44.1 kHz in both modes.
     var fileSettings: [String: Any] {
+        outputEncoding.fileSettings
+    }
+
+    var outputEncoding: RecordingOutputEncoding {
         switch self {
-        case .compressed:
-            return [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 44_100.0,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 64_000,
-            ]
-        case .lossless:
-            return [
-                AVFormatIDKey: kAudioFormatAppleLossless,
-                AVSampleRateKey: 44_100.0,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitDepthHintKey: 16,
-            ]
+        case .compressed: .aac
+        case .lossless: .alac
         }
     }
 }
@@ -40,14 +32,25 @@ enum RecordingQuality: String, CaseIterable, Identifiable, Sendable {
 /// Records microphone audio into an entry folder.
 ///
 /// Pipeline: AVAudioEngine input tap → AVAudioConverter (to mono 44.1 kHz
-/// float) → AVAudioFile encoding AAC/ALAC into a hidden `.recording.caf`.
-/// CAF headers are valid from the first buffer, so a crash mid-recording
-/// leaves a playable partial file, never a corrupt entry. On stop the CAF is
-/// remuxed (no re-encode) into the final `audio.m4a`, and `waveform.json` +
-/// the stub transcript are written.
+/// float) → fixed-width PCM in a hidden `.recording.caf`. PCM needs no packet
+/// table finalized at close, so a crash mid-recording leaves a readable
+/// partial file. On stop the journal is encoded to the selected AAC/ALAC M4A,
+/// and `waveform.json` + the stub transcript are written.
 @MainActor
 @Observable
 final class RecorderService {
+    enum SessionTarget: Equatable, Sendable {
+        case newEntry
+        case extensionOf(RecordingExtensionTarget)
+    }
+
+    struct FinalizationOutcome: Sendable {
+        var entryRelativePath: RelativePath
+        var target: SessionTarget
+        var duration: Double
+        var extensionSegmentURL: URL?
+    }
+
     enum State {
         case idle
         case recording
@@ -55,7 +58,7 @@ final class RecorderService {
         case finalizing
     }
 
-    nonisolated static let partialFileName = ".recording.caf"
+    nonisolated static let partialFileName = RecorderPartialFile.name
 
     /// Side-channel copy of the input for live transcription. The recording
     /// path never depends on it: the sink writes first, then the tee relays
@@ -69,6 +72,10 @@ final class RecorderService {
     private(set) var livePeaks: [Float] = []
     /// Vault-relative path of the entry being recorded; nil when idle.
     private(set) var currentEntryPath: RelativePath?
+    /// Explicit capture purpose; views and finalization never infer it from a
+    /// hidden filename.
+    private(set) var sessionTarget: SessionTarget?
+    private(set) var extensionSession: RecordingExtensionSession?
     /// Recording problems surfaced to the UI (device loss, disk errors).
     var alertMessage: String?
     var isZenMode = false
@@ -76,8 +83,10 @@ final class RecorderService {
     private var engine: AVAudioEngine?
     private var sink: RecordingSink?
     private var entryURL: URL?
+    private var retainedExtensionEntryURL: URL?
     private var entryCreated: Date = .now
     private var sampleRate: Double = 44_100
+    private var recordingQuality: RecordingQuality = .compressed
     private var configChangeObserver: NSObjectProtocol?
     private var baselineInputSignature: RecordingInputSignature?
     private var recordingStartUptime: TimeInterval?
@@ -108,7 +117,8 @@ final class RecorderService {
         entryURL: URL,
         relativePath: RelativePath,
         quality: RecordingQuality,
-        preferredMicUID: String
+        preferredMicUID: String,
+        target: SessionTarget = .newEntry
     ) throws {
         guard state == .idle else { return }
 
@@ -130,10 +140,14 @@ final class RecorderService {
             throw RecorderError.noInputDevice
         }
 
-        let cafURL = entryURL.appending(path: Self.partialFileName)
+        let partialName = switch target {
+        case .newEntry: Self.partialFileName
+        case .extensionOf: RecordingExtensionArtifacts.partialFileName
+        }
+        let cafURL = entryURL.appending(path: partialName)
         let file = try AVAudioFile(
             forWriting: cafURL,
-            settings: quality.fileSettings,
+            settings: CrashTolerantAudioJournal.fileSettings,
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
@@ -190,7 +204,15 @@ final class RecorderService {
         self.sink = sink
         self.entryURL = entryURL
         self.sampleRate = targetFormat.sampleRate
+        recordingQuality = quality
         currentEntryPath = relativePath
+        sessionTarget = target
+        if case .extensionOf(let extensionTarget) = target {
+            extensionSession = RecordingExtensionSession(target: extensionTarget)
+            persistExtensionSession(in: entryURL)
+        } else {
+            extensionSession = nil
+        }
         entryCreated = EntryFolderName(parsing: entryURL.lastPathComponent)?.date ?? .now
         elapsed = 0
         livePeaks = []
@@ -223,6 +245,10 @@ final class RecorderService {
         guard state == .recording else { return }
         engine?.pause()
         state = .paused
+        if extensionSession != nil {
+            try? extensionSession?.transition(to: .paused)
+            persistExtensionSession(in: entryURL)
+        }
     }
 
     func resume() {
@@ -230,6 +256,10 @@ final class RecorderService {
         do {
             try engine?.start()
             state = .recording
+            if extensionSession != nil {
+                try? extensionSession?.transition(to: .capturing)
+                persistExtensionSession(in: entryURL)
+            }
         } catch {
             alertMessage = "Could not resume recording: \(error.localizedDescription)"
         }
@@ -390,10 +420,14 @@ final class RecorderService {
 
     /// Stops and finalizes the recording. Returns the entry's vault-relative
     /// path on success (also on partial success — the alert says what failed).
-    func stop() async -> RelativePath? {
+    func stop() async -> FinalizationOutcome? {
         guard state == .recording || state == .paused,
-              let engine, let sink, let entryURL else { return nil }
+              let engine, let sink, let entryURL, let sessionTarget else { return nil }
         state = .finalizing
+        if extensionSession != nil {
+            try? extensionSession?.transition(to: .finalizingSegment)
+            persistExtensionSession(in: entryURL)
+        }
         if let configChangeObserver {
             NotificationCenter.default.removeObserver(configChangeObserver)
             self.configChangeObserver = nil
@@ -411,29 +445,93 @@ final class RecorderService {
 
         let relPath = currentEntryPath
         let duration = Double(result.frames) / sampleRate
+        var extensionSegmentURL: URL?
         do {
-            try await Self.finalize(
-                entryURL: entryURL,
-                created: entryCreated,
-                duration: duration,
-                peaks: result.peaks
-            )
+            switch sessionTarget {
+            case .newEntry:
+                try await Self.finalize(
+                    entryURL: entryURL,
+                    created: entryCreated,
+                    duration: duration,
+                    peaks: result.peaks,
+                    quality: recordingQuality
+                )
+            case .extensionOf:
+                extensionSegmentURL = try await Self.finalizeExtensionSegment(
+                    entryURL: entryURL, duration: duration, quality: recordingQuality
+                )
+                extensionSession?.segmentDuration = duration
+                try extensionSession?.transition(to: .segmentReady)
+                persistExtensionSession(in: entryURL)
+            }
             if let writeError = result.error {
                 alertMessage = """
                 The recording was saved, but part of the audio could not be written: \
                 \(writeError.localizedDescription)
                 """
             }
+        } catch RecordingExtensionError.segmentTooShort {
+            try? FileManager.default.removeItem(
+                at: entryURL.appending(path: RecordingExtensionArtifacts.partialFileName)
+            )
+            alertMessage = "The extension was too short to append. The existing recording was not changed."
         } catch {
+            extensionSession?.fail(error.localizedDescription)
+            persistExtensionSession(in: entryURL)
             alertMessage = "The recording could not be finalized: \(error.localizedDescription)"
         }
 
+        if case .newEntry = sessionTarget {
+            state = .idle
+            currentEntryPath = nil
+            self.sessionTarget = nil
+            elapsed = 0
+            livePeaks = []
+        } else {
+            retainedExtensionEntryURL = entryURL
+        }
+        DebugLog.append("recorder: stopped [\(relPath ?? "?")] duration=\(duration)")
+        guard let relPath else { return nil }
+        return FinalizationOutcome(
+            entryRelativePath: relPath,
+            target: sessionTarget,
+            duration: duration,
+            extensionSegmentURL: extensionSegmentURL
+        )
+    }
+
+    /// Finishes the app-wide operation after composition either succeeds or
+    /// leaves the finalized segment available for retry/recovery.
+    func completeExtensionWorkflow(error: Error? = nil) {
+        guard extensionSession != nil else { return }
+        if let error {
+            extensionSession?.fail(error.localizedDescription)
+            persistExtensionSession(in: retainedExtensionEntryURL)
+            alertMessage = "The extension was saved but could not be appended: \(error.localizedDescription)"
+        } else if let entryURL = retainedExtensionEntryURL {
+            try? FileManager.default.removeItem(
+                at: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+            )
+            extensionSession = nil
+        }
         state = .idle
         currentEntryPath = nil
+        sessionTarget = nil
         elapsed = 0
         livePeaks = []
-        DebugLog.append("recorder: stopped [\(relPath ?? "?")] duration=\(duration)")
-        return relPath
+        retainedExtensionEntryURL = nil
+    }
+
+    private func persistExtensionSession(in entryURL: URL?) {
+        guard let entryURL, let extensionSession else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(extensionSession) {
+            try? AtomicFile.write(
+                data,
+                to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+            )
+        }
     }
 
     /// Remux CAF → `audio.m4a` (passthrough, no re-encode), write
@@ -441,32 +539,59 @@ final class RecorderService {
     /// transcript. Falls back to keeping the audio as `audio.caf` if the
     /// remux fails — the vault accepts any audio extension.
     private nonisolated static func finalize(
-        entryURL: URL, created: Date, duration: Double, peaks: [Float]
+        entryURL: URL,
+        created: Date,
+        duration: Double,
+        peaks: [Float],
+        quality: RecordingQuality
     ) async throws {
         let cafURL = entryURL.appending(path: partialFileName)
         let m4aURL = entryURL.appending(path: "audio.m4a")
 
-        var remuxError: Error?
         do {
-            let asset = AVURLAsset(url: cafURL)
-            guard let session = AVAssetExportSession(
-                asset: asset, presetName: AVAssetExportPresetPassthrough
-            ) else {
-                throw RecorderError.exportUnavailable
-            }
-            try await session.export(to: m4aURL, as: .m4a)
+            try await Task.detached {
+                try CrashTolerantAudioJournal.encodeM4A(
+                    from: cafURL, to: m4aURL, encoding: quality.outputEncoding
+                )
+            }.value
             try FileManager.default.removeItem(at: cafURL)
         } catch {
-            remuxError = error
             try? FileManager.default.removeItem(at: m4aURL)
             try FileManager.default.moveItem(at: cafURL, to: entryURL.appending(path: "audio.caf"))
-            DebugLog.append("recorder: remux to m4a failed (kept audio.caf): \(error)")
+            DebugLog.append("recorder: encode to m4a failed (kept PCM audio.caf): \(error)")
         }
 
         try WaveformData(duration: duration, peaks: peaks)
             .write(to: WaveformData.url(inEntry: entryURL))
         try EntryCreator.writeRecordingStub(entryURL: entryURL, created: created, duration: duration)
-        _ = remuxError // audio survives either way; the entry is complete
+    }
+
+    /// Finalizes only the newly captured tail. It deliberately does not write
+    /// entry metadata, waveform, or transcript; the visible entry is untouched
+    /// until composition validates and the safe swap succeeds.
+    private nonisolated static func finalizeExtensionSegment(
+        entryURL: URL, duration: Double, quality: RecordingQuality
+    ) async throws -> URL {
+        guard duration >= AudioExtensionComposer.minimumSegmentDuration else {
+            throw RecordingExtensionError.segmentTooShort
+        }
+        let cafURL = entryURL.appending(path: RecordingExtensionArtifacts.partialFileName)
+        let m4aURL = entryURL.appending(path: RecordingExtensionArtifacts.segmentM4AFileName)
+        do {
+            try await Task.detached {
+                try CrashTolerantAudioJournal.encodeM4A(
+                    from: cafURL, to: m4aURL, encoding: quality.outputEncoding
+                )
+            }.value
+            try FileManager.default.removeItem(at: cafURL)
+            return m4aURL
+        } catch {
+            let retained = entryURL.appending(path: RecordingExtensionArtifacts.segmentCAFFileName)
+            try? FileManager.default.removeItem(at: retained)
+            try FileManager.default.moveItem(at: cafURL, to: retained)
+            DebugLog.append("extension segment remux failed (kept CAF): \(error)")
+            return retained
+        }
     }
 }
 

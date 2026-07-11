@@ -111,7 +111,7 @@ final class AppModel {
     // pattern as in-note find) and the owning view fulfills it.
 
     enum EntryActionRequest {
-        case retranscribe, trim, restoreOriginalAudio, exportMarkdown, deleteAudio, showInfo
+        case extendRecording, retranscribe, trim, restoreOriginalAudio, exportMarkdown, deleteAudio, showInfo
     }
 
     enum WorkbenchActionRequest {
@@ -216,6 +216,11 @@ final class AppModel {
     /// Informational notice kept separate from errors so a protected edited
     /// layer does not look like a failed retranscription.
     var transcriptNoticeMessage: String?
+    var recordingRecoveryNoticeMessage: String?
+    private(set) var extensionRecoveries: [RecoverableRecordingExtension] = []
+    private(set) var extensionRecoveryProcessingIDs: Set<String> = []
+    private(set) var unsupportedExtensionEntryPaths: Set<RelativePath> = []
+    var isExtensionRecoveryPresented = false
 
     private var service: VaultService?
     private var watcher: FSEventsWatcher?
@@ -334,6 +339,56 @@ final class AppModel {
         }
         transcriptionQueue = queue
         TranscriptionSeam.queue = queue
+
+        let recordingRecovery = await service.recoverInterruptedRecordings()
+        for outcome in recordingRecovery.recovered {
+            queue.enqueue(
+                entryRelativePath: outcome.entryRelativePath,
+                source: "recording-recovery"
+            )
+        }
+        if !recordingRecovery.recovered.isEmpty {
+            let count = recordingRecovery.recovered.count
+            var message = count == 1
+                ? "An interrupted recording was recovered through the last audio written to disk."
+                : "\(count) interrupted recordings were recovered through the last audio written to disk."
+            if !recordingRecovery.acknowledgedLegacyPaths.isEmpty {
+                message += " A separate partial from a pre-fix build could not be decoded; its bytes remain preserved and it will not trigger this notice again."
+            }
+            recordingRecoveryNoticeMessage = message
+        } else if !recordingRecovery.acknowledgedLegacyPaths.isEmpty {
+            recordingRecoveryNoticeMessage = "A partial recording from a pre-fix build is missing its audio packet table. Its bytes remain preserved, and it will not trigger this notice again."
+        }
+        if !recordingRecovery.failures.isEmpty {
+            let details = recordingRecovery.failures.map {
+                "\($0.entryRelativePath): \($0.message)"
+            }.joined(separator: "\n")
+            errorMessage = "Some interrupted recordings still need recovery. Their partial audio was kept unchanged:\n\(details)"
+        }
+
+        let extensionDiscovery = await service.recordingExtensionRecoveries()
+        extensionRecoveries = []
+        for recovery in extensionDiscovery.recoverable {
+            if recovery.phase == .swapNeedsCleanup {
+                do {
+                    _ = try await service.finishRecoveredExtension(recovery)
+                    queueExtensionRetranscription(
+                        entryRelativePath: recovery.entryRelativePath,
+                        source: "extension-recovery"
+                    )
+                    audioRevision &+= 1
+                } catch {
+                    extensionRecoveries.append(recovery)
+                }
+            } else {
+                extensionRecoveries.append(recovery)
+            }
+        }
+        if !extensionDiscovery.malformedEntryPaths.isEmpty {
+            let paths = extensionDiscovery.malformedEntryPaths.joined(separator: "\n")
+            errorMessage = "Some extension recovery metadata could not be read. The audio artifacts remain unchanged:\n\(paths)"
+        }
+        isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
 
         watcher = FSEventsWatcher(url: url) { [weak self] paths in
             Task {
@@ -470,6 +525,7 @@ final class AppModel {
     // MARK: - Intents (entries)
 
     func renameEntry(_ entry: Entry, toTitle title: String) async {
+        guard recorder.currentEntryPath != entry.relativePath else { return }
         await perform("renameEntry [\(entry.relativePath)] -> \(title)") { service in
             let newPath = try await service.renameEntry(at: entry.relativePath, toTitle: title)
             await MainActor.run {
@@ -482,6 +538,7 @@ final class AppModel {
     }
 
     func moveItem(atRelativePath relPath: RelativePath, toFolder destFolder: RelativePath) async {
+        guard recorder.currentEntryPath != relPath else { return }
         await perform("moveItem [\(relPath)] -> [\(destFolder)]") { service in
             let newPath = try await service.moveItem(at: relPath, toFolder: destFolder)
             await MainActor.run {
@@ -494,6 +551,7 @@ final class AppModel {
     }
 
     func deleteItem(atRelativePath relPath: RelativePath) async {
+        guard recorder.currentEntryPath != relPath else { return }
         // Standard list semantics: deleting the selected entry selects the
         // one that takes its place (the next below, else the new last).
         // Computed from the displayed order before the row disappears.
@@ -525,6 +583,7 @@ final class AppModel {
     }
 
     func toggleFavorite(for entry: Entry) async {
+        guard recorder.currentEntryPath != entry.relativePath else { return }
         let favorite = !entry.favorite
         await perform("setFavorite \(favorite) [\(entry.relativePath)]") { service in
             try await service.setFavorite(favorite, atEntryPath: entry.relativePath)
@@ -535,6 +594,7 @@ final class AppModel {
     /// title "… copy". The copy becomes the selection so the user lands on
     /// what they just made.
     func duplicateEntry(_ entry: Entry) async {
+        guard recorder.currentEntryPath != entry.relativePath else { return }
         guard let service else { return }
         do {
             let newPath = try await service.duplicateEntry(at: entry.relativePath)
@@ -663,7 +723,7 @@ final class AppModel {
         return filters.apply(to: hits, entries: snapshot.allEntries)
     }
 
-    // MARK: - Keyboard (search / find / Z / Space / arrows / delete / brackets)
+    // MARK: - Keyboard (search / find / recording / playback / navigation)
 
     /// One local key monitor instead of per-view `.keyboardShortcut`s:
     /// SwiftUI shortcuts on plain-space are unreliable across focus states,
@@ -685,6 +745,7 @@ final class AppModel {
     private let escapeKeyCode: UInt16 = 53
     private let deleteKeyCode: UInt16 = 51
     private let zenKeyCode: UInt16 = 6
+    private let extendKeyCode: UInt16 = 14
     private let findKeyCode: UInt16 = 3
     private let leftBracketKeyCode: UInt16 = 33
     private let rightBracketKeyCode: UInt16 = 30
@@ -716,6 +777,30 @@ final class AppModel {
 
         if keyCode == escapeKeyCode, modifiers.isEmpty, trimModeActive {
             cancelTrimRequestRevision &+= 1
+            return true
+        }
+
+        if keyCode == extendKeyCode {
+            // Plain E starts an extension or finishes the active one. An
+            // editable text view always keeps the key for normal typing.
+            guard modifiers.isEmpty, editingTextView == nil else { return false }
+            if recorder.extensionSession != nil {
+                switch recorder.state {
+                case .recording, .paused:
+                    Task { await stopRecording() }
+                case .finalizing:
+                    break // already joining/safely swapping; consume repeats
+                case .idle:
+                    break // retained recovery state is not a live extension
+                }
+                return true
+            }
+            guard let entry = selectedEntry else { return false }
+            if let reason = extensionBlockReason(for: entry) {
+                errorMessage = reason.explanation
+            } else {
+                Task { await startExtension(for: entry) }
+            }
             return true
         }
 
@@ -864,14 +949,167 @@ final class AppModel {
         }
     }
 
+    func extensionBlockReason(for entry: Entry) -> RecordingExtensionBlockReason? {
+        guard entry.hasAudio else { return entry.audioDeleted ? .audioDeleted : .noAudio }
+        if recorder.isActive { return .recorderBusy }
+        if trimModeActive { return .entryBusy("trimming") }
+        if transcriptionBusyEntryPaths.contains(entry.relativePath) { return .transcriptionBusy }
+        if unsupportedExtensionEntryPaths.contains(entry.relativePath) { return .unsupportedAudio }
+        return nil
+    }
+
+    func validateExtensionAvailability(for entry: Entry) async {
+        guard entry.hasAudio, let service else { return }
+        if await service.audioSupportsExtension(atEntryPath: entry.relativePath) {
+            unsupportedExtensionEntryPaths.remove(entry.relativePath)
+        } else {
+            unsupportedExtensionEntryPaths.insert(entry.relativePath)
+        }
+    }
+
+    func startExtension(for entry: Entry) async {
+        await validateExtensionAvailability(for: entry)
+        guard let vaultURL, let audioName = entry.audioFileName,
+              extensionBlockReason(for: entry) == nil else { return }
+        guard await RecorderService.ensureMicPermission() else {
+            errorMessage = "Transcride needs microphone access to extend a recording. Enable it in System Settings → Privacy & Security → Microphone, then try again."
+            return
+        }
+        player.pause()
+        player.unload()
+        let quality = RecordingQuality(
+            rawValue: UserDefaults.standard.string(forKey: PreferenceKey.recordingQuality) ?? ""
+        ) ?? .compressed
+        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
+        let target = RecordingExtensionTarget(
+            entryRelativePath: entry.relativePath,
+            sourceAudioFileName: audioName,
+            sourceDuration: entry.duration ?? 0
+        )
+        do {
+            try recorder.start(
+                entryURL: vaultURL.appendingRelativePath(entry.relativePath),
+                relativePath: entry.relativePath,
+                quality: quality,
+                preferredMicUID: micUID,
+                target: .extensionOf(target)
+            )
+            updateLiveTranscription()
+        } catch {
+            errorMessage = "The recording could not be extended: \(error.localizedDescription)"
+        }
+    }
+
     func stopRecording() async {
         stopLiveTranscription()
-        guard let relPath = await recorder.stop() else { return }
+        guard let outcome = await recorder.stop() else { return }
+        let relPath = outcome.entryRelativePath
+        if case .extensionOf(let target) = outcome.target {
+            guard let service else { return }
+            guard let segmentURL = outcome.extensionSegmentURL else {
+                recorder.completeExtensionWorkflow()
+                recordingRecoveryNoticeMessage = "The extension was too short to append, so it was discarded. The existing recording was not changed."
+                return
+            }
+            do {
+                transcriptionQueue?.evictItems(underPath: relPath)
+                let extensionOutcome = try await service.extendAudio(
+                    target: target, segmentURL: segmentURL
+                )
+                audioRevision &+= 1
+                queueExtensionRetranscription(
+                    entryRelativePath: relPath, source: TranscriptionSeam.Source.extended.rawValue
+                )
+                recorder.completeExtensionWorkflow()
+                if extensionOutcome.normalized {
+                    recordingRecoveryNoticeMessage = "The extension was appended successfully. The combined audio was normalized to M4A; the untouched pre-extension file remains recoverable in Recently Deleted."
+                }
+                await refresh { self.selectedEntryID = relPath }
+            } catch {
+                recorder.completeExtensionWorkflow(error: error)
+                errorMessage = "The extension segment is safe, but it could not be appended: \(error.localizedDescription)"
+                let discovery = await service.recordingExtensionRecoveries()
+                extensionRecoveries = discovery.recoverable
+                isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+            }
+            return
+        }
         await service?.synchronizeSearchEntry(at: relPath)
         // Enqueue before the rescan so the entry's first selected frame
         // already carries its "waiting to transcribe" status row.
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
         await refresh { self.selectedEntryID = relPath }
+    }
+
+    func finishRecoveredExtension(_ recovery: RecoverableRecordingExtension) async {
+        guard let service, !extensionRecoveryProcessingIDs.contains(recovery.id) else { return }
+        extensionRecoveryProcessingIDs.insert(recovery.id)
+        defer { extensionRecoveryProcessingIDs.remove(recovery.id) }
+        do {
+            let outcome = try await service.finishRecoveredExtension(recovery)
+            queueExtensionRetranscription(
+                entryRelativePath: recovery.entryRelativePath,
+                source: "extension-recovery"
+            )
+            extensionRecoveries.removeAll { $0.id == recovery.id }
+            isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+            audioRevision &+= 1
+            recordingRecoveryNoticeMessage = outcome.normalized
+                ? "The extension was recovered and appended. The combined audio was normalized to M4A, and the pre-extension file remains recoverable in Recently Deleted."
+                : "The extension was recovered and appended. Full retranscription has been queued."
+            await refresh { self.selectedEntryID = recovery.entryRelativePath }
+        } catch {
+            errorMessage = "The extension could not be finished. Its segment remains recoverable: \(error.localizedDescription)"
+        }
+    }
+
+    func saveRecoveredExtensionAsNewEntry(
+        _ recovery: RecoverableRecordingExtension
+    ) async {
+        guard let service, !extensionRecoveryProcessingIDs.contains(recovery.id) else { return }
+        extensionRecoveryProcessingIDs.insert(recovery.id)
+        defer { extensionRecoveryProcessingIDs.remove(recovery.id) }
+        do {
+            let newPath = try await service.saveRecoveredExtensionAsNewEntry(recovery)
+            transcriptionQueue?.enqueue(
+                entryRelativePath: newPath,
+                source: "extension-segment-recovery"
+            )
+            extensionRecoveries.removeAll { $0.id == recovery.id }
+            isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+            await refresh { self.selectedEntryID = newPath }
+            recordingRecoveryNoticeMessage = "The interrupted extension was saved as a separate recording and queued for transcription. The original entry was unchanged."
+        } catch {
+            errorMessage = "The extension segment could not be saved as a new entry: \(error.localizedDescription)"
+        }
+    }
+
+    func discardRecoveredExtension(_ recovery: RecoverableRecordingExtension) async {
+        guard let service, !extensionRecoveryProcessingIDs.contains(recovery.id) else { return }
+        extensionRecoveryProcessingIDs.insert(recovery.id)
+        await service.discardRecoveredExtension(recovery)
+        extensionRecoveryProcessingIDs.remove(recovery.id)
+        extensionRecoveries.removeAll { $0.id == recovery.id }
+        isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+        await refresh()
+    }
+
+    private func queueExtensionRetranscription(
+        entryRelativePath: RelativePath, source: String
+    ) {
+        guard let transcriptionQueue else { return }
+        let alreadyQueued = transcriptionQueue.items.contains {
+            $0.entryRelativePath == entryRelativePath
+                && $0.isRetranscribe
+                && ($0.source == TranscriptionSeam.Source.extended.rawValue
+                    || $0.source == "extension-recovery")
+        }
+        guard !alreadyQueued else { return }
+        transcriptionQueue.enqueue(
+            entryRelativePath: entryRelativePath,
+            source: source,
+            isRetranscribe: true
+        )
     }
 
     // MARK: - Live transcription (M3 addendum)
@@ -1051,19 +1289,20 @@ final class AppModel {
                == vaultURL.appendingRelativePath(item.originalPath).path {
             player.unload()
         }
-        if item.kind == .preTrimAudio {
+        if item.kind == .preTrimAudio || item.kind == .preExtensionAudio {
             transcriptionQueue?.evictItems(underPath: item.originalPath)
         }
         await perform("restore [\(item.trashedName)]") { service in
             _ = try await service.restore(item)
             await MainActor.run {
                 self.audioRevision &+= 1
-                if item.kind == .preTrimAudio {
+                if item.kind == .preTrimAudio || item.kind == .preExtensionAudio {
                     // The transcript still matches the displaced trimmed
                     // audio; bring the text back in line with the disk.
                     self.transcriptionQueue?.enqueue(
                         entryRelativePath: item.originalPath,
-                        source: "trim-restore",
+                        source: item.kind == .preTrimAudio
+                            ? "trim-restore" : "extension-restore",
                         isRetranscribe: true
                     )
                 }

@@ -16,13 +16,22 @@ enum TranscriptionSeam {
     enum Source: String {
         case recorded
         case imported
+        case extended
     }
 
     /// The active vault's queue; owned by `AppModel`, swapped on vault change.
     static weak var queue: TranscriptionQueue?
 
-    static func audioEntryReady(entryRelativePath: RelativePath, source: Source) {
+    static func audioEntryReady(
+        entryRelativePath: RelativePath,
+        source: Source,
+        isRetranscribe: Bool = false
+    ) {
         DebugLog.append("TranscriptionSeam: \(source.rawValue) entry ready [\(entryRelativePath)]")
-        queue?.enqueue(entryRelativePath: entryRelativePath, source: source.rawValue)
+        queue?.enqueue(
+            entryRelativePath: entryRelativePath,
+            source: source.rawValue,
+            isRetranscribe: isRetranscribe
+        )
     }
 }

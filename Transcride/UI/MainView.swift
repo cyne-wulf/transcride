@@ -55,6 +55,10 @@ struct MainView: View {
             VaultSearchView()
                 .environment(model)
         }
+        .sheet(isPresented: $model.isExtensionRecoveryPresented) {
+            ExtensionRecoveryView()
+                .environment(model)
+        }
         // First run with a vault open: offer the default model download once.
         .task { await offerDefaultModelIfNeeded() }
         .alert("Download the Transcription Model?", isPresented: $showingModelOffer) {

@@ -7,6 +7,7 @@ struct EntryDetailView: View {
 
     @State private var document: FrontmatterDocument?
     @State private var original: TranscriptOriginal?
+    @State private var extensionTranscriptState: ExtensionTranscriptState?
     @State private var loadedEntryPath: RelativePath?
     @State private var showingInfo = false
     @State private var showingRetranscribe = false
@@ -35,6 +36,7 @@ struct EntryDetailView: View {
                             } else {
                                 document = nil
                                 original = nil
+                                extensionTranscriptState = nil
                                 loadedEntryPath = nil
                                 isTrimming = false
                                 model.player.setTranscriptForSilenceSkipping(nil)
@@ -45,10 +47,12 @@ struct EntryDetailView: View {
                               model.selectedEntryID == entry.relativePath else { return }
                         document = content.edited
                         original = content.original
+                        extensionTranscriptState = content.extensionState
                         loadedEntryPath = entry.relativePath
                         model.player.setTranscriptForSilenceSkipping(
                             content.original,
-                            duration: entry.duration
+                            duration: content.extensionState?.knownTranscriptDuration
+                                ?? entry.duration
                         )
                     }
             } else {
@@ -142,7 +146,12 @@ struct EntryDetailView: View {
                 if loadedEntryPath == entry.relativePath, document != nil || original != nil {
                     // Full pane width: the workbench pins its action row to the
                     // pane's top-right corner and centers the note column itself.
-                    TranscriptWorkbenchView(entry: entry, original: original, document: $document)
+                    TranscriptWorkbenchView(
+                        entry: entry,
+                        original: original,
+                        extensionState: extensionTranscriptState,
+                        document: $document
+                    )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .layoutPriority(1)
                 } else if loadedEntryPath != entry.relativePath {
@@ -206,6 +215,10 @@ struct EntryDetailView: View {
             if model.originalAudioTrashItem(for: entry) != nil {
                 Button("Restore Original Audio…") { promptRestoreOriginal(entry) }
             }
+            if entry.hasAudio {
+                Button("Extend Recording") { Task { await model.startExtension(for: entry) } }
+                    .disabled(model.extensionBlockReason(for: entry) != nil)
+            }
             if entry.hasAudio || entry.audioDeleted {
                 Divider()
                 Button("Delete Audio…", role: .destructive) { promptDeleteAudio(entry) }
@@ -257,6 +270,15 @@ struct EntryDetailView: View {
             }
             ToolbarItem(id: "detailMore", placement: .primaryAction) {
                 Menu {
+                    if entry.hasAudio {
+                        Button("Extend Recording") {
+                            Task { await model.startExtension(for: entry) }
+                        }
+                        .disabled(model.extensionBlockReason(for: entry) != nil)
+                        .help(model.extensionBlockReason(for: entry)?.explanation
+                            ?? "Extend Recording")
+                        Divider()
+                    }
                     if entry.hasAudio || entry.audioDeleted {
                         Button("Trim Audio…") { isTrimming = true }
                             .disabled(!canTrim(entry))
@@ -302,6 +324,10 @@ struct EntryDetailView: View {
             // Menu-bar items reach this view's sheets/prompts through the
             // request pattern; conditions mirror the equivalent buttons.
             switch model.entryActionRequest {
+            case .extendRecording:
+                if model.extensionBlockReason(for: entry) == nil {
+                    Task { await model.startExtension(for: entry) }
+                }
             case .retranscribe:
                 if entry.hasAudio { showingRetranscribe = true }
             case .trim:
@@ -507,14 +533,18 @@ private struct PlaybackSection: View {
 
     var body: some View {
         VStack(spacing: 8 * controlScale) {
-            waveformShelf
+            if isActiveExtension {
+                extensionShelf
+            } else {
+                waveformShelf
 
-            Text(Self.playheadLabel(player.currentTime))
-                .font(.system(size: 36 * controlScale, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .contentTransition(.numericText())
+                Text(Self.playheadLabel(player.currentTime))
+                    .font(.system(size: 36 * controlScale, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
 
-            transport
+                transport
+            }
         }
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
@@ -522,6 +552,7 @@ private struct PlaybackSection: View {
             sectionWidth = width
         }
         .task(id: "\(entry.relativePath)|\(entry.audioFileName ?? "")|audio:\(model.audioRevision)") {
+            await model.validateExtensionAvailability(for: entry)
             if let url = model.audioURL(for: entry) {
                 player.load(url: url, knownDuration: entry.duration)
             }
@@ -558,6 +589,68 @@ private struct PlaybackSection: View {
         } message: {
             Text(trimConfirmMessage)
         }
+    }
+
+    private var isActiveExtension: Bool {
+        model.recorder.currentEntryPath == entry.relativePath
+            && model.recorder.extensionSession != nil
+    }
+
+    private var extensionShelf: some View {
+        VStack(spacing: 10 * controlScale) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(model.recorder.state == .paused ? Color.orange : Color.red)
+                    .frame(width: 9, height: 9)
+                Text(model.recorder.state == .finalizing ? "Finishing extension…" : "Extending")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                Text("Combined: " + EntryListView.formatDuration(
+                    (entry.duration ?? 0) + model.recorder.elapsed
+                ))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            LiveWaveformView(peaks: model.recorder.livePeaks)
+                .frame(height: 56 * controlScale)
+                .padding(.horizontal, 8)
+                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
+                .opacity(model.recorder.state == .paused ? 0.45 : 1)
+                .accessibilityLabel("Live extension waveform")
+
+            Text(Self.playheadLabel(model.recorder.elapsed))
+                .font(.system(size: 36 * controlScale, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+
+            HStack(spacing: 24 * controlScale) {
+                if model.recorder.state == .finalizing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    TransportButton(
+                        systemImage: model.recorder.state == .paused ? "record.circle" : "pause.fill",
+                        size: 20 * controlScale,
+                        help: model.recorder.state == .paused ? "Resume Extension (Space)" : "Pause Extension (Space)"
+                    ) {
+                        model.recorder.state == .paused
+                            ? model.recorder.resume() : model.recorder.pause()
+                    }
+                    TransportButton(
+                        systemImage: "stop.fill", size: 20 * controlScale,
+                        help: "Stop and Append Extension"
+                    ) {
+                        Task { await model.stopRecording() }
+                    }
+                    .accessibilityLabel("Stop Extending")
+                }
+            }
+            .padding(.horizontal, 22 * controlScale)
+            .padding(.vertical, 7 * controlScale)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.separator.opacity(0.7), lineWidth: 1))
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("extension-transport")
     }
 
     private var trimConfirmMessage: String {
@@ -684,6 +777,13 @@ private struct PlaybackSection: View {
 
     private var transport: some View {
         HStack(spacing: 23 * controlScale) {
+            ExtendRecordingButton(
+                size: 11 * controlScale,
+                blockedReason: model.extensionBlockReason(for: entry)
+            ) {
+                Task { await model.startExtension(for: entry) }
+            }
+
             speedControl
 
             TransportButton(
@@ -806,6 +906,40 @@ private struct PlaybackSection: View {
             return String(format: "%02d:%02d:%02d.%02d", hours, minutes, wholeSeconds, centiseconds)
         }
         return String(format: "%02d:%02d.%02d", minutes, wholeSeconds, centiseconds)
+    }
+}
+
+/// The extension control is intentionally quiet at rest: a grayscale record
+/// dot at the leading edge of the pill, becoming red only when hovered.
+private struct ExtendRecordingButton: View {
+    let size: CGFloat
+    let blockedReason: RecordingExtensionBlockReason?
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "circle.fill")
+                .font(.system(size: size))
+                .foregroundStyle(
+                    blockedReason == nil && hovering ? Color.red : Color.secondary
+                )
+                .frame(width: size + 16, height: size + 14)
+                .background(
+                    Circle()
+                        .fill(.primary.opacity(hovering ? 0.08 : 0))
+                        .frame(width: size + 14, height: size + 14)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(blockedReason != nil)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help(blockedReason?.explanation ?? "Extend Recording")
+        .accessibilityLabel("Extend Recording")
+        .accessibilityIdentifier("extend-recording-button")
     }
 }
 

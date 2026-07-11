@@ -69,6 +69,7 @@ struct TranscriptWorkbenchView: View {
 
     let entry: Entry
     let original: TranscriptOriginal?
+    let extensionState: ExtensionTranscriptState?
     @Binding var document: FrontmatterDocument?
 
     @State private var activeLayer: Layer = .original
@@ -101,7 +102,8 @@ struct TranscriptWorkbenchView: View {
         original.map {
             TranscriptWordMap(
                 transcript: $0,
-                duration: entry.duration ?? positivePlayerDuration,
+                duration: extensionState?.knownTranscriptDuration
+                    ?? entry.duration ?? positivePlayerDuration,
                 speakerNames: speakerNames
             )
         }
@@ -149,6 +151,10 @@ struct TranscriptWorkbenchView: View {
 
     private var currentWordIndex: Int? {
         guard entry.hasAudio, model.player.url != nil else { return nil }
+        if let knownDuration = extensionState?.knownTranscriptDuration,
+           model.player.currentTime > knownDuration {
+            return nil
+        }
         return wordMap?.wordIndex(atTime: model.player.currentTime)
     }
 
@@ -189,6 +195,24 @@ struct TranscriptWorkbenchView: View {
             noteToolbar
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
+
+            if let extensionState {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.badge.exclamationmark")
+                    Text("Transcript belongs to the previous audio version (timing available through "
+                        + EntryListView.formatDuration(extensionState.knownTranscriptDuration)
+                        + "). Full retranscription is in progress; timing is intentionally disabled in the appended portion.")
+                    if extensionState.normalizedToM4A {
+                        Text("Combined audio was normalized to M4A.")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Transcript belongs to the previous audio version. Full retranscription is in progress.")
+            }
 
             VStack(spacing: 0) {
                 if showingFind {

@@ -1,8 +1,17 @@
 import Foundation
+import AVFoundation
 
 struct EntryTranscriptContent: Sendable {
     var edited: FrontmatterDocument?
     var original: TranscriptOriginal?
+    var extensionState: ExtensionTranscriptState?
+}
+
+struct AudioExtensionOutcome: Sendable {
+    var audioFileName: String
+    var combinedDuration: Double
+    var normalized: Bool
+    var trashedName: String
 }
 
 /// Background actor owning all vault file I/O so the main thread never touches
@@ -28,6 +37,138 @@ actor VaultService {
         scanner.scan(root: rootURL)
     }
 
+    func recoverInterruptedRecordings() async -> InterruptedRecordingRecoverySummary {
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: rootURL)
+        if !summary.recovered.isEmpty {
+            synchronizeSearchIndex(relativePaths: summary.recovered.map(\.entryRelativePath))
+        }
+        return summary
+    }
+
+    func recordingExtensionRecoveries() -> RecordingExtensionRecoveryDiscovery {
+        RecordingExtensionRecovery.discover(inVault: rootURL)
+    }
+
+    func finishRecoveredExtension(
+        _ recovery: RecoverableRecordingExtension
+    ) async throws -> AudioExtensionOutcome {
+        if recovery.phase == .swapNeedsCleanup {
+            return try await convergeRecoveredExtensionSwap(recovery)
+        }
+        guard let segmentName = recovery.segmentFileName else {
+            throw VaultError.notFound("Recoverable extension segment")
+        }
+        let entryURL = rootURL.appendingRelativePath(recovery.entryRelativePath)
+        let segmentURL = entryURL.appending(path: segmentName)
+        let segmentDuration = try await AudioImportFormat.probeDuration(of: segmentURL)
+        var session = recovery.session
+        session.phase = .segmentReady
+        session.segmentDuration = segmentDuration
+        session.failureMessage = nil
+        try writeExtensionManifest(session, in: entryURL)
+        // A validated combined output is derived from the still-retained
+        // segment. Rebuild it so retry is deterministic across exporter versions.
+        try? FileManager.default.removeItem(
+            at: entryURL.appending(path: RecordingExtensionArtifacts.combinedFileName)
+        )
+        let outcome = try await extendAudio(target: session.target, segmentURL: segmentURL)
+        RecordingExtensionRecovery.removeArtifacts(in: entryURL)
+        return outcome
+    }
+
+    func saveRecoveredExtensionAsNewEntry(
+        _ recovery: RecoverableRecordingExtension
+    ) async throws -> RelativePath {
+        guard let segmentName = recovery.segmentFileName else {
+            throw VaultError.notFound("Recoverable extension segment")
+        }
+        let sourceEntryURL = rootURL.appendingRelativePath(recovery.entryRelativePath)
+        let segmentURL = sourceEntryURL.appending(path: segmentName)
+        let duration = try await AudioImportFormat.probeDuration(of: segmentURL)
+        let parent = recovery.entryRelativePath.parentRelativePath
+        let newPath = try EntryCreator(vaultRoot: rootURL).createEntryFolder(
+            inFolder: parent, date: .now, slug: "recovered-extension"
+        )
+        let newEntryURL = rootURL.appendingRelativePath(newPath)
+        do {
+            let extensionName = AudioImportFormat.normalizedExtension(of: segmentName)
+            let audioName = extensionName == "m4a" ? "audio.m4a" : "audio.caf"
+            let stagedURL = newEntryURL.appending(path: ".recovered-segment-\(audioName)")
+            try FileManager.default.copyItem(at: segmentURL, to: stagedURL)
+            let waveform = try await WaveformGenerator.generate(fromAudioAt: stagedURL)
+            try EntryCreator.writeRecordingStub(
+                entryURL: newEntryURL, created: .now, duration: duration
+            )
+            try FileManager.default.moveItem(
+                at: stagedURL, to: newEntryURL.appending(path: audioName)
+            )
+            try waveform.write(to: WaveformData.url(inEntry: newEntryURL))
+        } catch {
+            try? FileManager.default.removeItem(at: newEntryURL)
+            throw error
+        }
+        RecordingExtensionRecovery.removeArtifacts(in: sourceEntryURL)
+        synchronizeSearchIndex(relativePaths: [recovery.entryRelativePath, newPath])
+        return newPath
+    }
+
+    func discardRecoveredExtension(_ recovery: RecoverableRecordingExtension) {
+        let entryURL = rootURL.appendingRelativePath(recovery.entryRelativePath)
+        RecordingExtensionRecovery.removeArtifacts(in: entryURL)
+        synchronizeSearchIndex(relativePaths: [recovery.entryRelativePath])
+    }
+
+    private func convergeRecoveredExtensionSwap(
+        _ recovery: RecoverableRecordingExtension
+    ) async throws -> AudioExtensionOutcome {
+        let entryURL = rootURL.appendingRelativePath(recovery.entryRelativePath)
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: entryURL.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
+        guard let audioName = VaultScanner.audioFile(in: names) else {
+            throw VaultError.notFound(recovery.entryRelativePath.appendingComponent("audio"))
+        }
+        let trashItems = try trash.items()
+        guard let staged = trashItems.first(where: {
+            $0.kind == .preExtensionAudio
+                && $0.originalPath == recovery.entryRelativePath
+        }) else {
+            throw RecordingExtensionError.sourceChanged
+        }
+        let audioURL = entryURL.appending(path: audioName)
+        let duration = try await AudioImportFormat.probeDuration(of: audioURL)
+        let plan = RecordingExtensionDurationPlan(
+            sourceDuration: recovery.session.target.sourceDuration,
+            segmentDuration: recovery.session.segmentDuration
+        )
+        guard plan.accepts(actualDuration: duration) else {
+            throw RecordingExtensionError.invalidCombinedDuration(
+                expected: plan.expectedCombinedDuration, actual: duration
+            )
+        }
+        let waveform = try await WaveformGenerator.generate(fromAudioAt: audioURL)
+        try waveform.write(to: WaveformData.url(inEntry: entryURL))
+        try EntryMetadata.setDuration(duration, inEntry: entryURL)
+        RecordingExtensionRecovery.removeArtifacts(in: entryURL)
+        synchronizeSearchIndex(relativePaths: [recovery.entryRelativePath])
+        return AudioExtensionOutcome(
+            audioFileName: audioName,
+            combinedDuration: duration,
+            normalized: audioName != recovery.session.target.sourceAudioFileName,
+            trashedName: staged.trashedName
+        )
+    }
+
+    private func writeExtensionManifest(
+        _ session: RecordingExtensionSession, in entryURL: URL
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try AtomicFile.write(
+            try encoder.encode(session),
+            to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+        )
+    }
+
     func readTranscript(atEntryPath relPath: RelativePath) -> FrontmatterDocument? {
         guard let url = TranscriptFile.url(inEntry: rootURL.appendingRelativePath(relPath)),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
@@ -45,7 +186,8 @@ actor VaultService {
         }
         return EntryTranscriptContent(
             edited: edited,
-            original: TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
+            original: TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL)),
+            extensionState: ExtensionTranscriptState.load(from: entryURL)
         )
     }
 
@@ -138,6 +280,19 @@ actor VaultService {
         )
         try waveform.write(to: cacheURL)
         return waveform
+    }
+
+    func audioSupportsExtension(atEntryPath relPath: RelativePath) async -> Bool {
+        guard let audioName = audioFileName(atEntryPath: relPath) else { return false }
+        let asset = AVURLAsset(
+            url: rootURL.appendingRelativePath(relPath).appending(path: audioName)
+        )
+        guard (try? await asset.loadTracks(withMediaType: .audio).isEmpty) == false else {
+            return false
+        }
+        return AVAssetExportSession(
+            asset: asset, presetName: AVAssetExportPresetAppleM4A
+        ) != nil
     }
 
     // MARK: - Entry creation (M2: recording & import)
@@ -284,6 +439,98 @@ actor VaultService {
         )
         synchronizeSearchIndex(relativePaths: [relPath])
         return outcome
+    }
+
+    /// EXT-4/5: combine into a hidden output, validate duration, safely swap,
+    /// regenerate the waveform, and leave transcription queueing to AppModel.
+    func extendAudio(
+        target: RecordingExtensionTarget, segmentURL: URL
+    ) async throws -> AudioExtensionOutcome {
+        let entryURL = rootURL.appendingRelativePath(target.entryRelativePath)
+        guard audioFileName(atEntryPath: target.entryRelativePath) == target.sourceAudioFileName else {
+            throw RecordingExtensionError.sourceChanged
+        }
+        do {
+            try updateExtensionManifest(in: entryURL, to: .composing)
+            if AudioExtensionFailureInjector.shared.consume(.beforeComposition) {
+                throw AudioExtensionInjectedError.forced(.beforeComposition)
+            }
+            let sourceURL = entryURL.appending(path: target.sourceAudioFileName)
+            let outputURL = entryURL.appending(path: RecordingExtensionArtifacts.combinedFileName)
+            let composed = try await AudioExtensionComposer.compose(
+                sourceURL: sourceURL, segmentURL: segmentURL, outputURL: outputURL
+            )
+            try updateExtensionManifest(in: entryURL, to: .combinedReady)
+            if AudioExtensionFailureInjector.shared.consume(.beforeSafeSwap) {
+                throw AudioExtensionInjectedError.forced(.beforeSafeSwap)
+            }
+            try updateExtensionManifest(in: entryURL, to: .swapping)
+            let base = (target.sourceAudioFileName as NSString).deletingPathExtension
+            let finalName = (base.isEmpty ? "audio" : base) + ".m4a"
+            let applied = try AudioExtensionApplier(vaultRoot: rootURL).apply(
+                combinedFileAt: composed.url,
+                fileName: finalName,
+                combinedDuration: composed.duration,
+                previousTranscriptDuration: target.sourceDuration,
+                normalizedToM4A: composed.normalized,
+                expectedSourceFileName: target.sourceAudioFileName,
+                toEntryAt: target.entryRelativePath
+            )
+            if AudioExtensionFailureInjector.shared.consume(.afterSafeSwap) {
+                // Keep the manifest at `.swapping` and the segment in place.
+                // Relaunch recovery can prove the visible combined audio and
+                // converge cleanup without composing or appending again.
+                throw AudioExtensionInjectedError.forced(.afterSafeSwap)
+            }
+            try? FileManager.default.removeItem(at: segmentURL)
+            do {
+                let waveform = try await WaveformGenerator.generate(
+                    fromAudioAt: entryURL.appending(path: applied.audioFileName)
+                )
+                try waveform.write(to: WaveformData.url(inEntry: entryURL))
+            } catch {
+                // The combined audio is already valid and installed. Waveform
+                // is a derived cache and will regenerate on the next open.
+                DebugLog.append("extension waveform regeneration deferred: \(error)")
+            }
+            synchronizeSearchIndex(relativePaths: [target.entryRelativePath])
+            return AudioExtensionOutcome(
+                audioFileName: applied.audioFileName,
+                combinedDuration: applied.combinedDuration,
+                normalized: composed.normalized,
+                trashedName: applied.trashedName
+            )
+        } catch AudioExtensionInjectedError.forced(.afterSafeSwap) {
+            throw AudioExtensionInjectedError.forced(.afterSafeSwap)
+        } catch {
+            failExtensionManifest(in: entryURL, message: error.localizedDescription)
+            throw error
+        }
+    }
+
+    private func updateExtensionManifest(
+        in entryURL: URL, to phase: RecordingExtensionPhase
+    ) throws {
+        let url = entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+        guard let data = try? Data(contentsOf: url) else { return }
+        var session = try JSONDecoder().decode(RecordingExtensionSession.self, from: data)
+        try session.transition(to: phase)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try AtomicFile.write(try encoder.encode(session), to: url)
+    }
+
+    private func failExtensionManifest(in entryURL: URL, message: String) {
+        let url = entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+        guard let data = try? Data(contentsOf: url),
+              var session = try? JSONDecoder().decode(RecordingExtensionSession.self, from: data)
+        else { return }
+        session.fail(message)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let encoded = try? encoder.encode(session) {
+            try? AtomicFile.write(encoded, to: url)
+        }
     }
 
     /// The entry's audio file name (canonical `audio.*` preferred), nil when

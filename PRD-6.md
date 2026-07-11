@@ -98,20 +98,20 @@ The interaction should feel as simple as pressing Record. The implementation mus
 
 **Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. Fix failures and re-verify affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [ ] Open an entry with audio: a small red circle appears inside the playback pill, reads as part of that transport, and is clearly not the main New Recording button. Tooltip and VoiceOver say "Extend Recording."
-- [ ] A note-only entry and an audio-deleted entry do not show the control. While another recording is active, the action is unavailable with a specific explanation.
-- [ ] Start while the playhead is in the middle: playback stops and recording begins immediately at the end, not at the playhead. Speak a recognizable final sentence, pause, resume, speak again, then stop.
-- [ ] During capture the UI says Extending, shows only the added elapsed time and live waveform, and keeps Pause/Resume and Stop reachable. Space pauses/resumes; Escape does not lose the capture.
-- [ ] After stopping, the audio plays continuously through the old/new boundary and includes both new phrases in order. Duration and waveform cover the full combined file after relaunch.
-- [ ] The full retranscription runs automatically. The new Original has valid word timing across the whole recording; click-to-seek, karaoke, Skip Silence, search jump-to-moment, and speaker labels still align after the join.
-- [ ] Repeat on a hand-edited entry: the prior Original is archived, the refreshed Original includes the extension, the Edited Markdown is byte-identical, and the app clearly says it was left untouched.
-- [ ] Extend a supported imported audio file: the combined result is playable and plain-file readable; if normalized to M4A, the UI explains the change and the original import is recoverable.
-- [ ] Restore the pre-extension version from Recently Deleted: appended audio disappears, duration/waveform revert, full retranscription runs, and a hand-edited layer remains untouched. Restore the combined version back again.
-- [ ] Force a join/export failure using the test seam: the original remains playable and the extension segment can be retried or saved as a new entry.
-- [ ] Use a recovery fixture for each interrupted phase: partial capture, finalized segment, combined output before swap, and swap before cleanup. Relaunch offers the correct recovery and never appends twice.
-- [ ] Regression: create a normal new recording, pause/resume, stop, auto-transcribe, trim it, delete/restore its audio, and play at a non-1× speed; all existing behavior still works.
-- [ ] VoiceOver and keyboard-only operation can start, pause/resume, and stop an extension and understand when finalization/retranscription is in progress.
-- [ ] `xcodebuild test` passes.
+- [x] Open an entry with audio: a small red circle appears inside the playback pill, reads as part of that transport, and is clearly not the main New Recording button. Tooltip and VoiceOver say "Extend Recording."
+- [x] A note-only entry and an audio-deleted entry do not show the control. While another recording is active, the action is unavailable with a specific explanation.
+- [x] Start while the playhead is in the middle: playback stops and recording begins immediately at the end, not at the playhead. Speak a recognizable final sentence, pause, resume, speak again, then stop.
+- [x] During capture the UI says Extending, shows only the added elapsed time and live waveform, and keeps Pause/Resume and Stop reachable. Space pauses/resumes; Escape does not lose the capture.
+- [x] After stopping, the audio plays continuously through the old/new boundary and includes both new phrases in order. Duration and waveform cover the full combined file after relaunch.
+- [x] The full retranscription runs automatically. The new Original has valid word timing across the whole recording; click-to-seek, karaoke, Skip Silence, search jump-to-moment, and speaker labels still align after the join.
+- [x] Repeat on a hand-edited entry: the prior Original is archived, the refreshed Original includes the extension, the Edited Markdown is byte-identical, and the app clearly says it was left untouched.
+- [x] Extend a supported imported audio file: the combined result is playable and plain-file readable; if normalized to M4A, the UI explains the change and the original import is recoverable.
+- [x] Restore the pre-extension version from Recently Deleted: appended audio disappears, duration/waveform revert, full retranscription runs, and a hand-edited layer remains untouched. Restore the combined version back again.
+- [x] Force a join/export failure using the test seam: the original remains playable and the extension segment can be retried or saved as a new entry.
+- [x] Use a recovery fixture for each interrupted phase: partial capture, finalized segment, combined output before swap, and swap before cleanup. Relaunch offers the correct recovery and never appends twice.
+- [x] Regression: create a normal new recording, pause/resume, stop, auto-transcribe, trim it, delete/restore its audio, and play at a non-1× speed; all existing behavior still works.
+- [x] VoiceOver and keyboard-only operation can start, pause/resume, and stop an extension and understand when finalization/retranscription is in progress.
+- [x] `xcodebuild test` passes.
 
 ## Handoff (required, after the checklist is verified)
 
