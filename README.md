@@ -7,6 +7,13 @@ want to keep.
 
 Version 1.0 is built for Apple silicon and macOS 15 or later.
 
+## Mac compatibility
+
+Transcride 1.0 is compatible with **every Apple-silicon M-series Mac (M1 or
+newer)** running macOS 15 or later, including all M-series MacBook Air,
+MacBook Pro, Mac mini, iMac, Mac Studio, and Mac Pro models. The downloadable
+beta app is a native `arm64` build. Intel Macs are not supported.
+
 ## What it does
 
 - Records compressed AAC or lossless ALAC audio and imports common audio/video formats.
