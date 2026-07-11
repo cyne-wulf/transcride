@@ -10,6 +10,7 @@ enum DebugLog {
     }()
 
     static func append(_ message: String) {
+        #if DEBUG
         let line = "\(Date().formatted(.iso8601)) \(message)\n"
         if let handle = try? FileHandle(forWritingTo: url) {
             defer { try? handle.close() }
@@ -18,5 +19,8 @@ enum DebugLog {
         } else {
             try? Data(line.utf8).write(to: url)
         }
+        #else
+        _ = message
+        #endif
     }
 }
