@@ -11,6 +11,7 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
     private let panel: GlobalRecordingPanel
     private var observers: [NSObjectProtocol] = []
     private var isRestoringPosition = false
+    private var lastAnnouncedState: String?
 
     init(model: AppModel) {
         self.model = model
@@ -105,9 +106,45 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
         if shouldShow {
             restorePosition()
             panel.orderFrontRegardless()
+            announceStateChangeIfNeeded(model.globalRecordingPresentationState)
         } else {
             panel.orderOut(nil)
         }
+    }
+
+    private func announceStateChangeIfNeeded(_ state: GlobalRecordingPresentationState) {
+        let announcement: String
+        let kind: String
+        switch state {
+        case .hidden:
+            return
+        case .ready:
+            kind = "ready"; announcement = "Transcride ready to record"
+        case .recording:
+            kind = "recording"; announcement = "Transcride recording"
+        case .paused:
+            kind = "paused"; announcement = "Transcride recording paused"
+        case .saving:
+            kind = "saving"; announcement = "Transcride saving recording"
+        case .saved:
+            kind = "saved"; announcement = "Transcride recording saved"
+        case .needsAttention(let message):
+            kind = "attention"; announcement = "Transcride needs attention. \(message)"
+        case .saveFailed(let message):
+            kind = "failed"; announcement = "Transcride save failed. \(message)"
+        case .unavailable(let message, _):
+            kind = "unavailable"; announcement = "Transcride command unavailable. \(message)"
+        }
+        guard kind != lastAnnouncedState else { return }
+        lastAnnouncedState = kind
+        NSAccessibility.post(
+            element: panel,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: announcement,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ]
+        )
     }
 
     private func resetPosition() {

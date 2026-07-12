@@ -175,6 +175,7 @@ private final class ShortcutCaptureNSView: NSView {
         layer?.borderWidth = 1
         label.alignment = .center
         label.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        label.setAccessibilityElement(false)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -182,6 +183,7 @@ private final class ShortcutCaptureNSView: NSView {
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("Record global shortcut")
         updateLabel()

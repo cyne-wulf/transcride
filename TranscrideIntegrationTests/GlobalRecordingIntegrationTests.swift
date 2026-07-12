@@ -16,6 +16,11 @@ struct GlobalRecordingIntegrationTests {
         changed.bindings[.pauseResumeRecording] = nil
         GlobalShortcutPreferencesStore.save(changed, defaults: defaults)
         #expect(GlobalShortcutPreferencesStore.load(defaults: defaults) == changed)
+
+        var obsolete = changed
+        obsolete.version = 0
+        GlobalShortcutPreferencesStore.save(obsolete, defaults: defaults)
+        #expect(GlobalShortcutPreferencesStore.load(defaults: defaults) == .defaults)
     }
 
     @Test func serviceMapsDisabledAndClearedBindings() {
