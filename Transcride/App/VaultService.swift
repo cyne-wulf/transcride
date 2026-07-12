@@ -762,7 +762,9 @@ actor VaultService {
     }
 
     func bakeReplacement(
-        session: ReplacementTakeSession, take: ReplacementTake
+        session: ReplacementTakeSession,
+        take: ReplacementTake,
+        injectedFailurePoint: AudioReplacementFailurePoint? = nil
     ) async throws -> AudioReplacementApplier.Outcome {
         guard session.selectedTakeCanBake, take.id == session.selectedTakeID else {
             throw AudioReplacementError.invalidRecipe
@@ -805,6 +807,9 @@ actor VaultService {
             region: session.region
         )
         let candidate = entryURL.appending(path: AudioReplacementArtifacts.candidateFileName)
+        if injectedFailurePoint == .beforeRender {
+            throw AudioReplacementInjectedError.forced(.beforeRender)
+        }
         let rendered = try await AudioReplacementRenderer.render(
             recipe: prepared.recipe,
             sourcesDirectory: prepared.directoryURL,
@@ -812,6 +817,9 @@ actor VaultService {
         )
         durableSession.phase = .swapping
         try saveReplacementSession(durableSession)
+        if injectedFailurePoint == .beforeSafeSwap {
+            throw AudioReplacementInjectedError.forced(.beforeSafeSwap)
+        }
         let outcome = try AudioReplacementApplier(vaultRoot: rootURL).apply(
             renderedFileAt: rendered.url,
             nextHistoryDirectory: prepared.directoryURL,

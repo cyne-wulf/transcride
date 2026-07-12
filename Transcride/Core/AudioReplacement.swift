@@ -1,5 +1,23 @@
 import Foundation
 
+enum AudioReplacementFailurePoint: String, Sendable {
+    case beforeRender
+    case beforeSafeSwap
+}
+
+enum AudioReplacementInjectedError: LocalizedError {
+    case forced(AudioReplacementFailurePoint)
+
+    var errorDescription: String? {
+        switch self {
+        case .forced(.beforeRender):
+            return "A test failure was forced before replacement rendering."
+        case .forced(.beforeSafeSwap):
+            return "A test failure was forced before the replacement safe swap."
+        }
+    }
+}
+
 enum AudioReplacementArtifacts {
     static let directoryName = ".transcride-replacements"
     static let nextDirectoryName = ".transcride-replacements-next"

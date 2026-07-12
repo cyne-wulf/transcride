@@ -320,6 +320,7 @@ final class AppModel {
     private var replacementPreviewURL: URL?
     private var replacementPreviewTakeID: UUID?
     private var replacementPreviewGeneration: UUID?
+    private var nextReplacementFailurePoint: AudioReplacementFailurePoint?
 
     var replacementModeActive: Bool { replacementEntryPath != nil }
     private(set) var unsupportedExtensionEntryPaths: Set<RelativePath> = []
@@ -1259,6 +1260,12 @@ final class AppModel {
         replacementPreviewLabel = "Current Audio"
     }
 
+    func armNextReplacementFailure(_ point: AudioReplacementFailurePoint) {
+        nextReplacementFailurePoint = point
+        let stage = point == .beforeRender ? "render" : "safe-swap"
+        errorMessage = "Testing: the next replacement bake is armed to fail before the \(stage) stage. Dismiss this message, then bake a complete take."
+    }
+
     func startReplacementTake(
         for entry: Entry, selection: AudioRangeSelection
     ) async {
@@ -1541,8 +1548,14 @@ final class AppModel {
               let take = session.selectedTake, session.selectedTakeCanBake else { return }
         player.unload()
         do {
+            let injectedFailurePoint = nextReplacementFailurePoint
+            nextReplacementFailurePoint = nil
             transcriptionQueue?.evictItems(underPath: session.entryRelativePath)
-            _ = try await service.bakeReplacement(session: session, take: take)
+            _ = try await service.bakeReplacement(
+                session: session,
+                take: take,
+                injectedFailurePoint: injectedFailurePoint
+            )
             audioRevision &+= 1
             queueExtensionRetranscription(
                 entryRelativePath: session.entryRelativePath,

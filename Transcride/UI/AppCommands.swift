@@ -43,6 +43,18 @@ struct AppCommands: Commands {
                 AudioExtensionFailureInjector.shared.arm(.afterSafeSwap)
             }
             .disabled(!ready)
+
+            Divider()
+
+            Button("Force Next Replacement Render Failure") {
+                model.armNextReplacementFailure(.beforeRender)
+            }
+            .disabled(!ready)
+
+            Button("Force Next Replacement Safe-Swap Failure") {
+                model.armNextReplacementFailure(.beforeSafeSwap)
+            }
+            .disabled(!ready)
         }
     }
 #endif

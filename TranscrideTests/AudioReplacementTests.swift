@@ -3,6 +3,13 @@ import Testing
 
 @Suite("Replace selected audio (RPL)")
 struct AudioReplacementTests {
+    @Test func injectedFailureMessagesIdentifyTheProtectedStage() {
+        #expect(AudioReplacementInjectedError.forced(.beforeRender).errorDescription?
+            .contains("before replacement rendering") == true)
+        #expect(AudioReplacementInjectedError.forced(.beforeSafeSwap).errorDescription?
+            .contains("before the replacement safe swap") == true)
+    }
+
     @Test func sharedRangeClampsAndRequiresMeaningfulReplacement() {
         let selection = AudioRangeSelection(start: -2, end: 20).clamped(toDuration: 10)
         #expect(selection == AudioRangeSelection(start: 0, end: 10))
