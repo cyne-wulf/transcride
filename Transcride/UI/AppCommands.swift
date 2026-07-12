@@ -84,11 +84,7 @@ struct AppCommands: Commands {
             .disabled(!ready || model.recorder.state == .finalizing)
 
             Button(model.recorder.state == .paused ? "Resume Recording" : "Pause Recording") {
-                if model.recorder.state == .paused {
-                    model.recorder.resume()
-                } else {
-                    model.recorder.pause()
-                }
+                Task { await model.toggleRecordingPause() }
             }
             .disabled(model.recorder.state != .recording && model.recorder.state != .paused)
 

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings window (SET-1/SET-2), four panes: General (vault + Recently
+/// Settings window: General, Recording, Keybinds, Transcription, and Storage.
 /// Deleted retention), Recording, Transcription (models + vocabulary),
 /// Storage (AUD-6).
 struct SettingsView: View {
@@ -10,6 +10,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             RecordingSettingsPane()
                 .tabItem { Label("Recording", systemImage: "mic") }
+            GlobalShortcutSettingsPane()
+                .tabItem { Label("Keybinds", systemImage: "keyboard") }
             TranscriptionSettingsPane()
                 .tabItem { Label("Transcription", systemImage: "text.quote") }
             StorageSettingsPane()

@@ -180,7 +180,7 @@ struct RecorderBar: View {
 
     private var pauseResumeButton: some View {
         Button {
-            recorder.state == .paused ? recorder.resume() : recorder.pause()
+            Task { await model.toggleRecordingPause() }
         } label: {
             Image(systemName: recorder.state == .paused ? "record.circle" : "pause.circle")
                 .font(.system(size: 24))

@@ -854,8 +854,7 @@ private struct PlaybackSection: View {
                         size: 20 * controlScale,
                         help: model.recorder.state == .paused ? "Resume Extension (Space)" : "Pause Extension (Space)"
                     ) {
-                        model.recorder.state == .paused
-                            ? model.recorder.resume() : model.recorder.pause()
+                        Task { await model.toggleRecordingPause() }
                     }
                     TransportButton(
                         systemImage: "stop.fill", size: 20 * controlScale,

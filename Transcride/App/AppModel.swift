@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import Observation
 import UniformTypeIdentifiers
@@ -59,6 +60,12 @@ final class AppModel {
     let inputDevices = AudioInputDevices()
     let modelManager = ModelManager()
     let liveTranscriber = LiveTranscriber()
+    let globalShortcutService = GlobalShortcutService()
+
+    private(set) var globalShortcutPreferences = GlobalShortcutPreferencesStore.load()
+    private(set) var globalRecordingTransientState: GlobalRecordingPresentationState?
+    private var recordingCommandGate = RecordingCommandGate()
+    private var globalRecordingStateTask: Task<Void, Never>?
 
     private(set) var transcriptionQueue: TranscriptionQueue?
     /// Bumped whenever a transcription lands so the detail view re-reads
@@ -383,12 +390,45 @@ final class AppModel {
     func start() async {
         guard phase == .launching else { return }
         installKeyMonitor()
+        configureGlobalRecordingControls()
         Task { await modelManager.refresh() }
         if let url = VaultBookmark.resolve() {
             await openVault(at: url, isSecurityScoped: true, saveBookmark: false)
         } else {
             phase = .needsVault
         }
+    }
+
+    private func configureGlobalRecordingControls() {
+        globalShortcutService.onAction = { [weak self] action in
+            guard let self else { return }
+            Task {
+                switch action {
+                case .startNewRecording:
+                    await self.performRecordingCommand(.startNew)
+                case .pauseResumeRecording:
+                    await self.performRecordingCommand(.pauseResume)
+                case .stopAndSaveRecording:
+                    await self.performRecordingCommand(.stopAndSave)
+                }
+            }
+        }
+        globalShortcutService.apply(globalShortcutPreferences)
+    }
+
+    func updateGlobalShortcutPreferences(_ preferences: GlobalShortcutPreferences) {
+        globalShortcutPreferences = preferences
+        GlobalShortcutPreferencesStore.save(preferences)
+        globalShortcutService.apply(preferences)
+    }
+
+    func resetGlobalShortcutPreferences() {
+        updateGlobalShortcutPreferences(.defaults)
+    }
+
+    func shutdownGlobalRecordingControls() {
+        globalRecordingStateTask?.cancel()
+        globalShortcutService.shutdown()
     }
 
     /// Opens `url` as the vault, replacing any current vault.
@@ -1143,10 +1183,10 @@ final class AppModel {
             switch recorder.state {
             case .recording:
                 if case .replacementTake? = recorder.sessionTarget { return true }
-                recorder.pause()
+                Task { await toggleRecordingPause() }
                 return true
             case .paused:
-                recorder.resume()
+                Task { await toggleRecordingPause() }
                 return true
             case .finalizing:
                 return false
@@ -1199,12 +1239,146 @@ final class AppModel {
     }
 
     func startRecording() async {
+        await performRecordingCommand(.startNew)
+    }
+
+    func toggleRecordingPause() async {
+        await performRecordingCommand(.pauseResume)
+    }
+
+    func stopRecording() async {
+        await performRecordingCommand(.stopAndSave)
+    }
+
+    func performRecordingCommand(_ command: RecordingCommand) async {
+        let state = recordingCommandAvailabilityState(for: command)
+        switch recordingCommandGate.begin(command, state: state) {
+        case .suppressedRepeat:
+            return
+        case .unavailable(let reason):
+            showGlobalRecordingTransient(.unavailable(
+                reason, until: .now.addingTimeInterval(2)
+            ))
+            if command == .startNew { NSApp.activate(ignoringOtherApps: true) }
+            return
+        case .perform:
+            break
+        }
+        defer { recordingCommandGate.finish(command) }
+
+        switch command {
+        case .startNew:
+            await startNewRecordingImpl()
+        case .pauseResume:
+            if case .replacementTake? = recorder.sessionTarget {
+                showGlobalRecordingTransient(.unavailable(
+                    "Replacement takes cannot be paused.",
+                    until: .now.addingTimeInterval(2)
+                ))
+            } else if recorder.state == .paused {
+                recorder.resume()
+            } else {
+                recorder.pause()
+            }
+            if let message = recorder.alertMessage {
+                showGlobalRecordingTransient(.needsAttention(message))
+            }
+        case .stopAndSave:
+            let finalDuration = recorder.elapsed
+            globalRecordingTransientState = .saving(elapsed: finalDuration)
+            let succeeded = await stopRecordingImpl()
+            if !succeeded || recorder.alertMessage != nil || recorder.state != .idle {
+                globalRecordingTransientState = .saveFailed(
+                    recorder.alertMessage ?? "The recording remains recoverable in Transcride."
+                )
+            } else {
+                showGlobalRecordingTransient(.saved(
+                    duration: finalDuration,
+                    until: .now.addingTimeInterval(2.5)
+                ))
+            }
+        }
+    }
+
+    private func recordingCommandAvailabilityState(
+        for command: RecordingCommand
+    ) -> RecordingCommandAvailabilityState {
+        switch recorder.state {
+        case .recording: return .recording
+        case .paused: return .paused
+        case .finalizing: return .finalizing
+        case .idle:
+            guard phase == .ready, let vaultURL else {
+                return .idleUnavailable("Open a writable vault in Transcride first.")
+            }
+            guard FileManager.default.isWritableFile(atPath: vaultURL.path) else {
+                return .idleUnavailable("The current vault is not writable.")
+            }
+            return .idleReady
+        }
+    }
+
+    private func showGlobalRecordingTransient(
+        _ state: GlobalRecordingPresentationState
+    ) {
+        globalRecordingStateTask?.cancel()
+        globalRecordingTransientState = state
+        globalRecordingStateTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.6))
+            guard !Task.isCancelled else { return }
+            self?.globalRecordingTransientState = nil
+        }
+    }
+
+    var globalRecordingPresentationState: GlobalRecordingPresentationState {
+        if let globalRecordingTransientState { return globalRecordingTransientState }
+        let start = (globalShortcutPreferences.bindings[.startNewRecording] ?? nil)?.glyphDescription ?? ""
+        let pause = (globalShortcutPreferences.bindings[.pauseResumeRecording] ?? nil)?.glyphDescription ?? ""
+        let stop = (globalShortcutPreferences.bindings[.stopAndSaveRecording] ?? nil)?.glyphDescription ?? ""
+        switch recorder.state {
+        case .recording:
+            return .recording(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: stop)
+        case .paused:
+            return .paused(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: stop)
+        case .finalizing:
+            return .saving(elapsed: recorder.elapsed)
+        case .idle:
+            if phase != .ready { return .needsAttention("Open or create a vault to record.") }
+            if let message = recorder.alertMessage { return .needsAttention(message) }
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .denied, .restricted:
+                return .needsAttention("Enable Microphone access in System Settings.")
+            case .notDetermined:
+                return .needsAttention("Microphone access will be requested when you start.")
+            default:
+                break
+            }
+            if inputDevices.devices.isEmpty {
+                return .needsAttention("No usable microphone input is available.")
+            }
+            if let vaultURL,
+               let capacity = try? vaultURL.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+               ).volumeAvailableCapacityForImportantUsage,
+               capacity < 32 * 1_024 * 1_024 {
+                return .needsAttention("The vault volume is too low on free disk space to record safely.")
+            }
+            if globalShortcutService.statuses[.startNewRecording]?.isRegistered != true {
+                return .needsAttention("The Start shortcut is unavailable. Open Keybinds settings.")
+            }
+            return .ready(startShortcut: start)
+        }
+    }
+
+    private func startNewRecordingImpl() async {
         guard let service, let vaultURL, !recorder.isActive else { return }
         guard await RecorderService.ensureMicPermission() else {
             errorMessage = """
             Transcride needs microphone access to record. \
             Enable it in System Settings → Privacy & Security → Microphone, then try again.
             """
+            globalRecordingTransientState = .needsAttention(errorMessage ?? "Microphone access is required.")
+            NSApp.activate(ignoringOtherApps: true)
             return
         }
         let quality = RecordingQuality(
@@ -1691,20 +1865,20 @@ final class AppModel {
         }
     }
 
-    func stopRecording() async {
+    private func stopRecordingImpl() async -> Bool {
         if case .replacementTake? = recorder.sessionTarget {
             await stopReplacementTake()
-            return
+            return recorder.state == .idle && recorder.alertMessage == nil
         }
         stopLiveTranscription()
-        guard let outcome = await recorder.stop() else { return }
+        guard let outcome = await recorder.stop() else { return false }
         let relPath = outcome.entryRelativePath
         if case .extensionOf(let target) = outcome.target {
-            guard let service else { return }
+            guard let service else { return false }
             guard let segmentURL = outcome.extensionSegmentURL else {
                 recorder.completeExtensionWorkflow()
                 recordingRecoveryNoticeMessage = "The extension was too short to append, so it was discarded. The existing recording was not changed."
-                return
+                return false
             }
             do {
                 transcriptionQueue?.evictItems(underPath: relPath)
@@ -1717,20 +1891,22 @@ final class AppModel {
                 )
                 recorder.completeExtensionWorkflow()
                 await refresh { self.selectedEntryID = relPath }
+                return true
             } catch {
                 recorder.completeExtensionWorkflow(error: error)
                 errorMessage = "The extension segment is safe, but it could not be appended: \(error.localizedDescription)"
                 let discovery = await service.recordingExtensionRecoveries()
                 extensionRecoveries = discovery.recoverable
                 isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+                return false
             }
-            return
         }
         await service?.synchronizeSearchEntry(at: relPath)
         // Enqueue before the rescan so the entry's first selected frame
         // already carries its "waiting to transcribe" status row.
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
         await refresh { self.selectedEntryID = relPath }
+        return true
     }
 
     var cancelRecordingConfirmationMessage: String {

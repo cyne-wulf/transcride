@@ -3,9 +3,31 @@ import AppKit
 @MainActor
 final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
+    private var indicatorController: GlobalRecordingIndicatorController?
+
+    func configure(model: AppModel) {
+        Self.model = model
+        if indicatorController == nil {
+            indicatorController = GlobalRecordingIndicatorController(model: model)
+        }
+    }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag {
+            sender.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        indicatorController?.shutdown()
+        Self.model?.shutdownGlobalRecordingControls()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

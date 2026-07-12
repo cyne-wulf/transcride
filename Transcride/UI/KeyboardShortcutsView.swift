@@ -17,6 +17,7 @@ struct KeyboardShortcutsCommands: Commands {
 }
 
 struct KeyboardShortcutsView: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.dismissWindow) private var dismissWindow
     @FocusState private var receivesEscape: Bool
 
@@ -32,6 +33,7 @@ struct KeyboardShortcutsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    shortcutSection("Global Recording", rows: globalRecordingRows)
                     shortcutSection("Recording", rows: [
                         ShortcutRow(
                             keys: ["⌘", "N"],
@@ -219,6 +221,18 @@ struct KeyboardShortcutsView: View {
             dismissWindow(id: KeyboardShortcutsCommands.windowID)
         }
         .onAppear { receivesEscape = true }
+    }
+
+    private var globalRecordingRows: [ShortcutRow] {
+        GlobalShortcutAction.allCases.map { action in
+            let keys = (model.globalShortcutPreferences.bindings[action] ?? nil)
+                .map { [$0.glyphDescription] } ?? ["Not set"]
+            return ShortcutRow(
+                keys: keys,
+                title: action.title,
+                detail: "Works from other apps while Transcride is running. Configure it in Settings → Keybinds."
+            )
+        }
     }
 
     private func shortcutSection(_ title: String, rows: [ShortcutRow]) -> some View {

@@ -10,7 +10,7 @@ struct TranscrideApp: App {
             RootView()
                 .environment(model)
                 .task {
-                    AppTerminationDelegate.model = model
+                    appDelegate.configure(model: model)
                     await model.start()
                 }
         }
@@ -33,6 +33,7 @@ struct TranscrideApp: App {
 
         Window("Keyboard Shortcuts", id: KeyboardShortcutsCommands.windowID) {
             KeyboardShortcutsView()
+                .environment(model)
         }
         .defaultSize(width: 560, height: 620)
         .windowResizability(.contentSize)
