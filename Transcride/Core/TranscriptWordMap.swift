@@ -316,3 +316,104 @@ struct TranscriptWordMap: Equatable, Sendable {
         return locations
     }
 }
+
+/// Playback-safe projection of the immutable word map into a hand-edited
+/// Markdown body. Only the byte-identical UTF-16 prefix can retain karaoke
+/// timing; the first divergence becomes a visible boundary and every later
+/// word deliberately loses its audio mapping.
+struct EditedTranscriptPlaybackMap: Equatable, Sendable {
+    let unchangedUTF16PrefixLength: Int
+    let boundaryWordIndex: Int?
+    let boundaryStartTime: TimeInterval?
+    let cueRange: Range<Int>?
+
+    private let original: TranscriptWordMap
+    private let editedContentOffset: Int
+
+    init(original: TranscriptWordMap, editedBody: String) {
+        self.original = original
+        let originalText = original.renderedText as NSString
+        let editedText = editedBody as NSString
+        let contentOffset = Self.firstNonWhitespaceOffset(in: editedText)
+        editedContentOffset = contentOffset
+        let sharedLength = min(originalText.length, max(0, editedText.length - contentOffset))
+        var prefixLength = 0
+        while prefixLength < sharedLength,
+              originalText.character(at: prefixLength)
+                == editedText.character(at: contentOffset + prefixLength) {
+            prefixLength += 1
+        }
+        unchangedUTF16PrefixLength = prefixLength
+
+        let boundary = original.spans.first { $0.range.upperBound > prefixLength }
+        boundaryWordIndex = boundary?.wordIndex
+        boundaryStartTime = boundary?.startTime
+        cueRange = boundary == nil
+            ? nil
+            : Self.tokenRange(atOrAfter: contentOffset + prefixLength, in: editedText)
+    }
+
+    /// The edited body shares coordinates with the original only through the
+    /// exact prefix. A partly edited word is excluded in full.
+    func range(forWordAt wordIndex: Int) -> Range<Int>? {
+        guard let range = original.range(forWordAt: wordIndex),
+              range.upperBound <= unchangedUTF16PrefixLength else { return nil }
+        return (range.lowerBound + editedContentOffset)..<(range.upperBound + editedContentOffset)
+    }
+
+    private static func firstNonWhitespaceOffset(in text: NSString) -> Int {
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        var offset = 0
+        while offset < text.length,
+              scalar(at: offset, in: text).map(whitespace.contains) == true {
+            offset += 1
+        }
+        return offset
+    }
+
+    private static func tokenRange(atOrAfter offset: Int, in text: NSString) -> Range<Int>? {
+        guard text.length > 0 else { return nil }
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        var position = min(max(offset, 0), text.length - 1)
+
+        // Insertions and replacements cue the first visible token at the
+        // divergence. If the divergence lands immediately after a token (for
+        // example removing an emoji modifier or deleting a suffix), that
+        // preceding token is the changed visible run.
+        if scalar(at: position, in: text).map(whitespace.contains) == true,
+           position > 0,
+           scalar(at: position - 1, in: text).map(whitespace.contains) != true {
+            position -= 1
+        }
+        while position < text.length,
+              scalar(at: position, in: text).map(whitespace.contains) == true {
+            position += 1
+        }
+        if position == text.length {
+            position = min(max(offset - 1, 0), text.length - 1)
+            while position > 0,
+                  scalar(at: position, in: text).map(whitespace.contains) == true {
+                position -= 1
+            }
+        }
+        guard scalar(at: position, in: text).map(whitespace.contains) != true else { return nil }
+
+        var lower = position
+        while lower > 0,
+              scalar(at: lower - 1, in: text).map(whitespace.contains) != true {
+            lower -= 1
+        }
+        var upper = position + 1
+        while upper < text.length,
+              scalar(at: upper, in: text).map(whitespace.contains) != true {
+            upper += 1
+        }
+        return lower..<upper
+    }
+
+    /// UTF-16 surrogate code units are intentionally treated as non-whitespace;
+    /// token expansion therefore includes the complete adjacent surrogate run.
+    private static func scalar(at offset: Int, in text: NSString) -> UnicodeScalar? {
+        UnicodeScalar(text.character(at: offset))
+    }
+}

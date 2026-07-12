@@ -257,6 +257,147 @@ struct TranscriptWordMapTests {
         #expect(repaired.speakerLabels == original.speakerLabels)
         #expect(try #require(repaired.range(forWordAt: 1)).count == 4)
     }
+
+    @Test func editedPlaybackKeepsAnUnchangedBodyFullySynced() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let edited = EditedTranscriptPlaybackMap(original: original, editedBody: "one two three")
+
+        #expect(edited.boundaryWordIndex == nil)
+        #expect(edited.boundaryStartTime == nil)
+        #expect(edited.cueRange == nil)
+        #expect(edited.range(forWordAt: 2) == 8..<13)
+    }
+
+    @Test func editedPlaybackIgnoresSerializedBodyPaddingAndOffsetsRanges() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let unchanged = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "\n\none two three\n"
+        )
+        let changed = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "\n\none changed three\n"
+        )
+
+        #expect(unchanged.boundaryWordIndex == nil)
+        #expect(unchanged.range(forWordAt: 0) == 2..<5)
+        #expect(unchanged.range(forWordAt: 2) == 10..<15)
+        #expect(changed.range(forWordAt: 0) == 2..<5)
+        #expect(changed.boundaryWordIndex == 1)
+        #expect(changed.boundaryStartTime == 0.3)
+        #expect(changed.cueRange == 6..<13)
+    }
+
+    @Test func editedPlaybackStopsBeforeReplacementAndCuesChangedToken() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let body = "one changed three"
+        let edited = EditedTranscriptPlaybackMap(original: original, editedBody: body)
+
+        #expect(edited.range(forWordAt: 0) == 0..<3)
+        #expect(edited.range(forWordAt: 1) == nil)
+        #expect(edited.boundaryWordIndex == 1)
+        #expect(edited.boundaryStartTime == 0.3)
+        #expect(edited.cueRange == 4..<11)
+    }
+
+    @Test func editedPlaybackHandlesFirstWordAndWhitespaceEdits() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let firstWord = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "ONE two three"
+        )
+        let whitespace = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "one  two three"
+        )
+
+        #expect(firstWord.boundaryWordIndex == 0)
+        #expect(firstWord.cueRange == 0..<3)
+        #expect(whitespace.range(forWordAt: 0) == 0..<3)
+        #expect(whitespace.boundaryWordIndex == 1)
+        #expect(whitespace.cueRange == 5..<8)
+    }
+
+    @Test func editedPlaybackHandlesInsertionAndMiddleDeletion() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let insertion = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "one added two three"
+        )
+        let deletion = EditedTranscriptPlaybackMap(original: original, editedBody: "one three")
+
+        #expect(insertion.boundaryWordIndex == 1)
+        #expect(insertion.cueRange == 4..<9)
+        #expect(deletion.boundaryWordIndex == 1)
+        #expect(deletion.cueRange == 4..<9)
+    }
+
+    @Test func editedPlaybackSuffixDeletionCuesLastSurvivingToken() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let edited = EditedTranscriptPlaybackMap(original: original, editedBody: "one two")
+
+        #expect(edited.boundaryWordIndex == 2)
+        #expect(edited.boundaryStartTime == 0.6)
+        #expect(edited.cueRange == 4..<7)
+    }
+
+    @Test func editedPlaybackAppendLeavesEveryOriginalWordSynced() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("one", 0, 0.2), ("two", 0.3, 0.5), ("three", 0.6, 0.9),
+        ]))
+        let edited = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "one two three added"
+        )
+
+        #expect(edited.boundaryWordIndex == nil)
+        #expect(edited.cueRange == nil)
+        #expect(edited.range(forWordAt: 2) == 8..<13)
+    }
+
+    @Test func editedPlaybackUsesUTF16OffsetsForEmojiAndPartialWords() {
+        let original = TranscriptWordMap(transcript: transcript([
+            ("Hi", 0, 0.2), ("👋🏽", 0.3, 0.5), ("friend", 0.6, 0.9),
+        ]))
+        let emojiEdit = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "Hi 👋 friend"
+        )
+        let partialWord = EditedTranscriptPlaybackMap(
+            original: original, editedBody: "Hi 👋🏽 friEND"
+        )
+
+        #expect(emojiEdit.boundaryWordIndex == 1)
+        #expect(emojiEdit.cueRange == 3..<5)
+        #expect(partialWord.boundaryWordIndex == 2)
+        #expect(partialWord.cueRange == 8..<14)
+    }
+
+    @Test func editedPlaybackIncludesSpeakerLabelsInBoundaryCoordinates() {
+        let value = TranscriptOriginal(
+            engine: .init(engine: "test", model: "test", options: [:], created: "", appVersion: ""),
+            segments: [.init(start: 0, end: 0.8, speaker: "speaker_0", words: [
+                .init(text: "hello", start: 0, end: 0.3),
+                .init(text: "there", start: 0.4, end: 0.8),
+            ])]
+        )
+        let original = TranscriptWordMap(
+            transcript: value, speakerNames: ["speaker_0": "Ashan"]
+        )
+        let body = original.renderedText.replacingOccurrences(of: "there", with: "friend")
+        let edited = EditedTranscriptPlaybackMap(
+            original: original, editedBody: body
+        )
+
+        #expect(edited.range(forWordAt: 0) == original.range(forWordAt: 0))
+        #expect(edited.boundaryWordIndex == 1)
+        #expect(edited.cueRange.map { (body as NSString).substring(with: NSRange($0)) } == "friend")
+    }
 }
 
 @Suite("Silence gap computation")

@@ -124,7 +124,8 @@ struct TranscriptWorkbenchView: View {
         return TranscriptEditDocument.isForked(document, comparedTo: original)
     }
 
-    /// Same condition as the toolbar's Edit button.
+    /// The menu-bar Edit Note command remains available even though editing a
+    /// forked note is normally re-entered by clicking its text directly.
     private var canEditNote: Bool {
         document != nil && !isEditing && (viewedLayer == .edited || !isForked)
     }
@@ -165,26 +166,17 @@ struct TranscriptWorkbenchView: View {
         return searchNavigationRange
     }
 
-    /// Edited highlighting is enabled only when the entire body is still the
-    /// original projection plus surrounding whitespace. Any real edit turns
-    /// it off instead of risking a highlight on the wrong words.
+    private var editedPlaybackMap: EditedTranscriptPlaybackMap? {
+        guard let wordMap, let body = document?.body else { return nil }
+        return EditedTranscriptPlaybackMap(original: wordMap, editedBody: body)
+    }
+
+    /// The exact unchanged prefix remains safe for karaoke. The pure map
+    /// excludes a partly edited word and every word after the first change.
     private var editedHighlightRange: NSRange? {
-        guard let map = wordMap,
-              let wordIndex = currentWordIndex,
-              let wordRange = map.range(forWordAt: wordIndex),
-              let body = document?.body else { return nil }
-        let nsBody = body as NSString
-        let rendered = map.renderedText as NSString
-        let projectionRange = nsBody.range(of: rendered as String)
-        guard projectionRange.location != NSNotFound else { return nil }
-        let prefix = nsBody.substring(to: projectionRange.location)
-        let suffix = nsBody.substring(from: NSMaxRange(projectionRange))
-        guard prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return NSRange(
-            location: projectionRange.location + wordRange.lowerBound,
-            length: wordRange.count
-        )
+        guard let wordIndex = currentWordIndex,
+              let range = editedPlaybackMap?.range(forWordAt: wordIndex) else { return nil }
+        return NSRange(range)
     }
 
     var body: some View {
@@ -357,30 +349,25 @@ struct TranscriptWorkbenchView: View {
             }
             .help("Copy this layer without frontmatter")
 
-            if isForked, original != nil {
-                Picker("Transcript Layer", selection: $activeLayer) {
-                    ForEach(Layer.allCases) { layer in
-                        Text(layer.rawValue).tag(layer)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+            if original != nil, isForked || isEditing {
+                TranscriptLayerControl(
+                    layer: activeLayer,
+                    isEditing: isEditing,
+                    isSaving: isSaving,
+                    onSelectOriginal: { activeLayer = .original },
+                    onSelectEdited: { activeLayer = .edited },
+                    onSave: { Task { await saveAndFinishEditing() } }
+                )
                 .fixedSize()
-                .disabled(isEditing || isSaving)
-                .help("Switch between the immutable engine output and your edited note")
-            }
-
-            if isEditing {
+                .help(isEditing
+                      ? "Save changes and finish editing"
+                      : "Switch between the immutable engine output and your edited note")
+            } else if isEditing {
                 Button("Save") {
                     Task { await saveAndFinishEditing() }
                 }
                 .disabled(isSaving)
                 .help("Save changes and finish editing")
-            } else if document != nil, viewedLayer == .edited || !isForked {
-                Button("Edit") {
-                    beginEditing()
-                }
-                .help(isForked ? "Edit the Markdown layer" : "Create an editable layer; Original remains untouched")
             }
         }
     }
@@ -457,7 +444,13 @@ struct TranscriptWorkbenchView: View {
                     text: body,
                     isEditable: isEditing && !isSaving,
                     highlightRange: editedHighlightRange,
-                    navigationHighlightRange: activeNavigationRange
+                    navigationHighlightRange: activeNavigationRange,
+                    boundaryStartTime: editedPlaybackMap?.boundaryStartTime,
+                    boundaryCueRange: editedPlaybackMap?.cueRange.map { NSRange($0) },
+                    playbackTime: model.player.currentTime,
+                    isPlaying: model.player.isPlaying,
+                    seekRevision: model.player.seekRevision,
+                    onBeginEditing: beginEditing
                 ) { newBody in
                     applyUserEdit(newBody)
                 }
@@ -659,6 +652,57 @@ struct TranscriptWorkbenchView: View {
             guard !Task.isCancelled else { return }
             copyConfirmed = false
         }
+    }
+}
+
+/// A two-segment layer control whose Edited segment becomes the commit action
+/// while the Markdown surface owns text focus. A custom control is used because
+/// a segmented Picker does not reliably invoke an already-selected segment.
+private struct TranscriptLayerControl: View {
+    let layer: TranscriptWorkbenchView.Layer
+    let isEditing: Bool
+    let isSaving: Bool
+    let onSelectOriginal: () -> Void
+    let onSelectEdited: () -> Void
+    let onSave: () -> Void
+
+    var body: some View {
+        HStack(spacing: 1) {
+            segment("Original", selected: !isEditing && layer == .original) {
+                onSelectOriginal()
+            }
+            .disabled(isEditing || isSaving)
+
+            segment(isEditing ? "Save" : "Edited", selected: isEditing || layer == .edited) {
+                if isEditing { onSave() } else { onSelectEdited() }
+            }
+            .disabled(isSaving)
+        }
+        .padding(2)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Transcript Layer")
+    }
+
+    private func segment(
+        _ title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .lineLimit(1)
+                .frame(minWidth: 58)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .background(
+                    selected ? Color.accentColor : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -938,11 +982,27 @@ private final class UserAwareTranscriptScrollView: NSScrollView {
 
 // MARK: - Editable Markdown layer
 
+private final class ClickToEditTextView: NSTextView {
+    var onRequestEditing: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        let shouldBeginEditing = !isEditable
+        super.mouseDown(with: event)
+        if shouldBeginEditing { onRequestEditing?() }
+    }
+}
+
 private struct MarkdownBodyEditor: NSViewRepresentable {
     let text: String
     let isEditable: Bool
     let highlightRange: NSRange?
     let navigationHighlightRange: NSRange?
+    let boundaryStartTime: TimeInterval?
+    let boundaryCueRange: NSRange?
+    let playbackTime: TimeInterval
+    let isPlaying: Bool
+    let seekRevision: Int
+    let onBeginEditing: () -> Void
     let onUserEdit: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -952,8 +1012,9 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
 
-        let textView = NSTextView()
+        let textView = ClickToEditTextView()
         textView.delegate = context.coordinator
+        textView.onRequestEditing = onBeginEditing
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = false
@@ -991,6 +1052,7 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = context.coordinator.textView else { return }
+        textView.onRequestEditing = onBeginEditing
         if textView.string != text {
             let selection = textView.selectedRange()
             context.coordinator.isApplyingExternalText = true
@@ -1016,18 +1078,31 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
         context.coordinator.updateHighlights()
     }
 
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.cancelBoundaryFade()
+    }
+
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownBodyEditor
-        weak var textView: NSTextView?
+        weak var textView: ClickToEditTextView?
         var isApplyingExternalText = false
         var appliedHighlightRange: NSRange?
         var appliedNavigationRange: NSRange?
+        var boundaryFadeTask: Task<Void, Never>?
+        var wasBeforeBoundary = false
+        var lastSeekRevision: Int
         /// Hosted NSTextViews otherwise resolve `undoManager` through the
         /// SwiftUI window, whose manager doesn't track the text view's edits.
         let editUndoManager = UndoManager()
 
-        init(parent: MarkdownBodyEditor) { self.parent = parent }
+        init(parent: MarkdownBodyEditor) {
+            self.parent = parent
+            lastSeekRevision = parent.seekRevision
+            if let boundary = parent.boundaryStartTime {
+                wasBeforeBoundary = parent.playbackTime < boundary
+            }
+        }
 
         func undoManager(for view: NSTextView) -> UndoManager? {
             editUndoManager
@@ -1035,6 +1110,10 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard !isApplyingExternalText, let textView else { return }
+            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+            textView.layoutManager?.removeTemporaryAttribute(
+                .backgroundColor, forCharacterRange: fullRange
+            )
             appliedHighlightRange = nil
             appliedNavigationRange = nil
             parent.onUserEdit(textView.string)
@@ -1044,35 +1123,167 @@ private struct MarkdownBodyEditor: NSViewRepresentable {
             guard let textView else { return }
             let stringLength = (textView.string as NSString).length
             let fullRange = NSRange(location: 0, length: stringLength)
-            TranscriptPlaybackWordStyle.clearPlaybackAttributes(
-                from: textView.layoutManager,
-                in: fullRange
-            )
-            textView.layoutManager?.removeTemporaryAttribute(
-                .backgroundColor, forCharacterRange: fullRange
-            )
+            let seekChanged = lastSeekRevision != parent.seekRevision
+            lastSeekRevision = parent.seekRevision
 
-            appliedHighlightRange = nil
-            guard !parent.isEditable,
-                  let range = parent.highlightRange,
-                  NSMaxRange(range) <= stringLength else {
+            if parent.isEditable {
+                cancelBoundaryFade()
+                clearPlaybackAttributes(in: fullRange)
+                appliedHighlightRange = nil
+                if let boundary = parent.boundaryStartTime {
+                    wasBeforeBoundary = parent.playbackTime < boundary
+                }
                 applyNavigationHighlight(to: textView, stringLength: stringLength)
                 return
             }
-            TranscriptPlaybackWordStyle.subdueTranscript(
-                in: textView.layoutManager,
-                range: fullRange
-            )
-            TranscriptPlaybackWordStyle.illuminateWord(
-                in: textView.layoutManager,
-                range: range
-            )
-            appliedHighlightRange = range
+
+            if let boundary = parent.boundaryStartTime {
+                if seekChanged {
+                    cancelBoundaryFade()
+                    wasBeforeBoundary = parent.playbackTime <= boundary
+                }
+                if boundary == 0, !parent.isPlaying, parent.playbackTime <= 0.001 {
+                    wasBeforeBoundary = true
+                }
+                if parent.playbackTime < boundary {
+                    cancelBoundaryFade()
+                    wasBeforeBoundary = true
+                } else if boundaryFadeTask != nil {
+                    applyNavigationHighlight(to: textView, stringLength: stringLength)
+                    return
+                } else if parent.isPlaying, wasBeforeBoundary {
+                    let previousActiveRange = appliedHighlightRange
+                    wasBeforeBoundary = false
+                    startBoundaryFade(
+                        in: fullRange,
+                        previousActiveRange: previousActiveRange,
+                        cueRange: parent.boundaryCueRange
+                    )
+                    applyNavigationHighlight(to: textView, stringLength: stringLength)
+                    return
+                } else if parent.playbackTime >= boundary {
+                    clearPlaybackAttributes(in: fullRange)
+                    appliedHighlightRange = nil
+                    wasBeforeBoundary = false
+                    applyNavigationHighlight(to: textView, stringLength: stringLength)
+                    return
+                }
+            } else {
+                cancelBoundaryFade()
+            }
+
+            clearPlaybackAttributes(in: fullRange)
+            appliedHighlightRange = nil
+            if let range = parent.highlightRange, NSMaxRange(range) <= stringLength {
+                TranscriptPlaybackWordStyle.subdueTranscript(
+                    in: textView.layoutManager,
+                    range: fullRange
+                )
+                TranscriptPlaybackWordStyle.illuminateWord(
+                    in: textView.layoutManager,
+                    range: range
+                )
+                appliedHighlightRange = range
+            }
             applyNavigationHighlight(to: textView, stringLength: stringLength)
         }
 
+        func cancelBoundaryFade() {
+            boundaryFadeTask?.cancel()
+            boundaryFadeTask = nil
+        }
+
+        private func clearPlaybackAttributes(in range: NSRange) {
+            TranscriptPlaybackWordStyle.clearPlaybackAttributes(
+                from: textView?.layoutManager,
+                in: range
+            )
+        }
+
+        private func startBoundaryFade(
+            in fullRange: NSRange,
+            previousActiveRange: NSRange?,
+            cueRange: NSRange?
+        ) {
+            cancelBoundaryFade()
+            appliedHighlightRange = nil
+            boundaryFadeTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let frameCount = 45
+                for frame in 0...frameCount {
+                    guard !Task.isCancelled else { return }
+                    let progress = CGFloat(frame) / CGFloat(frameCount)
+                    self.applyBoundaryFadeFrame(
+                        progress: progress,
+                        fullRange: fullRange,
+                        previousActiveRange: previousActiveRange,
+                        cueRange: cueRange
+                    )
+                    if frame < frameCount {
+                        try? await Task.sleep(for: .milliseconds(33))
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                self.clearPlaybackAttributes(in: fullRange)
+                self.boundaryFadeTask = nil
+            }
+        }
+
+        private func applyBoundaryFadeFrame(
+            progress: CGFloat,
+            fullRange: NSRange,
+            previousActiveRange: NSRange?,
+            cueRange: NSRange?
+        ) {
+            guard let layoutManager = textView?.layoutManager else { return }
+            clearPlaybackAttributes(in: fullRange)
+            let normal = NSColor.labelColor
+            let subdued = NSColor.secondaryLabelColor
+                .blended(withFraction: progress, of: normal) ?? normal
+            layoutManager.addTemporaryAttribute(
+                .foregroundColor, value: subdued, forCharacterRange: fullRange
+            )
+
+            if let previousActiveRange, NSMaxRange(previousActiveRange) <= fullRange.length {
+                layoutManager.addTemporaryAttribute(
+                    .foregroundColor, value: normal, forCharacterRange: previousActiveRange
+                )
+                if progress < 1 {
+                    let glow = NSShadow()
+                    glow.shadowOffset = .zero
+                    glow.shadowBlurRadius = 4 * (1 - progress)
+                    glow.shadowColor = normal.withAlphaComponent(0.42 * (1 - progress))
+                    layoutManager.addTemporaryAttribute(
+                        .shadow, value: glow, forCharacterRange: previousActiveRange
+                    )
+                }
+            }
+
+            if let cueRange, NSMaxRange(cueRange) <= fullRange.length {
+                let red = NSColor.systemRed.blended(withFraction: progress, of: normal) ?? normal
+                layoutManager.addTemporaryAttribute(
+                    .foregroundColor, value: red, forCharacterRange: cueRange
+                )
+                if progress < 1 {
+                    let glow = NSShadow()
+                    glow.shadowOffset = .zero
+                    glow.shadowBlurRadius = 5 * (1 - progress)
+                    glow.shadowColor = NSColor.systemRed.withAlphaComponent(0.55 * (1 - progress))
+                    layoutManager.addTemporaryAttribute(
+                        .shadow, value: glow, forCharacterRange: cueRange
+                    )
+                }
+            }
+        }
+
         private func applyNavigationHighlight(to textView: NSTextView, stringLength: Int) {
-            let changed = appliedNavigationRange != parent.navigationHighlightRange
+            let oldRange = appliedNavigationRange
+            let changed = oldRange != parent.navigationHighlightRange
+            if changed, let oldRange {
+                textView.layoutManager?.removeTemporaryAttribute(
+                    .backgroundColor, forCharacterRange: oldRange
+                )
+            }
             appliedNavigationRange = parent.navigationHighlightRange
             guard let range = parent.navigationHighlightRange,
                   NSMaxRange(range) <= stringLength else { return }

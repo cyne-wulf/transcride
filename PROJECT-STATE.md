@@ -101,10 +101,13 @@ buffers so live transcription can never endanger capture.
 
 ### Workbench and search
 
-- `TranscriptWorkbenchView`: Original/Edited layers, NSTextView bridges, autosave
-  plus explicit Save, undo, find, copy, speaker labels, timed highlighting/follow.
+- `TranscriptWorkbenchView`: Original/Edited layers, click-to-edit NSTextView bridge,
+  autosave plus an Edited/Save segment, undo, find, copy, speaker labels, and timed
+  highlighting/follow.
 - `TranscriptWordMap`: one UTF-16 coordinate map for rendered words, times, search
-  matches, clicks, and karaoke state.
+  matches, clicks, and karaoke state. `EditedTranscriptPlaybackMap` retains karaoke
+  through the exact unchanged prefix, then fades the red edit boundary and all
+  karaoke styling back to the normal text appearance over 1.5 seconds.
 - `VaultSearchIndex`: one external FTS5 database per vault under Application
   Support. Exact search is substring-based; fuzzy search uses trigram candidates
   plus bounded Damerau-Levenshtein ranking.
@@ -206,13 +209,11 @@ by occurrence ordinal; user-authored text absent from the original has no time c
    may not match every user's preferred session behavior.
 3. Loaded transcription models remain in memory for the app lifetime; Whisper large
    can retain substantial RAM after long work.
-4. Edited-layer karaoke disables after a real edit because character offsets no
-   longer correspond to timed engine words. Search cueing remains best-effort.
-5. A microphone connected while its picker is already open appears after reopening
+4. A microphone connected while its picker is already open appears after reopening
    the menu; the underlying device list itself does refresh.
-6. Apple Speech is available only where the required macOS framework exists and is
+5. Apple Speech is available only where the required macOS framework exists and is
    hidden on earlier supported systems.
-7. Pre-1.1 AAC/ALAC CAF partials interrupted before close can lack their packet
+6. Pre-1.1 AAC/ALAC CAF partials interrupted before close can lack their packet
    table. The bytes remain preserved and are acknowledged once, but cannot always
    be decoded; 1.1+ PCM journals do not have this failure mode.
 
