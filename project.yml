@@ -54,6 +54,17 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcrideTests
         GENERATE_INFOPLIST_FILE: YES
+  TranscrideIntegrationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - TranscrideIntegrationTests
+    dependencies:
+      - target: Transcride
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcrideIntegrationTests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   Transcride:
     build:
@@ -66,3 +77,4 @@ schemes:
       config: Debug
       targets:
         - TranscrideTests
+        - TranscrideIntegrationTests
