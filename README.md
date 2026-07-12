@@ -18,6 +18,10 @@ beta app is a native `arm64` build. Intel Macs are not supported.
 
 - Records compressed AAC or lossless ALAC audio and imports common audio/video formats.
 - Extends an existing recording safely and keeps its pre-extension version recoverable.
+- Lets each entry detect silence from the real audio level or timed speech gaps;
+  the speech option keeps Skip Silence useful in noisy rooms.
+- Compresses recordings with that same per-entry mode while keeping the
+  pre-compression version recoverable.
 - Transcribes locally with Parakeet, WhisperKit, or Apple Speech where available.
 - Shows live transcription while recording, with a distraction-free Zen mode.
 - Keeps an immutable timed original beside an editable Markdown note.
@@ -59,6 +63,8 @@ Each entry is a timestamped folder containing a Markdown note and, while
 retained, an audio file. Timed engine output is stored in
 `transcript.original.json`; `waveform.json` is a disposable cache. The search
 database lives outside the vault and can be rebuilt from the plain files.
+The per-entry silence source is ordinary line-preserving frontmatter:
+`silence_detection: waveform` or `silence_detection: speech`.
 
 See [PROJECT-STATE.md](PROJECT-STATE.md) for the architecture, known limitations,
 and contributor handoff. Product intent and requirement history live in

@@ -11,7 +11,7 @@ struct EntryDuplicationTests {
         let entry = root.appending(path: "Journal/transcride-2026-07-01T10-00-00-meeting-notes")
         try fm.createDirectory(at: entry, withIntermediateDirectories: true)
         try AtomicFile.write(
-            "---\ntitle: \"Meeting Notes\"\ncreated: 2026-07-01T10:00:00+00:00\nduration: 12.50\nfavorite: true\n---\nDiscussed the roadmap.\n",
+            "---\ntitle: \"Meeting Notes\"\ncreated: 2026-07-01T10:00:00+00:00\nduration: 12.50\nfavorite: true\nsilence_detection: speech\n---\nDiscussed the roadmap.\n",
             to: entry.appending(path: "Meeting Notes.md")
         )
         try AtomicFile.write(Data([0x01, 0x02]), to: entry.appending(path: "audio.m4a"))
@@ -55,6 +55,7 @@ struct EntryDuplicationTests {
         #expect(doc.created == date)
         #expect(doc.duration == 12.5)
         #expect(doc.favorite == true)
+        #expect(doc.silenceDetectionMode == .speech)
         #expect(doc.body == "Discussed the roadmap.\n")
     }
 
@@ -71,6 +72,20 @@ struct EntryDuplicationTests {
         let copyMD = root.appendingRelativePath(newPath).appending(path: "Meeting Notes copy.md")
         try AtomicFile.write("---\ntitle: \"Meeting Notes copy\"\n---\nRewritten.\n", to: copyMD)
         #expect(try String(contentsOf: sourceMD, encoding: .utf8) == before)
+    }
+
+    @Test func duplicatePreservesSpeechPreferenceAndStaleAlignmentState() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourcePath = "Journal/transcride-2026-07-01T10-00-00-meeting-notes"
+        let source = root.appendingRelativePath(sourcePath)
+        try TranscriptAlignmentState.markStale(inEntry: source)
+        let newPath = try VaultOperations(vaultRoot: root).duplicateEntry(at: sourcePath)
+        let duplicate = root.appendingRelativePath(newPath)
+        #expect(TranscriptAlignmentState.isStale(inEntry: duplicate))
+        let url = try #require(TranscriptFile.url(inEntry: duplicate))
+        let doc = FrontmatterDocument.parse(try String(contentsOf: url, encoding: .utf8))
+        #expect(doc.silenceDetectionMode == .speech)
     }
 
     @Test func duplicatingTwiceInTheSameSecondAdvancesTheTimestamp() throws {

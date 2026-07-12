@@ -38,6 +38,8 @@ struct Entry: Identifiable, Hashable, Sendable {
     var snippet: String
     var favorite: Bool
     var audioDeleted: Bool
+    var silenceDetectionMode: SilenceDetectionMode = .waveform
+    var speechTranscriptAvailability: SpeechTranscriptAvailability = .missing
     /// Name of the entry's audio file (prefers `audio.*`, else first by name);
     /// nil when the entry has no visible audio file.
     var audioFileName: String?

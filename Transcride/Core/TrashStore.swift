@@ -8,17 +8,23 @@ enum TrashItemKind: String, Codable, Sendable {
     /// An entry's audio (plus its waveform cache), removed via Delete Audio…
     /// (AUD-1); `originalPath` is the entry folder the audio came from.
     case entryAudio
+    /// A complete audio version left by an older restore build. It remains
+    /// restorable for compatibility, but restoration is now one-way.
+    case audioVersion
     /// The pre-trim audio (plus its waveform cache) displaced by a trim
-    /// (AUD-3). Restoring swaps it back into the entry and stages the trimmed
-    /// audio here as a regular `entryAudio` item.
+    /// (AUD-3). Restoring replaces the derived trim; the trim can be recreated.
     case preTrimAudio
     /// One side of a reversible extension swap. Restoring it stages the
     /// currently visible audio as another pre-extension version so the user
     /// can move backward and forward without losing either file.
     case preExtensionAudio
+    /// The uncompressed version displaced by silence-removal compression.
+    /// Restoring replaces the compressed derivative; compression can be rerun.
+    case preCompressionAudio
 
     var isAudio: Bool {
-        self == .entryAudio || self == .preTrimAudio || self == .preExtensionAudio
+        self == .entryAudio || self == .audioVersion || self == .preTrimAudio || self == .preExtensionAudio
+            || self == .preCompressionAudio
     }
 }
 
@@ -47,11 +53,17 @@ struct TrashItem: Identifiable, Hashable, Sendable {
         if kind == .entryAudio {
             return "Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
         }
+        if kind == .audioVersion {
+            return "Audio Version — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
+        }
         if kind == .preTrimAudio {
             return "Original Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
         }
         if kind == .preExtensionAudio {
             return "Pre-Extension Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
+        }
+        if kind == .preCompressionAudio {
+            return "Pre-Compression Audio — " + Self.entryDisplayName(fromFolderName: originalPath.lastComponent)
         }
         if isEntry, let slugName = Self.entrySlugName(fromFolderName: trashedName) {
             return slugName
@@ -152,6 +164,18 @@ struct TrashStore: Sendable {
         )
     }
 
+    /// Compress: stages the complete version being displaced. Like extension
+    /// versions, compression versions swap symmetrically on restore.
+    @discardableResult
+    func trashPreCompressionAudio(
+        atEntryPath entryPath: RelativePath, deletedAt: Date = Date()
+    ) throws -> String {
+        try trashAudioFiles(
+            atEntryPath: entryPath, wrapperPrefix: "pre-compression-audio-",
+            kind: .preCompressionAudio, deletedAt: deletedAt
+        )
+    }
+
     /// Moves the entry's audio file and waveform cache into a single trash
     /// wrapper (one Recently Deleted row, one-click restore).
     private func trashAudioFiles(
@@ -247,9 +271,9 @@ struct TrashStore: Sendable {
 
     /// Puts a trashed audio item's files back into their entry folder and
     /// clears the `audio_deleted` flag, fully reversing `trashEntryAudio`.
-    /// For a pre-trim item the trimmed audio currently in the entry is
-    /// displaced first — staged as a regular audio item, never hard-deleted —
-    /// and the frontmatter duration follows the restored waveform cache.
+    /// For a retained original or legacy audio version, the current derived
+    /// audio is staged until the restore succeeds and then discarded. Extend
+    /// Recording remains symmetric because appended speech cannot be recreated.
     private func restoreEntryAudio(_ item: TrashItem) throws -> RelativePath {
         let wrapperURL = trashDirectory.appending(path: item.trashedName, directoryHint: .isDirectory)
         guard fm.fileExists(atPath: wrapperURL.path) else {
@@ -265,17 +289,28 @@ struct TrashStore: Sendable {
         }
         try fm.createDirectory(at: entryURL, withIntermediateDirectories: true)
 
-        if item.kind == .preTrimAudio || item.kind == .preExtensionAudio {
-            // Swallow notFound: the trimmed audio may itself have been
-            // deleted meanwhile, and the swap-back is still valid.
-            if item.kind == .preExtensionAudio {
-                _ = try? trashPreExtensionAudio(atEntryPath: item.originalPath)
-            } else {
-                _ = try? trashAudioFiles(
-                    atEntryPath: item.originalPath, wrapperPrefix: "audio-",
-                    kind: .entryAudio, deletedAt: Date()
-                )
-            }
+        // Builds that first shipped compression restoration staged the
+        // displaced version as `.entryAudio`. If that item is restored into
+        // an entry which already has active audio and is not marked deleted,
+        // it is a legacy audio-version swap, not a Delete Audio collision.
+        let legacyAudioVersion = item.kind == .entryAudio
+            && !entryAudioIsMarkedDeleted(entryURL)
+            && currentAudioFileName(in: entryURL) != nil
+        let discardsCurrentDerivative = item.kind == .audioVersion
+            || item.kind == .preTrimAudio || item.kind == .preCompressionAudio
+            || legacyAudioVersion
+        var stagedDerivativeName: String?
+        if item.kind == .preExtensionAudio {
+            // Swallow notFound: the current audio may itself have been deleted,
+            // and restoring the retained version is still valid.
+            _ = try? trashPreExtensionAudio(atEntryPath: item.originalPath)
+        } else if discardsCurrentDerivative {
+            // Keep the derivative recoverable until every retained file has
+            // moved successfully. It is removed only after the swap commits.
+            stagedDerivativeName = try? trashAudioFiles(
+                atEntryPath: item.originalPath, wrapperPrefix: "restore-displaced-audio-",
+                kind: .audioVersion, deletedAt: Date()
+            )
         }
 
         let names = ((try? fm.contentsOfDirectory(atPath: wrapperURL.path)) ?? [])
@@ -294,7 +329,9 @@ struct TrashStore: Sendable {
                 try fm.moveItem(at: wrapperURL.appending(path: name), to: destination)
             }
         }
-        if (item.kind == .preTrimAudio || item.kind == .preExtensionAudio),
+        if (item.kind == .audioVersion || item.kind == .preTrimAudio
+                || item.kind == .preExtensionAudio || item.kind == .preCompressionAudio
+                || legacyAudioVersion),
            let waveform = WaveformData.load(from: WaveformData.url(inEntry: entryURL)) {
             try? EntryMetadata.setDuration(waveform.duration, inEntry: entryURL)
             if item.kind == .preExtensionAudio {
@@ -306,8 +343,17 @@ struct TrashStore: Sendable {
             }
         }
         try setAudioDeletedFlag(false, inEntry: entryURL)
+        if item.kind == .audioVersion || item.kind == .preTrimAudio
+            || item.kind == .preExtensionAudio || item.kind == .preCompressionAudio
+            || legacyAudioVersion {
+            try? TranscriptAlignmentState.markStale(inEntry: entryURL)
+        }
         try? fm.removeItem(at: wrapperURL)
         try? fm.removeItem(at: sidecarURL(forTrashedName: item.trashedName))
+        if let stagedDerivativeName {
+            try? fm.removeItem(at: trashDirectory.appending(path: stagedDerivativeName))
+            try? fm.removeItem(at: sidecarURL(forTrashedName: stagedDerivativeName))
+        }
         return item.originalPath
     }
 
@@ -376,6 +422,20 @@ struct TrashStore: Sendable {
             counter += 1
         }
         return candidate
+    }
+
+    private func currentAudioFileName(in entryURL: URL) -> String? {
+        let names = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
+        return VaultScanner.audioFile(in: names)
+    }
+
+    private func entryAudioIsMarkedDeleted(_ entryURL: URL) -> Bool {
+        guard let transcriptURL = TranscriptFile.url(inEntry: entryURL),
+              let text = try? String(contentsOf: transcriptURL, encoding: .utf8) else {
+            return false
+        }
+        return FrontmatterDocument.parse(text).audioDeleted
     }
 
     /// Writes the `audio_deleted` frontmatter flag, creating a minimal

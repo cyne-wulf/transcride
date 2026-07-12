@@ -50,7 +50,8 @@ An entry may contain:
 - `transcript.original.json`, the immutable timed engine result.
 - `waveform.json`, a regenerable playback cache.
 - Frontmatter including `title`, `created`, `duration`, `favorite`,
-  `audio_deleted`, `source`, `engine`, `hand_edited`, and optional speaker names.
+  `audio_deleted`, `source`, `engine`, `hand_edited`, `silence_detection`, and
+  optional speaker names. Missing or unknown silence values mean `waveform`.
 
 Always discover Markdown with `TranscriptFile`; never hard-code `transcript.md`.
 Always mutate frontmatter with `FrontmatterDocument` so unknown user/Obsidian
@@ -67,13 +68,21 @@ pre-trim audio the same way so it remains recoverable.
   new-entry versus extension session targets.
 - `RecordingInputConfiguration`: pure device-change classification.
 - `PlayerService`: AVPlayer transport, 0.5x–4x speed, seek/skip, Skip Silence,
-  playhead publishing, and user-seek revisions.
+  playhead publishing, user-seek revisions, and identity-gated waveform/speech
+  gap sets. It routes only the entry's selected mode and never cross-falls back.
 - `WaveformGenerator`/`WaveformData`: streaming decode and cache schema.
 - `AudioTrim` + `TrashStore`: packet-preserving trim where possible, safe swap,
   recovery, duration update, then full retranscription.
 - `AudioExtensionComposer` + `AudioExtensionApplier`: validated append-only
   composition, safe swap, recoverable pre-extension versions, stale-timing state,
   relaunch convergence, then exactly one full retranscription.
+- `SilenceDetectionMode` is an entry preference shared by non-destructive Skip
+  Silence and destructive Compress Audio. Waveform mode uses -40 dBFS; speech mode
+  validates raw timed-Original word gaps. Both require silence strictly longer than
+  1.5 seconds and retain 0.1 seconds at each boundary.
+- `.transcript-alignment-stale` is hidden derived state created by audio mutation
+  and removed only by `TranscriptionApplier`. While present—or while transcription
+  is queued/running—speech skipping is suspended and speech compression is blocked.
 
 The recording tap must stay `@Sendable`; the sink writes before `liveTee` forwards
 buffers so live transcription can never endanger capture.
@@ -230,16 +239,26 @@ The detailed post-v1 sequence is already written:
 - `PRD-8.md`: global recording controls from the menu bar and system-wide shortcut,
   reusing the single-recorder and crash-recovery contracts.
 - `PRD-9.md`: an editor workbench for note structure and presentation.
+- `PRD-10.md`: a third Original / Edited / Summary layer backed by a basic,
+  local-only summarization model. The implementation must benchmark below 8 GB peak
+  resident memory, store Summary as a separate derived Markdown artifact, preserve
+  both transcript layers, and mark summaries stale rather than regenerating silently.
 
-Silence-removal compression was requested during Milestone 6 but remains deferred:
-it deletes time and shifts every later transcript timestamp, so it belongs in a
-separately specified destructive-audio milestone rather than PRD-6 or PRD-7.
+Silence-removal compression was implemented after 1.1 as a standalone destructive
+audio action. Its per-entry source is either audio below -40 dBFS or validated timed
+Original word gaps (including clip edges). It retains 0.1 seconds at each boundary,
+renders and validates an M4A, refuses swaps that do not reduce file size, and stages
+the pre-compression version in Recently Deleted. Because it deletes time, it queues
+one full retranscription and preserves hand-edited Markdown under the existing
+retranscription contract. `VaultService.compressAudio` re-reads the persisted mode
+at mutation time; unavailable speech timing blocks before rendering or swapping.
 
 Master-PRD/post-program items still deferred: cloud engines (implement the existing
 engine protocol), sync (coordinate external mutations through `VaultService` and
-search invalidation), AI summaries/chapters (new derived artifacts; never replace the
-Markdown source of truth), iOS capture, plugins, localization, and an auto-update
-framework. Transcride remains local-only and telemetry-free unless the product
+search invalidation), AI chapters/action items/chat beyond the scoped PRD-10 Summary
+layer (new derived artifacts must never replace the Markdown source of truth), iOS
+capture, plugins, localization, and an auto-update framework. Transcride remains
+local-only and telemetry-free unless the product
 principles are explicitly changed.
 
 ## Build, test, install, and release

@@ -183,6 +183,7 @@ struct AudioExtensionApplier: Sendable {
             combinedAudioDuration: combinedDuration,
             normalizedToM4A: normalizedToM4A
         ).write(to: entryURL)
+        try? TranscriptAlignmentState.markStale(inEntry: entryURL)
         return Outcome(
             trashedName: trashedName,
             audioFileName: fileName,

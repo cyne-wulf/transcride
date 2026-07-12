@@ -278,11 +278,11 @@ struct SilenceGapTests {
         ]))
         let gap = try #require(gaps.first)
         #expect(gaps.count == 1)
-        #expect(gap.start == 2.2)
-        #expect(gap.end == 4.0)
+        #expect(abs(gap.start - 2.3) < 0.000_001)
+        #expect(gap.end == 3.9)
         #expect(gap.previousWordIndex == 1)
         #expect(gap.nextWordIndex == 2)
-        #expect(abs(gap.duration - 1.8) < 0.000_001)
+        #expect(abs(gap.duration - 1.6) < 0.000_001)
     }
 
     @Test func thresholdIsTunableAndSkipUsesHalfOpenGap() throws {
@@ -290,9 +290,86 @@ struct SilenceGapTests {
             ("one", 0, 0.2), ("two", 1.0, 1.2),
         ]), threshold: 0.5)
         let gap = try #require(gaps.first)
-        #expect(SilenceGap.skipDestination(at: gap.start, in: gaps) == 1.0)
-        #expect(SilenceGap.skipDestination(at: 0.999, in: gaps) == 1.0)
+        #expect(abs(gap.start - 0.3) < 0.000_001)
+        #expect(gap.end == 0.9)
+        #expect(SilenceGap.skipDestination(at: gap.start, in: gaps) == 0.9)
+        #expect(SilenceGap.skipDestination(at: 0.899, in: gaps) == 0.9)
         #expect(SilenceGap.skipDestination(at: gap.end, in: gaps) == nil)
+    }
+
+    @Test func leadingSilenceIsSkippedEvenForAOneWordClip() throws {
+        let gaps = SilenceGap.compute(from: transcript([
+            ("hello", 2.0, 2.4),
+        ]), threshold: 1.5)
+        let gap = try #require(gaps.first)
+        #expect(gaps.count == 1)
+        #expect(gap.start == 0.1)
+        #expect(gap.end == 1.9)
+        #expect(gap.previousWordIndex == 0)
+        #expect(gap.nextWordIndex == 0)
+        #expect(SilenceGap.skipDestination(at: 0, in: gaps) == nil)
+        #expect(SilenceGap.skipDestination(at: 0.1, in: gaps) == 1.9)
+        #expect(SilenceGap.skipDestination(at: 1.899, in: gaps) == 1.9)
+        #expect(SilenceGap.skipDestination(at: 1.9, in: gaps) == nil)
+    }
+
+    @Test func leadingSilenceMustBeStrictlyLongerThanThreshold() {
+        let gaps = SilenceGap.compute(from: transcript([
+            ("hello", 1.5, 1.9), ("world", 2.0, 2.4),
+        ]), threshold: 1.5)
+        #expect(gaps.isEmpty)
+    }
+
+    @Test func trailingSilenceIsSkippedWithCompressionPadding() throws {
+        let gaps = SilenceGap.compute(from: transcript([
+            ("goodbye", 0.2, 0.6),
+        ]), duration: 3.0, threshold: 1.5)
+        let gap = try #require(gaps.first)
+        #expect(gaps.count == 1)
+        #expect(abs(gap.start - 0.7) < 0.000_001)
+        #expect(gap.end == 2.9)
+        #expect(gap.previousWordIndex == 0)
+        #expect(gap.nextWordIndex == 0)
+        #expect(SilenceGap.skipDestination(at: 0.699, in: gaps) == nil)
+        #expect(SilenceGap.skipDestination(at: 0.7, in: gaps) == 2.9)
+        #expect(SilenceGap.skipDestination(at: 2.899, in: gaps) == 2.9)
+        #expect(SilenceGap.skipDestination(at: 2.9, in: gaps) == nil)
+    }
+
+    @Test func trailingSilenceNeedsDurationAndMustExceedThreshold() {
+        let value = transcript([("goodbye", 0.2, 0.6)])
+        #expect(SilenceGap.compute(from: value, threshold: 1.5).isEmpty)
+        #expect(SilenceGap.compute(from: value, duration: 2.1, threshold: 1.5).isEmpty)
+    }
+
+    @Test func waveformSilenceUsesTheCompressionAmplitudeAndPaddingPlan() throws {
+        let peaks = Array(repeating: Float(0), count: 40) // 2 seconds at 20 peaks/s
+            + Array(repeating: Float(0.2), count: 20)
+        let waveform = WaveformData(peaksPerSecond: 20, duration: 3, peaks: peaks)
+        let gaps = SilenceGap.compute(from: waveform)
+        let gap = try #require(gaps.first)
+        #expect(gaps.count == 1)
+        #expect(gap.start == AudioCompressionPlan.boundaryPadding)
+        #expect(abs(gap.end - 1.9) < 0.000_001)
+
+        let compressionPlan = AudioCompressionPlan.make(
+            windowPeaks: waveform.peaks,
+            windowDuration: 1 / Double(waveform.peaksPerSecond),
+            sourceDuration: waveform.duration
+        )
+        #expect(compressionPlan.removedIntervals == [
+            AudioCompressionInterval(start: gap.start, end: gap.end),
+        ])
+    }
+
+    @Test func waveformDoesNotSkipAudioAboveCompressionSilenceThreshold() {
+        let justAudible = AudioCompressionPlan.silenceAmplitudeThreshold + 0.001
+        let waveform = WaveformData(
+            peaksPerSecond: 20,
+            duration: 2,
+            peaks: Array(repeating: justAudible, count: 40)
+        )
+        #expect(SilenceGap.compute(from: waveform).isEmpty)
     }
 
     @Test func whitespaceWordsDoNotSplitRealWordGaps() throws {
@@ -302,8 +379,8 @@ struct SilenceGapTests {
         let gap = try #require(gaps.first)
         #expect(gap.previousWordIndex == 0)
         #expect(gap.nextWordIndex == 2)
-        #expect(gap.start == 0.2)
-        #expect(gap.end == 2.0)
+        #expect(abs(gap.start - 0.3) < 0.000_001)
+        #expect(gap.end == 1.9)
     }
 
     @Test func malformedLegacyTimingIsRepairedBeforeGapDetection() {

@@ -22,6 +22,10 @@ final class PlayerService {
     var skipSilence: Bool {
         didSet { UserDefaults.standard.set(skipSilence, forKey: Self.skipSilencePreferenceKey) }
     }
+    /// Session-scoped looping for the currently loaded audio. This is not a
+    /// persisted preference: relaunching the app always returns to normal
+    /// one-shot playback.
+    var loopAudio = false
     var speed: Float = 1.0 {
         didSet {
             if isPlaying { player?.rate = speed }
@@ -31,7 +35,7 @@ final class PlayerService {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
-    private var silenceGaps: [SilenceGap] = []
+    private var silenceRouter = SilenceGapRouter()
 
     init() {
         skipSilence = UserDefaults.standard.bool(forKey: Self.skipSilencePreferenceKey)
@@ -49,9 +53,9 @@ final class PlayerService {
         guard url != self.url else { return }
         // The detail task may load transcript timing just before the playback
         // task loads its asset. Keep those prepared gaps across this reset.
-        let preparedSilenceGaps = silenceGaps
+        let preparedSilenceRouter = silenceRouter
         unload()
-        silenceGaps = preparedSilenceGaps
+        silenceRouter = preparedSilenceRouter
         self.url = url
 
         let item = AVPlayerItem(url: url)
@@ -79,7 +83,10 @@ final class PlayerService {
                 guard seconds.isFinite else { return }
                 self.currentTime = seconds
                 if self.isPlaying, self.skipSilence,
-                   let destination = SilenceGap.skipDestination(at: seconds, in: self.silenceGaps),
+                   self.silenceRouter.selectedSourceIsReady,
+                   let destination = SilenceGap.skipDestination(
+                       at: seconds, in: self.silenceRouter.activeGaps
+                   ),
                    destination - seconds > 0.01 {
                     self.seekInternally(to: destination)
                 }
@@ -105,7 +112,7 @@ final class PlayerService {
         duration = 0
         loadFailed = false
         speed = 1.0
-        silenceGaps = []
+        silenceRouter.clear()
     }
 
     // MARK: - Transport
@@ -138,13 +145,43 @@ final class PlayerService {
         seekInternally(to: seconds)
     }
 
-    /// Installs timing gaps for the currently loaded entry. Passing nil (or a
-    /// transcript with fewer than two words) simply disables gap jumping.
+    var silenceDetectionMode: SilenceDetectionMode { silenceRouter.mode }
+    var silenceDetectionSourceIsReady: Bool { silenceRouter.selectedSourceIsReady }
+
+    /// Selects the exact source for this entry and clears all sources when the
+    /// entry identity changes. There is deliberately no cross-mode fallback.
+    func configureSilenceDetection(entryID: String, mode: SilenceDetectionMode) {
+        silenceRouter.configure(entryID: entryID, mode: mode)
+    }
+
+    /// Installs validated timing gaps only for the entry whose async detail
+    /// load is still current. Duration enables leading/trailing detection.
     func setTranscriptForSilenceSkipping(
         _ transcript: TranscriptOriginal?,
-        duration: TimeInterval? = nil
+        duration: TimeInterval? = nil,
+        availability: SpeechTranscriptAvailability,
+        entryID: String
     ) {
-        silenceGaps = transcript.map { SilenceGap.compute(from: $0, duration: duration) } ?? []
+        let gaps: [SilenceGap]?
+        if availability == .available, let transcript, let duration {
+            gaps = try? SpeechSilencePlanner.makePlan(
+                transcript: transcript, audioDuration: duration
+            ).removedIntervals.map {
+                SilenceGap(start: $0.start, end: $0.end, previousWordIndex: 0, nextWordIndex: 0)
+            }
+        } else {
+            gaps = nil
+        }
+        silenceRouter.installSpeech(gaps, forEntryID: entryID)
+    }
+
+    /// Installs amplitude-derived gaps from the decoded audio waveform. These
+    /// take precedence over transcript timing so non-speech audio is not
+    /// mistaken for silence. Passing nil restores the transcript fallback.
+    func setWaveformForSilenceSkipping(_ waveform: WaveformData, entryID: String) {
+        silenceRouter.installWaveform(
+            SilenceGap.compute(from: waveform), forEntryID: entryID
+        )
     }
 
     private func seekInternally(to seconds: Double) {
@@ -172,6 +209,12 @@ final class PlayerService {
     }
 
     private func handlePlayedToEnd() {
+        if loopAudio, let player {
+            seekInternally(to: 0)
+            player.rate = speed
+            isPlaying = true
+            return
+        }
         isPlaying = false
         if duration > 0 { currentTime = duration }
     }

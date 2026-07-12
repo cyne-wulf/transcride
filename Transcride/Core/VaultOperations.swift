@@ -114,7 +114,9 @@ struct VaultOperations: Sendable {
         let destURL = vaultRoot.appendingRelativePath(newRelPath)
         do {
             let names = try fm.contentsOfDirectory(atPath: sourceURL.path)
-                .filter { !$0.hasPrefix(".") }
+                .filter {
+                    !$0.hasPrefix(".") || $0 == TranscriptAlignmentState.staleFileName
+                }
             for name in names {
                 try fm.copyItem(
                     at: sourceURL.appending(path: name),

@@ -10,8 +10,10 @@ struct RecentlyDeletedView: View {
     @State private var showRestorePreTrimPrompt = false
     @State private var restoringPreTrim: TrashItem?
     @State private var showEmptyTrashPrompt = false
+    @FocusState private var trashListHasFocus: Bool
 
     var body: some View {
+        @Bindable var model = model
         Group {
             if model.trashItems.isEmpty {
                 ContentUnavailableView {
@@ -20,12 +22,19 @@ struct RecentlyDeletedView: View {
                     Text("Deleted entries, folders, and audio files are kept here for \(model.trashRetentionDays) days.")
                 }
             } else {
-                List {
+                List(selection: $model.selectedTrashItemID) {
                     ForEach(model.trashItems) { item in
                         trashRow(item)
+                            .tag(item.id)
                     }
                 }
                 .listStyle(.inset)
+                .focused($trashListHasFocus)
+                .defaultFocus($trashListHasFocus, true)
+                .task {
+                    await Task.yield()
+                    trashListHasFocus = true
+                }
             }
         }
         .navigationTitle("Recently Deleted")
@@ -67,26 +76,27 @@ struct RecentlyDeletedView: View {
             Text("This cannot be undone.")
         }
         .confirmationDialog(
-            "Restore the original audio of “\(restoringPreTrim?.displayName ?? "")”?",
+            "Restore “\(restoringPreTrim?.displayName ?? "")”?",
             isPresented: $showRestorePreTrimPrompt,
             titleVisibility: .visible
         ) {
-            Button("Restore Original Audio") {
+            Button("Restore Audio Version") {
                 if let item = restoringPreTrim {
                     Task { await model.restoreTrashItem(item) }
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The entry's current trimmed audio moves to Recently Deleted, "
-                + "and the entry is re-transcribed to match the restored audio.")
+            Text("The retained audio replaces the entry's current trim or compression. "
+                + "The derived version is discarded and the entry is re-transcribed.")
         }
     }
 
-    /// Restoring pre-trim audio displaces the entry's current audio, so it
-    /// confirms first; every other kind restores immediately.
+    /// Restoring a retained original discards a reproducible trim/compression,
+    /// so it confirms first; every other kind restores immediately.
     private func requestRestore(_ item: TrashItem) {
-        if item.kind == .preTrimAudio {
+        if item.kind == .audioVersion || item.kind == .preTrimAudio
+            || item.kind == .preCompressionAudio {
             restoringPreTrim = item
             showRestorePreTrimPrompt = true
         } else {
@@ -118,6 +128,7 @@ struct RecentlyDeletedView: View {
             .help("Delete Permanently")
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
         .contextMenu {
             Button("Restore") { requestRestore(item) }
             Button("Reveal in Finder") { model.revealTrashItemInFinder(item) }
@@ -132,8 +143,10 @@ struct RecentlyDeletedView: View {
     private func iconName(for item: TrashItem) -> String {
         switch item.kind {
         case .entryAudio: "waveform.badge.minus"
+        case .audioVersion: "arrow.trianglehead.2.clockwise.rotate.90"
         case .preTrimAudio: "scissors"
         case .preExtensionAudio: "record.circle"
+        case .preCompressionAudio: "arrow.down.right.and.arrow.up.left"
         case .item: item.isEntry ? "waveform" : "folder"
         }
     }

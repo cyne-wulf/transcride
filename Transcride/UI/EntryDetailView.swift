@@ -16,6 +16,7 @@ struct EntryDetailView: View {
     @State private var showingDeleteAudio = false
     @State private var deleteAudioByteSize: Int64?
     @State private var isTrimming = false
+    @State private var showingCompressConfirm = false
     @State private var showingRestoreOriginal = false
     @State private var restoringOriginalItem: TrashItem?
     @State private var showingExport = false
@@ -39,9 +40,14 @@ struct EntryDetailView: View {
                                 extensionTranscriptState = nil
                                 loadedEntryPath = nil
                                 isTrimming = false
-                                model.player.setTranscriptForSilenceSkipping(nil)
+                                model.player.unload()
                             }
                         }
+                        let speechAvailability = model.speechTranscriptAvailability(for: entry)
+                        model.player.configureSilenceDetection(
+                            entryID: entry.relativePath,
+                            mode: entry.silenceDetectionMode
+                        )
                         guard let content = await model.readTranscriptContent(for: entry),
                               !Task.isCancelled,
                               model.selectedEntryID == entry.relativePath else { return }
@@ -52,7 +58,9 @@ struct EntryDetailView: View {
                         model.player.setTranscriptForSilenceSkipping(
                             content.original,
                             duration: content.extensionState?.knownTranscriptDuration
-                                ?? entry.duration
+                                ?? entry.duration,
+                            availability: speechAvailability,
+                            entryID: entry.relativePath
                         )
                     }
             } else {
@@ -85,7 +93,7 @@ struct EntryDetailView: View {
     /// that list preview, and reloading the editor from an earlier debounced
     /// save could otherwise overwrite newer unsaved keystrokes.
     private func taskKey(for entry: Entry) -> String {
-        "\(entry.relativePath)|\(entry.title ?? "")|external:\(model.externalVaultRevision)|transcription:\(model.transcriptRevision)"
+        "\(entry.relativePath)|\(entry.title ?? "")|silence:\(entry.silenceDetectionMode.rawValue)|speech:\(entry.speechTranscriptAvailability)|external:\(model.externalVaultRevision)|transcription:\(model.transcriptRevision)"
     }
 
     private func infoPopover(_ entry: Entry) -> some View {
@@ -201,6 +209,17 @@ struct EntryDetailView: View {
         .onChange(of: model.cancelTrimRequestRevision) { _, _ in
             if isTrimming { isTrimming = false }
         }
+        .onChange(of: model.speechTranscriptAvailability(for: entry)) { _, availability in
+            model.player.configureSilenceDetection(
+                entryID: entry.relativePath, mode: entry.silenceDetectionMode
+            )
+            model.player.setTranscriptForSilenceSkipping(
+                original,
+                duration: extensionTranscriptState?.knownTranscriptDuration ?? entry.duration,
+                availability: availability,
+                entryID: entry.relativePath
+            )
+        }
         .onDisappear {
             model.setTrimModeActive(false)
         }
@@ -218,6 +237,8 @@ struct EntryDetailView: View {
             if entry.hasAudio {
                 Button("Extend Recording") { Task { await model.startExtension(for: entry) } }
                     .disabled(model.extensionBlockReason(for: entry) != nil)
+                Button("Compress Audio…") { showingCompressConfirm = true }
+                    .disabled(!canCompress(entry))
             }
             if entry.hasAudio || entry.audioDeleted {
                 Divider()
@@ -284,6 +305,35 @@ struct EntryDetailView: View {
                             .disabled(!canTrim(entry))
                             .help(entry.audioUnavailableExplanation
                                 ?? "Select the range of audio to keep")
+                        Button("Compress Audio…") { showingCompressConfirm = true }
+                            .disabled(!canCompress(entry))
+                            .help(compressBlockedReason(entry)
+                                ?? "Remove silence longer than 1.5 seconds")
+                    }
+                    if entry.hasAudio {
+                        Menu("Silence Detection") {
+                            Button {
+                                Task { await model.setSilenceDetectionMode(.waveform, for: entry) }
+                            } label: {
+                                silenceDetectionChoiceLabel(.waveform, entry: entry)
+                            }
+                            Button {
+                                Task { await model.setSilenceDetectionMode(.speech, for: entry) }
+                            } label: {
+                                silenceDetectionChoiceLabel(.speech, entry: entry)
+                            }
+                            .disabled(model.speechTranscriptAvailability(for: entry) != .available)
+                            .help(model.speechTranscriptAvailability(for: entry).explanation
+                                ?? "Use timed Original transcript gaps; useful when room noise stays above the waveform threshold")
+                        }
+                        .help(silenceDetectionHelp(entry))
+                    }
+                    if entry.hasAudio {
+                        Toggle("Loop Audio", isOn: Binding(
+                            get: { model.player.loopAudio },
+                            set: { model.player.loopAudio = $0 }
+                        ))
+                        .help("Restart this audio automatically when playback reaches the end")
                     }
                     if model.originalAudioTrashItem(for: entry) != nil {
                         Button("Restore Original Audio…") { promptRestoreOriginal(entry) }
@@ -332,6 +382,8 @@ struct EntryDetailView: View {
                 if entry.hasAudio { showingRetranscribe = true }
             case .trim:
                 if canTrim(entry) { isTrimming = true }
+            case .compress:
+                if canCompress(entry) { showingCompressConfirm = true }
             case .restoreOriginalAudio:
                 promptRestoreOriginal(entry)
             case .exportMarkdown:
@@ -349,6 +401,18 @@ struct EntryDetailView: View {
         }
         .sheet(isPresented: $showingExport) {
             ExportMarkdownSheet(entry: entry, original: original, document: document)
+        }
+        .confirmationDialog(
+            "Compress “\(entry.displayTitle)” by removing long silence?",
+            isPresented: $showingCompressConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Compress and Retranscribe", role: .destructive) {
+                Task { await model.compressAudio(for: entry) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(compressionConfirmationMessage(entry))
         }
         .confirmationDialog(
             "Restore the full original audio of “\(entry.displayTitle)”?",
@@ -384,7 +448,9 @@ struct EntryDetailView: View {
 
     /// Deleting audio needs the file intact: not mid-recording, not vanished.
     private func canDeleteAudio(_ entry: Entry) -> Bool {
-        entry.hasAudio && model.recorder.currentEntryPath != entry.relativePath
+        entry.hasAudio
+            && model.recorder.currentEntryPath != entry.relativePath
+            && !model.compressingEntryPaths.contains(entry.relativePath)
     }
 
     // MARK: - Trim (AUD-3)
@@ -395,6 +461,44 @@ struct EntryDetailView: View {
         canDeleteAudio(entry)
             && model.transcriptionQueue?.items
                 .contains(where: { $0.entryRelativePath == entry.relativePath }) != true
+    }
+
+    private func canCompress(_ entry: Entry) -> Bool {
+        compressBlockedReason(entry) == nil
+    }
+
+    private func compressBlockedReason(_ entry: Entry) -> String? {
+        guard canTrim(entry), !model.compressingEntryPaths.contains(entry.relativePath) else {
+            return "Wait until audio processing is idle."
+        }
+        if entry.silenceDetectionMode == .speech {
+            return model.speechTranscriptAvailability(for: entry).explanation
+        }
+        return nil
+    }
+
+    private func silenceDetectionHelp(_ entry: Entry) -> String {
+        model.speechTranscriptAvailability(for: entry).explanation
+            ?? "Waveform uses audio level. Speech Transcript uses timed word gaps and remains useful in noisy rooms."
+    }
+
+    @ViewBuilder
+    private func silenceDetectionChoiceLabel(
+        _ mode: SilenceDetectionMode, entry: Entry
+    ) -> some View {
+        if entry.silenceDetectionMode == mode {
+            Label(mode.displayName, systemImage: "checkmark")
+        } else {
+            Text(mode.displayName)
+        }
+    }
+
+    private func compressionConfirmationMessage(_ entry: Entry) -> String {
+        let shared = " Silence longer than 1.5 seconds is removed with 0.1-second padding. This changes later timestamps, so the full audio is re-transcribed. A hand-edited note is never overwritten, and the original audio remains recoverable in Recently Deleted."
+        if entry.silenceDetectionMode == .speech {
+            return "Speech Transcript keeps only regions detected as speech. All other audio—including music, applause, or ambient sound—may be removed." + shared
+        }
+        return "Waveform detection uses the audio level." + shared
     }
 
     private func promptDeleteAudio(_ entry: Entry) {
@@ -560,6 +664,11 @@ private struct PlaybackSection: View {
             waveformError = nil
             do {
                 waveform = try await model.waveform(for: entry)
+                if let waveform {
+                    model.player.setWaveformForSilenceSkipping(
+                        waveform, entryID: entry.relativePath
+                    )
+                }
             } catch is CancellationError {
                 // switched away mid-generation; next open restarts it
             } catch {
@@ -871,20 +980,28 @@ private struct PlaybackSection: View {
     }
 
     private var skipSilenceControl: some View {
-        TransportButton(
+        let selectedSourceUnavailable = player.silenceDetectionMode == .speech
+            && !player.silenceDetectionSourceIsReady
+        return TransportButton(
             systemImage: player.skipSilence ? "waveform.badge.minus" : "waveform",
             size: 15 * controlScale,
-            help: player.skipSilence
+            help: selectedSourceUnavailable
+                ? (model.speechTranscriptAvailability(for: entry).explanation
+                    ?? "Preparing Speech Transcript silence detection…")
+                : player.skipSilence
                 ? "Skip Silence: On — skipping pauses longer than "
                     + String(format: "%.1f", SilenceGap.defaultThreshold)
                     + " seconds. Click to turn off."
                 : "Skip Silence: Off — click to skip pauses longer than "
                     + String(format: "%.1f", SilenceGap.defaultThreshold)
                     + " seconds.",
-            tint: player.skipSilence ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary)
+            tint: selectedSourceUnavailable
+                ? AnyShapeStyle(.tertiary)
+                : (player.skipSilence ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary))
         ) {
-            player.skipSilence.toggle()
+            if !selectedSourceUnavailable { player.skipSilence.toggle() }
         }
+        .disabled(selectedSourceUnavailable)
         .accessibilityLabel("Skip Silence")
         .accessibilityIdentifier("skip-silence-toggle")
     }

@@ -130,6 +130,13 @@ struct FrontmatterDocument: Equatable, Sendable {
 // MARK: - Typed accessors for the entry contract
 
 extension FrontmatterDocument {
+    /// Missing and unknown values intentionally use the historical waveform
+    /// behavior. Writing the property canonicalizes it to a plain YAML scalar.
+    var silenceDetectionMode: SilenceDetectionMode {
+        get { SilenceDetectionMode(rawValue: value(for: "silence_detection") ?? "") ?? .waveform }
+        set { setValue(newValue.rawValue, for: "silence_detection") }
+    }
+
     var title: String? {
         get { value(for: "title") }
         set { setValue(newValue, for: "title", quoted: true) }

@@ -79,4 +79,10 @@ Make the markdown editor the reason the app feels like an IDE rather than a note
 
 ## Handoff (required, after the checklist is verified)
 
-Update **`PROJECT-STATE.md`** with: final state summary; build/run/test commands; changed file map; CodeMirror packaging and Swift↔JavaScript bridge contract; editor transaction/autosave/undo ownership; wikilink and tag index schemas; menu/keybind integration; diff architecture; performance measurements; deviations; known issues; and any work deferred beyond Milestone 9.
+Write **`PRD-10-start-here.md`** and update **`PROJECT-STATE.md`** with: final state
+summary; build/run/test commands; changed file map; CodeMirror packaging and
+Swift↔JavaScript bridge contract; editor transaction/autosave/undo ownership;
+wikilink and tag index schemas; menu/keybind integration; diff architecture;
+performance measurements; deviations; known issues; and the current local-model
+benchmark candidates for PRD-10. The handoff must not choose a summarization model
+without measured license, context-window, disk, and peak-memory evidence.

@@ -79,6 +79,7 @@ struct VaultScanner {
         var snippet = ""
         var favorite = false
         var audioDeleted = false
+        var silenceDetectionMode = SilenceDetectionMode.waveform
         var hasTranscript = false
 
         if let transcriptURL, transcriptModified != nil,
@@ -90,9 +91,17 @@ struct VaultScanner {
             duration = doc.duration
             favorite = doc.favorite
             audioDeleted = doc.audioDeleted
+            silenceDetectionMode = doc.silenceDetectionMode
             snippet = Self.snippet(fromBody: doc.body)
         }
 
+        let audioFileName = Self.audioFile(in: fileNames)
+        let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: url))
+        let speechAvailability = SpeechSilencePlanner.availability(
+            transcript: original,
+            audioDuration: duration,
+            alignmentIsStale: TranscriptAlignmentState.isStale(inEntry: url)
+        )
         let entry = Entry(
             relativePath: relativePath,
             folderName: folderName,
@@ -103,7 +112,9 @@ struct VaultScanner {
             snippet: snippet,
             favorite: favorite,
             audioDeleted: audioDeleted,
-            audioFileName: Self.audioFile(in: fileNames),
+            silenceDetectionMode: silenceDetectionMode,
+            speechTranscriptAvailability: speechAvailability,
+            audioFileName: audioFileName,
             hasTranscript: hasTranscript,
             transcriptFileName: hasTranscript ? transcriptFileName : nil
         )

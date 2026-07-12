@@ -203,6 +203,12 @@ struct AppCommands: Commands {
             }
             .disabled(entry?.hasAudio != true)
 
+            Button("Compress Audio…") {
+                model.requestEntryAction(.compress)
+            }
+            .disabled(entry?.hasAudio != true
+                      || entry.map { model.compressingEntryPaths.contains($0.relativePath) } == true)
+
             Button("Restore Original Audio…") {
                 model.requestEntryAction(.restoreOriginalAudio)
             }
@@ -217,7 +223,8 @@ struct AppCommands: Commands {
                 model.requestEntryAction(.deleteAudio)
             }
             .disabled(entry?.hasAudio != true
-                      || model.recorder.currentEntryPath == entry?.relativePath)
+                      || model.recorder.currentEntryPath == entry?.relativePath
+                      || entry.map { model.compressingEntryPaths.contains($0.relativePath) } == true)
 
             Divider()
 

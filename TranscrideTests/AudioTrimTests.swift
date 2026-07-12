@@ -121,7 +121,7 @@ struct AudioTrimTests {
 
     // MARK: - Restore (the retrigger flow's file side)
 
-    @Test func restorePreTrimSwapsBackAndStagesTrimmedAudio() throws {
+    @Test func restorePreTrimDiscardsReproducibleTrimmedAudio() throws {
         let (root, entryRelPath) = try makeVault()
         defer { try? FileManager.default.removeItem(at: root) }
         let entryURL = root.appendingRelativePath(entryRelPath)
@@ -145,18 +145,9 @@ struct AudioTrimTests {
         #expect(text.contains("duration: 10.00"))
         #expect(!text.contains("audio_deleted"))
 
-        // The displaced trimmed audio is staged, not gone.
-        let items = try store.items()
-        #expect(items.count == 1)
-        let displaced = try #require(items.first)
-        #expect(displaced.kind == .entryAudio)
-        let stagedTrimmed = try String(
-            contentsOf: store.trashDirectory
-                .appending(path: displaced.trashedName)
-                .appending(path: "audio.m4a"),
-            encoding: .utf8
-        )
-        #expect(stagedTrimmed == "trimmed audio bytes")
+        // The reproducible trimmed derivative is discarded after the retained
+        // original is safely restored; there is no reverse-restore row.
+        #expect(try store.items().isEmpty)
     }
 
     @Test func restorePreTrimIntoAudioDeletedEntryClearsFlag() throws {

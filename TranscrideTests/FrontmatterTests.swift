@@ -32,6 +32,37 @@ struct FrontmatterTests {
         #expect(doc.body.contains("First paragraph"))
     }
 
+    @Test func silenceDetectionDefaultsRoundTripsAndRejectsUnknownValues() {
+        var missing = FrontmatterDocument.parse("---\ncustom: keep exactly\n---\nBody\n")
+        #expect(missing.silenceDetectionMode == .waveform)
+        missing.silenceDetectionMode = .speech
+        let output = missing.serialized()
+        #expect(output.contains("silence_detection: speech"))
+        #expect(output.contains("custom: keep exactly"))
+        #expect(FrontmatterDocument.parse(output).silenceDetectionMode == .speech)
+
+        let unknown = FrontmatterDocument.parse(
+            "---\nsilence_detection: future-detector\nopaque:  value # untouched\n---\nBody\n"
+        )
+        #expect(unknown.silenceDetectionMode == .waveform)
+        #expect(unknown.serialized().contains("opaque:  value # untouched"))
+    }
+
+    @Test func silenceDetectionSetterPreservesUnknownFrontmatterAndBody() throws {
+        let entry = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-2026-07-11T12-00-00-mode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: entry) }
+        let original = "---\ntitle: \"Mode\"\nunknown:   keep # exact\n---\nHand edited body.\n"
+        let url = entry.appending(path: "transcript.md")
+        try AtomicFile.write(original, to: url)
+        try EntryMetadata.setSilenceDetectionMode(.speech, inEntry: entry)
+        let updated = try String(contentsOf: url, encoding: .utf8)
+        #expect(updated.contains("unknown:   keep # exact"))
+        #expect(FrontmatterDocument.parse(updated).body == "Hand edited body.\n")
+        #expect(FrontmatterDocument.parse(updated).silenceDetectionMode == .speech)
+    }
+
     @Test func untouchedDocumentSerializesByteExact() {
         let doc = FrontmatterDocument.parse(sample)
         #expect(doc.serialized() == sample)

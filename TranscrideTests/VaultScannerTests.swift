@@ -11,7 +11,7 @@ struct VaultScannerTests {
         let entry1 = root.appending(path: "transcride-2026-07-01T10-00-00")
         try fm.createDirectory(at: entry1, withIntermediateDirectories: true)
         try AtomicFile.write(
-            "---\ntitle: \"Root Entry\"\nduration: 12.5\n---\n# Heading\n\nHello from the root entry body.\n",
+            "---\ntitle: \"Root Entry\"\nduration: 12.5\nsilence_detection: speech\n---\n# Heading\n\nHello from the root entry body.\n",
             to: entry1.appending(path: "transcript.md")
         )
 
@@ -37,6 +37,7 @@ struct VaultScannerTests {
         #expect(snapshot.root.entries.count == 1)
         #expect(snapshot.root.entries[0].title == "Root Entry")
         #expect(snapshot.root.entries[0].duration == 12.5)
+        #expect(snapshot.root.entries[0].silenceDetectionMode == .speech)
         #expect(snapshot.root.entries[0].snippet.contains("Hello from the root entry body."))
         #expect(!snapshot.root.entries[0].hasAudio)
 
@@ -70,6 +71,7 @@ struct VaultScannerTests {
         )
         let doc = FrontmatterDocument.parse(text)
         #expect(doc.title == "Renamed: The Sequel!")
+        #expect(doc.silenceDetectionMode == .speech)
         #expect(doc.body.contains("Hello from the root entry body."))
 
         // A second rename finds the retitled file and renames it again.
@@ -79,6 +81,7 @@ struct VaultScannerTests {
             contentsOf: finalURL.appending(path: "Third Name.md"), encoding: .utf8
         ))
         #expect(doc2.title == "Third Name")
+        #expect(doc2.silenceDetectionMode == .speech)
         #expect(doc2.body.contains("Hello from the root entry body."))
     }
 
@@ -120,5 +123,6 @@ struct VaultScannerTests {
         let snapshot = scanner.scan(root: root)
         #expect(snapshot.root.entries.isEmpty)
         #expect(snapshot.folder(at: "Archive")?.entries.count == 1)
+        #expect(snapshot.folder(at: "Archive")?.entries[0].silenceDetectionMode == .speech)
     }
 }

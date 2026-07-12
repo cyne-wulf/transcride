@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Add a Loop Audio toggle to an entry's three-dot menu; looping preserves the
+  selected playback speed and works with Skip Silence.
+- Add a per-entry **Silence Detection** picker shared by Skip Silence and Compress
+  Audio. **Waveform (Audio Level)** uses the real -40 dBFS signal threshold;
+  **Speech Transcript** uses leading, internal, and trailing gaps in the timed
+  Original, which remains useful when steady room noise never becomes quiet.
+- Apply the same strict longer-than-1.5-second rule and 0.1-second boundary padding
+  in both modes. Speech mode never falls back silently: missing, stale, malformed,
+  or regenerating timing suspends Skip Silence and blocks compression.
+- Add **Compress Audio…** to remove silence runs longer than 1.5 seconds while
+  retaining short boundary padding, preserving the complete prior file in Recently
+  Deleted, and fully retranscribing without overwriting hand-edited Markdown.
+- Validate the rendered M4A before swapping it in and leave the audio unchanged when
+  no qualifying silence exists or the result would not reduce storage use.
+- Persist `silence_detection: waveform|speech` per entry while preserving unknown
+  frontmatter and keep that preference through rename, move, duplicate, compression,
+  and audio-version restore.
+
 ## 1.1.0 — 2026-07-11
 
 ### Highlights

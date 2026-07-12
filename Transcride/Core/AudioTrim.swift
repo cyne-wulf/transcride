@@ -110,6 +110,23 @@ enum EntryMetadata {
         doc.duration = duration
         try AtomicFile.write(doc.serialized(), to: url)
     }
+
+    /// Atomic, line-preserving per-entry silence selector update.
+    static func setSilenceDetectionMode(
+        _ mode: SilenceDetectionMode, inEntry entryURL: URL
+    ) throws {
+        let url = TranscriptFile.url(inEntry: entryURL)
+            ?? entryURL.appending(path: TranscriptFile.defaultName)
+        var doc: FrontmatterDocument
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            doc = FrontmatterDocument.parse(text)
+        } else {
+            doc = FrontmatterDocument(fields: [], body: "")
+            doc.created = EntryFolderName(parsing: entryURL.lastPathComponent)?.date
+        }
+        doc.silenceDetectionMode = mode
+        try AtomicFile.write(doc.serialized(), to: url)
+    }
 }
 
 /// The file dance after a successful trim export: pre-trim audio (and its
@@ -145,6 +162,7 @@ struct TrimApplier: Sendable {
         // Stale metadata must not fail the trim — the files are already
         // consistent, and the next retranscription refreshes the note anyway.
         try? EntryMetadata.setDuration(newDuration, inEntry: entryURL)
+        try? TranscriptAlignmentState.markStale(inEntry: entryURL)
         return Outcome(trashedName: trashedName, audioFileName: fileName, newDuration: newDuration)
     }
 }

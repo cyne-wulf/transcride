@@ -111,7 +111,7 @@ final class AppModel {
     // pattern as in-note find) and the owning view fulfills it.
 
     enum EntryActionRequest {
-        case extendRecording, retranscribe, trim, restoreOriginalAudio, exportMarkdown, deleteAudio, showInfo
+        case extendRecording, retranscribe, trim, compress, restoreOriginalAudio, exportMarkdown, deleteAudio, showInfo
     }
 
     enum WorkbenchActionRequest {
@@ -173,10 +173,15 @@ final class AppModel {
 
     var sidebarSelection: SidebarSelection? = .folder("") {
         didSet {
-            guard sidebarSelection != oldValue, let selectedEntryID else { return }
-            let selectionStillVisible = displayedEntries.contains { $0.id == selectedEntryID }
-            if !selectionStillVisible {
-                self.selectedEntryID = nil
+            guard sidebarSelection != oldValue else { return }
+            if let selectedEntryID {
+                let selectionStillVisible = displayedEntries.contains { $0.id == selectedEntryID }
+                if !selectionStillVisible {
+                    self.selectedEntryID = nil
+                }
+            }
+            if sidebarSelection != .recentlyDeleted, selectedTrashItemID != nil {
+                selectedTrashItemID = nil
             }
         }
     }
@@ -212,6 +217,13 @@ final class AppModel {
             if selectedEntryID != oldValue { player.unload() }
         }
     }
+    var selectedTrashItemID: String? {
+        didSet {
+            // A preview may be playing directly from `.trash`; every selection
+            // change must release that file before restore or deletion.
+            if selectedTrashItemID != oldValue { player.unload() }
+        }
+    }
     var errorMessage: String?
     /// Informational notice kept separate from errors so a protected edited
     /// layer does not look like a failed retranscription.
@@ -219,6 +231,7 @@ final class AppModel {
     var recordingRecoveryNoticeMessage: String?
     private(set) var extensionRecoveries: [RecoverableRecordingExtension] = []
     private(set) var extensionRecoveryProcessingIDs: Set<String> = []
+    private(set) var compressingEntryPaths: Set<RelativePath> = []
     private(set) var unsupportedExtensionEntryPaths: Set<RelativePath> = []
     var isExtensionRecoveryPresented = false
 
@@ -232,6 +245,11 @@ final class AppModel {
     var selectedEntry: Entry? {
         guard let selectedEntryID else { return nil }
         return snapshot?.entry(withID: selectedEntryID)
+    }
+
+    var selectedTrashItem: TrashItem? {
+        guard let selectedTrashItemID else { return nil }
+        return trashItems.first { $0.id == selectedTrashItemID }
     }
 
     /// The oldest retained pre-trim version is the entry's full original
@@ -326,6 +344,7 @@ final class AppModel {
         trashItems = []
         sidebarSelection = .folder("")
         selectedEntryID = nil
+        selectedTrashItemID = nil
         searchIndexState = .indexing
         vaultSearchResults = []
         vaultSearchError = nil
@@ -459,6 +478,10 @@ final class AppModel {
         if let selectedEntryID, snap.entry(withID: selectedEntryID) == nil {
             self.selectedEntryID = nil
         }
+        if let selectedTrashItemID,
+           !trash.contains(where: { $0.id == selectedTrashItemID }) {
+            self.selectedTrashItemID = nil
+        }
     }
 
     // MARK: - Vault selection panels
@@ -587,6 +610,30 @@ final class AppModel {
         let favorite = !entry.favorite
         await perform("setFavorite \(favorite) [\(entry.relativePath)]") { service in
             try await service.setFavorite(favorite, atEntryPath: entry.relativePath)
+        }
+    }
+
+    func speechTranscriptAvailability(for entry: Entry) -> SpeechTranscriptAvailability {
+        if transcriptionQueue?.items.contains(where: {
+            $0.entryRelativePath == entry.relativePath
+        }) == true {
+            return .regenerating
+        }
+        return entry.speechTranscriptAvailability
+    }
+
+    /// Writes the per-entry picker atomically, refreshes the scanner snapshot,
+    /// and changes the loaded player's exact gap source without touching the
+    /// app-wide Skip Silence preference.
+    func setSilenceDetectionMode(_ mode: SilenceDetectionMode, for entry: Entry) async {
+        if mode == .speech, speechTranscriptAvailability(for: entry) != .available { return }
+        await perform("setSilenceDetection \(mode.rawValue) [\(entry.relativePath)]") { service in
+            try await service.setSilenceDetectionMode(mode, atEntryPath: entry.relativePath)
+            await MainActor.run {
+                self.player.configureSilenceDetection(
+                    entryID: entry.relativePath, mode: mode
+                )
+            }
         }
     }
 
@@ -953,6 +1000,9 @@ final class AppModel {
         guard entry.hasAudio else { return entry.audioDeleted ? .audioDeleted : .noAudio }
         if recorder.isActive { return .recorderBusy }
         if trimModeActive { return .entryBusy("trimming") }
+        if compressingEntryPaths.contains(entry.relativePath) {
+            return .entryBusy("compressing")
+        }
         if transcriptionBusyEntryPaths.contains(entry.relativePath) { return .transcriptionBusy }
         if unsupportedExtensionEntryPaths.contains(entry.relativePath) { return .unsupportedAudio }
         return nil
@@ -1229,6 +1279,10 @@ final class AppModel {
         )
     }
 
+    func trashPreview(for item: TrashItem) async -> TrashPreview? {
+        await service?.trashPreview(for: item)
+    }
+
     // MARK: - Intents (audio lifecycle, AUD-1)
 
     func audioFileByteSize(for entry: Entry) async -> Int64? {
@@ -1268,6 +1322,40 @@ final class AppModel {
         }
     }
 
+    /// Permanently removes long silent spans from the current timeline while
+    /// retaining the complete pre-compression file in Recently Deleted.
+    func compressAudio(for entry: Entry) async {
+        guard !compressingEntryPaths.contains(entry.relativePath) else { return }
+        do {
+            try AudioCompressionPreflight.validate(
+                mode: entry.silenceDetectionMode,
+                speechAvailability: speechTranscriptAvailability(for: entry)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        compressingEntryPaths.insert(entry.relativePath)
+        defer { compressingEntryPaths.remove(entry.relativePath) }
+        if player.url == audioURL(for: entry) { player.unload() }
+        transcriptionQueue?.evictItems(underPath: entry.relativePath)
+        await perform("compressAudio [\(entry.relativePath)]") { service in
+            let outcome = try await service.compressAudio(atEntryPath: entry.relativePath)
+            await MainActor.run {
+                self.audioRevision &+= 1
+                self.recordingRecoveryNoticeMessage = String(
+                    format: "Compression removed %.1f seconds of silence. The original audio remains recoverable in Recently Deleted.",
+                    outcome.removedDuration
+                )
+                self.transcriptionQueue?.enqueue(
+                    entryRelativePath: entry.relativePath,
+                    source: "compress",
+                    isRetranscribe: true
+                )
+            }
+        }
+    }
+
     // MARK: - Intents (speaker rename, TRN-6)
 
     /// Applies speaker renames (machine id → display name; nil/empty removes)
@@ -1282,6 +1370,17 @@ final class AppModel {
     // MARK: - Intents (trash)
 
     func restoreTrashItem(_ item: TrashItem) async {
+        if selectedTrashItemID == item.id { player.unload() }
+        // Early compression/trim restoration builds labeled the displaced
+        // version as ordinary entryAudio. Recognize those existing items so
+        // they receive the same swap + retranscription behavior as the new
+        // explicit audioVersion kind.
+        let isLegacyAudioVersion = item.kind == .entryAudio
+            && snapshot?.entry(withID: item.originalPath)?.hasAudio == true
+            && snapshot?.entry(withID: item.originalPath)?.audioDeleted == false
+        let restoresTimelineVersion = item.kind == .audioVersion
+            || item.kind == .preTrimAudio || item.kind == .preExtensionAudio
+            || item.kind == .preCompressionAudio || isLegacyAudioVersion
         // An audio restore rearranges files the player or a running
         // transcription may hold open; both must let go first.
         if item.kind.isAudio, let vaultURL,
@@ -1289,20 +1388,27 @@ final class AppModel {
                == vaultURL.appendingRelativePath(item.originalPath).path {
             player.unload()
         }
-        if item.kind == .preTrimAudio || item.kind == .preExtensionAudio {
+        if restoresTimelineVersion {
             transcriptionQueue?.evictItems(underPath: item.originalPath)
         }
         await perform("restore [\(item.trashedName)]") { service in
             _ = try await service.restore(item)
             await MainActor.run {
                 self.audioRevision &+= 1
-                if item.kind == .preTrimAudio || item.kind == .preExtensionAudio {
+                if restoresTimelineVersion {
                     // The transcript still matches the displaced trimmed
                     // audio; bring the text back in line with the disk.
+                    self.recordingRecoveryNoticeMessage = item.kind == .preExtensionAudio
+                        ? "Restored the selected audio version. The version that was active remains recoverable in Recently Deleted."
+                        : "Restored the selected audio. The replaced trim or compression was discarded and can be regenerated."
                     self.transcriptionQueue?.enqueue(
                         entryRelativePath: item.originalPath,
                         source: item.kind == .preTrimAudio
-                            ? "trim-restore" : "extension-restore",
+                            ? "trim-restore"
+                            : (item.kind == .preExtensionAudio
+                               ? "extension-restore"
+                               : (item.kind == .preCompressionAudio
+                                  ? "compression-restore" : "audio-version-restore")),
                         isRetranscribe: true
                     )
                 }
@@ -1311,6 +1417,7 @@ final class AppModel {
     }
 
     func deleteTrashItemPermanently(_ item: TrashItem) async {
+        if selectedTrashItemID == item.id { player.unload() }
         await perform("deletePermanently [\(item.trashedName)]") { service in
             try await service.deletePermanently(item)
         }
@@ -1319,6 +1426,7 @@ final class AppModel {
     /// Empties Recently Deleted in one pass (Voice Memos' "Delete All").
     /// The caller confirms first — this is the one unrecoverable bulk action.
     func emptyTrash() async {
+        player.unload()
         await perform("emptyTrash") { service in
             _ = try await service.emptyTrash()
         }

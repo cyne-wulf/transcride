@@ -22,7 +22,11 @@ struct MainView: View {
                 }
                 .navigationSplitViewColumnWidth(min: 260, ideal: 320)
             } detail: {
-                EntryDetailView()
+                if model.sidebarSelection == .recentlyDeleted {
+                    TrashPreviewView()
+                } else {
+                    EntryDetailView()
+                }
             }
 
             if !model.recorder.isZenMode {

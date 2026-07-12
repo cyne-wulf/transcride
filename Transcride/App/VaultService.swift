@@ -191,6 +191,13 @@ actor VaultService {
         )
     }
 
+    /// Builds a read-only projection from files inside `.trash`. The resolver
+    /// may decode audio to make an in-memory waveform, but never writes a
+    /// cache into the deleted payload.
+    func trashPreview(for item: TrashItem) async -> TrashPreview {
+        await TrashPreviewResolver(vaultRoot: rootURL).resolve(item)
+    }
+
     // MARK: - Search cache
 
     /// Opens and fully reconciles the rebuildable cache. AppModel starts this
@@ -374,6 +381,15 @@ actor VaultService {
         try AtomicFile.write(doc.serialized(), to: transcriptURL)
     }
 
+    /// Per-entry silence source. Re-read and atomically rewrite only the
+    /// frontmatter line so concurrent metadata and unknown YAML survive.
+    func setSilenceDetectionMode(
+        _ mode: SilenceDetectionMode, atEntryPath relPath: RelativePath
+    ) throws {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        try EntryMetadata.setSilenceDetectionMode(mode, inEntry: entryURL)
+    }
+
     // MARK: - Transcription (M3)
 
     /// Applies one finished transcription (correction backstop, archive,
@@ -435,6 +451,47 @@ actor VaultService {
             trimmedFileAt: exported.url,
             fileName: exported.fileName,
             newDuration: newDuration,
+            toEntryAt: relPath
+        )
+        synchronizeSearchIndex(relativePaths: [relPath])
+        return outcome
+    }
+
+    /// Removes detected silence runs longer than 1.5 seconds, validates a
+    /// rendered M4A, and safely stages the original before installing it.
+    /// The caller owns player coordination and full retranscription queueing.
+    func compressAudio(
+        atEntryPath relPath: RelativePath
+    ) async throws -> AudioCompressionApplier.Outcome {
+        guard let audioName = audioFileName(atEntryPath: relPath) else {
+            throw VaultError.notFound(relPath.appendingComponent("audio"))
+        }
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        let audioURL = entryURL.appending(path: audioName)
+        // The persisted frontmatter is authoritative at mutation time. A
+        // stale view can never route a destructive edit through another mode.
+        let mode = readTranscript(atEntryPath: relPath)?.silenceDetectionMode ?? .waveform
+        let plan = try await AudioCompressionPlanner.makePlan(
+            mode: mode, audioURL: audioURL, entryURL: entryURL
+        )
+        guard !plan.removedIntervals.isEmpty else {
+            throw AudioCompressionError.noLongSilence
+        }
+        let rendered = try await AudioCompressionRenderer.render(
+            sourceURL: audioURL, plan: plan
+        )
+        defer { try? FileManager.default.removeItem(at: rendered.url.deletingLastPathComponent()) }
+        let sourceSize = try audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        let renderedSize = try rendered.url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard sourceSize == 0 || renderedSize < sourceSize else {
+            throw AudioCompressionError.notSmaller
+        }
+        let outcome = try AudioCompressionApplier(vaultRoot: rootURL).apply(
+            renderedFileAt: rendered.url,
+            expectedSourceFileName: audioName,
+            sourceDuration: plan.sourceDuration,
+            compressedDuration: rendered.duration,
+            removedDuration: plan.removedDuration,
             toEntryAt: relPath
         )
         synchronizeSearchIndex(relativePaths: [relPath])
