@@ -1,24 +1,26 @@
 # Transcride project state
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 Release line: 1.1.0 (build 2)
-Verified gate: Milestone 6, 14/14 human checks
+Verified gate: Milestone 7, 17/17 human checks
 Platform: macOS 15+, Apple silicon, Swift 6, SwiftUI
 
 ## Product state
 
-Milestones 1–6 are complete. Version 1.1 delivers the complete local workflow:
+Milestones 1–7 are complete. Version 1.1 delivers the complete local workflow:
 record or import audio, transcribe it on-device, review it against synchronized
 playback, edit a Markdown layer, search the vault, export or copy the knowledge,
 optionally delete the audio while retaining the note, and safely extend an existing
-recording with full retranscription and version recovery.
+recording with full retranscription and version recovery. Milestone 7 adds
+duration-preserving replacement of a selected audio region with multiple takes,
+contextual audition, recoverable versions, and non-destructive retained sources.
 
 The vault is the product's source of truth. It remains useful without Transcride:
 notes are Markdown, audio uses ordinary media formats, timed transcripts are JSON,
 and entry/folder names are human-readable. The SQLite search index and waveform
 files are derived caches.
 
-The next gated milestone is `PRD-7.md`. Read `PRD-7-start-here.md` first and do not
+The next gated milestone is `PRD-8.md`. Read `PRD-8-start-here.md` first and do not
 begin it merely because the handoff exists; follow the milestone gate in
 `CLAUDE.md`/`AGENTS.md`.
 
@@ -83,6 +85,30 @@ pre-trim audio the same way so it remains recoverable.
 - `.transcript-alignment-stale` is hidden derived state created by audio mutation
   and removed only by `TranscriptionApplier`. While present—or while transcription
   is queued/running—speech skipping is suspended and speech compression is blocked.
+
+### Replacement editing
+
+- Trim and Replace share `AudioRangeSelection` and the generalized
+  `TrimSelectionOverlay`; there is one handle/drag/keyboard/accessibility contract.
+- `ReplacementRegion` locks start and length as integer frames. A complete take is
+  bakeable only when its sample rate matches and its captured length is within one
+  frame of the locked region.
+- `ReplacementTakeSession` persists capture, finalization, audition, render, swap,
+  retranscription, completion, and failure phases. Temporary takes live in
+  `.transcride-replacement-session`; relaunch recovers them but never bakes them.
+- `.transcride-replacements/recipe-v1.json` maps fixed timeline slices to a retained
+  master or take source. Overlap splits existing slices and inserts the newest take
+  without shifting later frames. Missing history never breaks the visible audio;
+  the next replacement adopts the canonical file as a new master.
+- `AudioReplacementRenderer` renders a single ordinary M4A and validates the total
+  frame count. `AudioReplacementApplier` never mutates visible audio in place: it
+  stages the pre-replacement audio, waveform, and matching history in Recently
+  Deleted, installs the validated candidate/history pair, and rolls back on error.
+- Each successful bake marks timed transcript alignment stale and queues exactly one
+  full retranscription through `TranscriptionSeam.Source.replaced`. Hand-edited
+  Markdown remains byte-identical.
+- Debug builds expose one-shot render and safe-swap failures in the Testing menu so
+  the known-good-audio and retry guarantees can be verified in the installed app.
 
 The recording tap must stay `@Sendable`; the sink writes before `liveTee` forwards
 buffers so live transcription can never endanger capture.
@@ -233,11 +259,11 @@ to write only under `DEBUG`.
 
 The detailed post-v1 sequence is already written:
 
-- `PRD-7.md`: duration-preserving replacement of a selected audio region with
-  multiple takes and non-destructive source retention. Reuse the trim selector,
-  explicit recorder target model, extension safe-swap invariants, and transcription
-  seam without changing later timeline positions.
-- `PRD-8.md`: global recording controls from the menu bar and system-wide shortcut,
+- `PRD-7.md`: complete and human-verified on 2026-07-12. Duration-preserving
+  replacement uses the shared trim selector, explicit replacement recording target,
+  retained-source recipe, safe swap, and full retranscription without shifting later
+  timeline positions.
+- `PRD-8.md`: next gated milestone; global recording controls from the menu bar and system-wide shortcut,
   reusing the single-recorder and crash-recovery contracts.
 - `PRD-9.md`: an editor workbench for note structure and presentation.
 - `PRD-10.md`: a third Original / Edited / Summary layer backed by a basic,

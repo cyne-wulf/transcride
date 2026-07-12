@@ -129,23 +129,23 @@ The replacement has exactly the selected duration, so the total recording length
 
 **Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. Fix failures and re-run affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [ ] Open an entry's three-dot menu: Replace Audio… appears there. Confirm it appears nowhere else—no playback-pill button, menu-bar command, shortcut listing, or global control.
-- [ ] Enter Replace: the waveform uses the same handles and behavior as Trim. Select a distinctive spoken phrase and verify the exact start, end, and duration are clear.
-- [ ] Record Take 1: after the countdown it records for exactly the selected duration and stops automatically. Record two more attempts; all three remain independently playable.
-- [ ] Stop one attempt early: it is labeled Incomplete, remains playable/exportable, and Bake is disabled for it rather than padding or stretching it silently.
-- [ ] Preview each complete take In Context: the lead-in and lead-out come from current audio, only the selected range changes, and no vault files/transcripts are committed during preview.
-- [ ] Choose Take 2 and bake it: the resulting audio contains Take 2 in exactly the range, the total duration is unchanged, both boundaries are free of clicks, and unchosen takes were not accidentally mixed.
-- [ ] Full retranscription runs once. The new Original matches the baked audio and word timing/click-to-seek/karaoke remain aligned before, inside, and after the replaced range.
-- [ ] Repeat on a hand-edited entry: the Edited Markdown is byte-identical and the app clearly says it was left untouched.
-- [ ] Invoke Replace again and bake a second region, then replace part of the first baked region. The newest take supersedes only its selected interval and all other baked edits remain audible.
-- [ ] Run the repeated-bake stress fixture: timeline duration and later cue positions do not drift, untouched regions do not accumulate audible transcoding damage, and no clip-count limit appears.
-- [ ] Remove the hidden replacement-history directory in a copy of the vault: the current composite still plays/exports normally and a future Replace can begin from it as a new master.
-- [ ] Restore a pre-replacement version from Recently Deleted: audio, waveform, edit-history baseline, and retranscription state return consistently.
-- [ ] Force a render/swap failure: the prior canonical audio remains playable and all complete takes remain available to retry.
-- [ ] Force-kill during take capture and during bake: relaunch retains recoverable audio, never auto-bakes an uncertain take, and never commits the same take twice.
-- [ ] VoiceOver and keyboard navigation can select a range precisely, record/switch/play takes, understand complete vs incomplete, and confirm Bake.
-- [ ] Regression: Trim still uses the shared selector correctly; normal Record, Extend, playback, delete/restore audio, and transcription still work.
-- [ ] `xcodebuild test` passes.
+- [x] Open an entry's three-dot menu: Replace Audio… appears there. Confirm it appears nowhere else—no playback-pill button, menu-bar command, shortcut listing, or global control.
+- [x] Enter Replace: the waveform uses the same handles and behavior as Trim. Select a distinctive spoken phrase and verify the exact start, end, and duration are clear.
+- [x] Record Take 1: after the countdown it records for exactly the selected duration and stops automatically. Record two more attempts; all three remain independently playable.
+- [x] Stop one attempt early: it is labeled Incomplete, remains playable/exportable, and Bake is disabled for it rather than padding or stretching it silently.
+- [x] Preview each complete take In Context: the lead-in and lead-out come from current audio, only the selected range changes, and no vault files/transcripts are committed during preview.
+- [x] Choose Take 2 and bake it: the resulting audio contains Take 2 in exactly the range, the total duration is unchanged, both boundaries are free of clicks, and unchosen takes were not accidentally mixed.
+- [x] Full retranscription runs once. The new Original matches the baked audio and word timing/click-to-seek/karaoke remain aligned before, inside, and after the replaced range.
+- [x] Repeat on a hand-edited entry: the Edited Markdown is byte-identical and the app clearly says it was left untouched.
+- [x] Invoke Replace again and bake a second region, then replace part of the first baked region. The newest take supersedes only its selected interval and all other baked edits remain audible.
+- [x] Run the repeated-bake stress fixture: timeline duration and later cue positions do not drift, untouched regions do not accumulate audible transcoding damage, and no clip-count limit appears.
+- [x] Remove the hidden replacement-history directory in a copy of the vault: the current composite still plays/exports normally and a future Replace can begin from it as a new master.
+- [x] Restore a pre-replacement version from Recently Deleted: audio, waveform, edit-history baseline, and retranscription state return consistently.
+- [x] Force a render/swap failure: the prior canonical audio remains playable and all complete takes remain available to retry.
+- [x] Force-kill during take capture and during bake: relaunch retains recoverable audio, never auto-bakes an uncertain take, and never commits the same take twice.
+- [x] VoiceOver and keyboard navigation can select a range precisely, record/switch/play takes, understand complete vs incomplete, and confirm Bake.
+- [x] Regression: Trim still uses the shared selector correctly; normal Record, Extend, playback, delete/restore audio, and transcription still work.
+- [x] `xcodebuild test` passes.
 
 ## Handoff (required, after the checklist is verified)
 
