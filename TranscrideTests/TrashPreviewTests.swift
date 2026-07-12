@@ -57,6 +57,7 @@ struct TrashPreviewTests {
             TrashItemKind.preTrimAudio,
             .preExtensionAudio,
             .preCompressionAudio,
+            .preReplacementAudio,
         ] {
             let (root, entryPath) = try makeVault()
             defer { try? FileManager.default.removeItem(at: root) }
@@ -68,6 +69,8 @@ struct TrashPreviewTests {
                 try store.trashPreExtensionAudio(atEntryPath: entryPath)
             case .preCompressionAudio:
                 try store.trashPreCompressionAudio(atEntryPath: entryPath)
+            case .preReplacementAudio:
+                try store.trashPreReplacementAudio(atEntryPath: entryPath)
             default:
                 Issue.record("Unexpected test kind")
             }

@@ -26,8 +26,10 @@ struct RecorderBar: View {
             case .finalizing:
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
-                    Text(recorder.extensionSession == nil
-                        ? "Finalizing recording…" : "Appending extension safely…")
+                Text(recorder.extensionSession == nil
+                        ? (isReplacementTake
+                            ? "Finalizing replacement take…" : "Finalizing recording…")
+                        : "Appending extension safely…")
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -146,9 +148,9 @@ struct RecorderBar: View {
                     .contentTransition(.numericText())
                     .frame(minWidth: 96, alignment: .trailing)
 
-                pauseResumeButton
+                if !isReplacementTake { pauseResumeButton }
                 stopButton
-                zenButton
+                if !isReplacementTake { zenButton }
             }
 
             LiveWaveformView(peaks: recorder.livePeaks)
@@ -164,10 +166,16 @@ struct RecorderBar: View {
     }
 
     private var recorderLabel: String {
+        if isReplacementTake { return "Replacement Take" }
         if recorder.extensionSession != nil {
             return recorder.state == .paused ? "Extension Paused" : "Extending"
         }
         return recorder.state == .paused ? "Paused" : "Recording"
+    }
+
+    private var isReplacementTake: Bool {
+        if case .replacementTake? = recorder.sessionTarget { return true }
+        return false
     }
 
     private var pauseResumeButton: some View {
@@ -192,10 +200,12 @@ struct RecorderBar: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Stop and Save Recording")
-        .accessibilityHint("Stops recording and saves it to the current vault")
+        .accessibilityLabel(isReplacementTake ? "Stop Replacement Take Early" : "Stop and Save Recording")
+        .accessibilityHint(isReplacementTake
+            ? "Stops before the locked duration and keeps an incomplete take"
+            : "Stops recording and saves it to the current vault")
         .accessibilityIdentifier("stop-recording-button")
-        .help("Stop and Save")
+        .help(isReplacementTake ? "Stop Early — keep as Incomplete Take" : "Stop and Save")
     }
 
     private var zenButton: some View {

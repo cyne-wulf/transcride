@@ -1,8 +1,11 @@
 import AVFoundation
 import Foundation
 
-/// The kept range of a trim (AUD-3), in seconds from the start of the audio.
-struct TrimSelection: Equatable, Sendable {
+/// A duration-preserving range in seconds from the start of an audio timeline.
+/// Trim interprets it as the material to keep; Replace interprets it as the
+/// material to substitute. Keeping the math here prevents the two tools from
+/// developing subtly different clamping and precision behavior.
+struct AudioRangeSelection: Equatable, Codable, Sendable {
     var start: Double
     var end: Double
 
@@ -13,9 +16,29 @@ struct TrimSelection: Equatable, Sendable {
 
     var length: Double { max(0, end - start) }
 
-    func clamped(toDuration duration: Double) -> TrimSelection {
+    static func normalized(_ first: Double, _ second: Double) -> Self {
+        Self(start: min(first, second), end: max(first, second))
+    }
+
+    func clamped(toDuration duration: Double) -> AudioRangeSelection {
         let start = min(max(0, start), duration)
-        return TrimSelection(start: start, end: min(max(start, end), duration))
+        return AudioRangeSelection(start: start, end: min(max(start, end), duration))
+    }
+
+    func isValidReplacement(ofDuration duration: Double) -> Bool {
+        guard duration > 0 else { return false }
+        let clamped = clamped(toDuration: duration)
+        return clamped.length >= Self.minimumKeptSeconds
+            && clamped.start >= 0
+            && clamped.end <= duration
+    }
+
+    /// The initial Replace range must occupy enough horizontal waveform space
+    /// for both handles to remain distinct. Five seconds is comfortable for
+    /// ordinary memos; long recordings use 5% of their timeline instead.
+    static func initialReplacementSelection(forDuration duration: Double) -> Self {
+        guard duration > 0 else { return Self(start: 0, end: 0) }
+        return Self(start: 0, end: min(duration, max(5, duration * 0.05)))
     }
 
     /// A selection is worth applying only when it keeps a playable length and
@@ -28,6 +51,127 @@ struct TrimSelection: Equatable, Sendable {
             || clamped.end < duration - Self.edgeTolerance
     }
 }
+
+/// Pure pointer math for the shared Trim/Replace range selector. The SwiftUI
+/// overlay creates one of these when a pointer sequence begins and keeps that
+/// target for the entire gesture, so a handle cannot turn into a seek or a
+/// region drag after crossing another hit area.
+struct AudioRangeSelectionPointerInteraction: Equatable, Sendable {
+    enum Target: Equatable, Sendable {
+        case firstHandle
+        case secondHandle
+        case region
+        case waveform
+    }
+
+    /// Allow ordinary click jitter without turning a seek into a range edit.
+    /// Three points proved too sensitive with a mouse or trackpad and made the
+    /// selected region appear to contain a large, intermittent dead zone.
+    static let dragThreshold: Double = 6
+
+    let target: Target
+    let initialSelection: AudioRangeSelection
+    let pointerDownX: Double
+    let width: Double
+    let duration: Double
+
+    init(
+        selection: AudioRangeSelection,
+        duration: Double,
+        width: Double,
+        pointerDownX: Double,
+        handleHitWidth: Double,
+        isLocked: Bool
+    ) {
+        self.initialSelection = selection
+        self.duration = duration
+        self.width = width
+        self.pointerDownX = pointerDownX
+
+        guard !isLocked, duration > 0, width > 0 else {
+            target = .waveform
+            return
+        }
+
+        let startX = Self.x(forTime: selection.start, duration: duration, width: width)
+        let endX = Self.x(forTime: selection.end, duration: duration, width: width)
+        let hitsFirst = pointerDownX >= startX
+            && pointerDownX <= startX + handleHitWidth
+        let hitsSecond = pointerDownX >= endX - handleHitWidth
+            && pointerDownX <= endX
+
+        if hitsFirst && hitsSecond {
+            target = abs(pointerDownX - startX) <= abs(pointerDownX - endX)
+                ? .firstHandle : .secondHandle
+        } else if hitsFirst {
+            target = .firstHandle
+        } else if hitsSecond {
+            target = .secondHandle
+        } else if pointerDownX >= startX && pointerDownX <= endX {
+            target = .region
+        } else {
+            target = .waveform
+        }
+    }
+
+    func isDrag(at currentX: Double) -> Bool {
+        abs(currentX - pointerDownX) >= Self.dragThreshold
+    }
+
+    func selection(at currentX: Double) -> AudioRangeSelection {
+        guard duration > 0, width > 0, isDrag(at: currentX) else {
+            return initialSelection
+        }
+        let delta = (currentX - pointerDownX) / width * duration
+        switch target {
+        case .firstHandle:
+            return AudioRangeSelection.normalized(
+                min(duration, max(0, initialSelection.start + delta)),
+                initialSelection.end
+            ).clamped(toDuration: duration)
+        case .secondHandle:
+            return AudioRangeSelection.normalized(
+                initialSelection.start,
+                min(duration, max(0, initialSelection.end + delta))
+            ).clamped(toDuration: duration)
+        case .region:
+            let length = initialSelection.length
+            let nextStart = min(
+                max(0, initialSelection.start + delta),
+                max(0, duration - length)
+            )
+            return AudioRangeSelection(start: nextStart, end: nextStart + length)
+        case .waveform:
+            return initialSelection
+        }
+    }
+
+    /// Background pointer movement scrubs continuously. A click anywhere seeks
+    /// on mouse-up, including inside a handle's enlarged hit target; an actual
+    /// handle or region drag edits the selection instead.
+    func seekFraction(at currentX: Double) -> Double? {
+        guard width > 0 else { return nil }
+        switch target {
+        case .waveform:
+            return min(1, max(0, currentX / width))
+        case .firstHandle where !isDrag(at: currentX):
+            return min(1, max(0, currentX / width))
+        case .secondHandle where !isDrag(at: currentX):
+            return min(1, max(0, currentX / width))
+        case .region where !isDrag(at: currentX):
+            return min(1, max(0, currentX / width))
+        case .firstHandle, .secondHandle, .region:
+            return nil
+        }
+    }
+
+    private static func x(forTime time: Double, duration: Double, width: Double) -> Double {
+        min(1, max(0, time / duration)) * width
+    }
+}
+
+/// Source compatibility for the established Trim API.
+typealias TrimSelection = AudioRangeSelection
 
 enum AudioTrimError: LocalizedError {
     case exporterUnavailable

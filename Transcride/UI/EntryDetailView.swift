@@ -201,7 +201,7 @@ struct EntryDetailView: View {
         }
         .contentShape(Rectangle())
         .onExitCommand {
-            if isTrimming { isTrimming = false }
+            model.handleExitCommand()
         }
         .onChange(of: isTrimming) { _, active in
             model.setTrimModeActive(active)
@@ -264,7 +264,7 @@ struct EntryDetailView: View {
                 } label: {
                     Label("Retranscribe", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .disabled(!entry.hasAudio)
+                .disabled(!entry.hasAudio || model.replacementModeActive)
                 .help(entry.audioUnavailableExplanation
                     ?? (entry.hasAudio
                         ? "Retranscribe with a different model"
@@ -298,6 +298,13 @@ struct EntryDetailView: View {
                         .disabled(model.extensionBlockReason(for: entry) != nil)
                         .help(model.extensionBlockReason(for: entry)?.explanation
                             ?? "Extend Recording")
+                        Button("Replace Audio…") {
+                            isTrimming = false
+                            model.beginReplacement(for: entry)
+                        }
+                        .disabled(model.replacementBlockedReason(for: entry) != nil)
+                        .help(model.replacementBlockedReason(for: entry)
+                            ?? "Replace an exact selected region with a new take")
                         Divider()
                     }
                     if entry.hasAudio || entry.audioDeleted {
@@ -451,6 +458,8 @@ struct EntryDetailView: View {
         entry.hasAudio
             && model.recorder.currentEntryPath != entry.relativePath
             && !model.compressingEntryPaths.contains(entry.relativePath)
+            && !model.clipMutationEntryPaths.contains(entry.relativePath)
+            && !model.replacementModeActive
     }
 
     // MARK: - Trim (AUD-3)
@@ -458,9 +467,7 @@ struct EntryDetailView: View {
     /// Trimming needs stable audio: not mid-recording and not being read by a
     /// queued or running transcription.
     private func canTrim(_ entry: Entry) -> Bool {
-        canDeleteAudio(entry)
-            && model.transcriptionQueue?.items
-                .contains(where: { $0.entryRelativePath == entry.relativePath }) != true
+        model.trimBlockedReason(for: entry, duration: entry.duration) == nil
     }
 
     private func canCompress(_ entry: Entry) -> Bool {
@@ -591,6 +598,12 @@ private struct PlaybackSection: View {
     @State private var trimStart: Double = 0
     @State private var trimEnd: Double = 0
     @State private var showingTrimConfirm = false
+    @State private var replacementStart: Double = 0
+    @State private var replacementEnd: Double = 0
+    @State private var replacementInitializedEntryPath: RelativePath?
+    @State private var showingBakeConfirm = false
+    @State private var showingChangeRegionConfirm = false
+    @State private var replacementCompositeWaveform: WaveformData?
 
     private var player: PlayerService { model.player }
 
@@ -604,19 +617,24 @@ private struct PlaybackSection: View {
         TrimSelection(start: trimStart, end: trimEnd)
     }
 
+    private var replacementSelection: AudioRangeSelection {
+        AudioRangeSelection(start: replacementStart, end: replacementEnd)
+    }
+
+    private var isReplacing: Bool {
+        model.replacementEntryPath == entry.relativePath
+    }
+
+    private var displayedWaveform: WaveformData? {
+        if isReplacing, let replacementCompositeWaveform {
+            return replacementCompositeWaveform
+        }
+        return waveform
+    }
+
     /// Why trim mode can't start right now; nil when it can.
     private var trimBlockedReason: String? {
-        if model.recorder.currentEntryPath == entry.relativePath {
-            return "Stop the recording before trimming."
-        }
-        if model.transcriptionQueue?.items
-            .contains(where: { $0.entryRelativePath == entry.relativePath }) == true {
-            return "Wait for the transcription to finish before trimming."
-        }
-        if trimDuration <= TrimSelection.minimumKeptSeconds {
-            return "This audio is too short to trim."
-        }
-        return nil
+        model.trimBlockedReason(for: entry, duration: trimDuration)
     }
 
     /// Controls grow modestly with the detail column while preserving the
@@ -639,6 +657,8 @@ private struct PlaybackSection: View {
         VStack(spacing: 8 * controlScale) {
             if isActiveExtension {
                 extensionShelf
+            } else if isReplacing {
+                waveformShelf
             } else {
                 waveformShelf
 
@@ -664,6 +684,7 @@ private struct PlaybackSection: View {
             waveformError = nil
             do {
                 waveform = try await model.waveform(for: entry)
+                rebuildReplacementCompositeWaveform()
                 if let waveform {
                     model.player.setWaveformForSilenceSkipping(
                         waveform, entryID: entry.relativePath
@@ -676,13 +697,44 @@ private struct PlaybackSection: View {
             }
         }
         .onChange(of: isTrimming) { _, trimming in
-            guard trimming else { return }
+            guard trimming else {
+                player.clearPlaybackRange()
+                return
+            }
             guard trimBlockedReason == nil else {
                 isTrimming = false
                 return
             }
             trimStart = 0
             trimEnd = trimDuration
+            player.setPlaybackRange(start: trimStart, end: trimEnd)
+        }
+        .onChange(of: trimStart) { _, start in
+            guard isTrimming else { return }
+            player.setPlaybackRange(start: start, end: trimEnd)
+        }
+        .onChange(of: trimEnd) { _, end in
+            guard isTrimming else { return }
+            player.setPlaybackRange(start: trimStart, end: end)
+        }
+        .onChange(of: model.replacementEntryPath, initial: true) { _, path in
+            guard path == entry.relativePath else {
+                replacementInitializedEntryPath = nil
+                replacementCompositeWaveform = nil
+                return
+            }
+            initializeReplacementSelectionIfNeeded()
+            rebuildReplacementCompositeWaveform()
+        }
+        .onChange(of: model.replacementTakeWaveformID, initial: true) { _, _ in
+            rebuildReplacementCompositeWaveform()
+        }
+        .onChange(of: model.replacementSession?.selectedTakeID, initial: true) { _, _ in
+            rebuildReplacementCompositeWaveform()
+        }
+        .onChange(of: trimDuration, initial: true) { _, _ in
+            guard isReplacing else { return }
+            initializeReplacementSelectionIfNeeded()
         }
         .confirmationDialog(
             "Trim “\(entry.displayTitle)” to the selected range?",
@@ -698,11 +750,72 @@ private struct PlaybackSection: View {
         } message: {
             Text(trimConfirmMessage)
         }
+        .confirmationDialog(
+            "Bake the selected take into “\(entry.displayTitle)” ?",
+            isPresented: $showingBakeConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Bake Selected Take", role: .destructive) {
+                Task { await model.bakeSelectedReplacement() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The chosen take replaces exactly the selected time range. The full audio is re-transcribed; a hand-edited note remains untouched. The prior audio version stays recoverable in Recently Deleted.")
+        }
+        .confirmationDialog(
+            "Change the replacement region?",
+            isPresented: $showingChangeRegionConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Discard Takes and Change Region", role: .destructive) {
+                Task {
+                    await model.cancelReplacement()
+                    model.beginReplacement(for: entry)
+                }
+            }
+            Button("Keep Current Region", role: .cancel) {}
+        } message: {
+            Text("All temporary takes for this locked region will be discarded. The entry audio and transcripts remain unchanged.")
+        }
     }
 
     private var isActiveExtension: Bool {
         model.recorder.currentEntryPath == entry.relativePath
             && model.recorder.extensionSession != nil
+    }
+
+    private func initializeReplacementSelectionIfNeeded() {
+        guard trimDuration > 0,
+              replacementInitializedEntryPath != entry.relativePath else { return }
+        if let session = model.replacementSession,
+           session.entryRelativePath == entry.relativePath {
+            replacementStart = session.region.start
+            replacementEnd = session.region.end
+        } else {
+            let initial = AudioRangeSelection.initialReplacementSelection(
+                forDuration: trimDuration
+            )
+            replacementStart = initial.start
+            replacementEnd = initial.end
+        }
+        replacementInitializedEntryPath = entry.relativePath
+    }
+
+    private func rebuildReplacementCompositeWaveform() {
+        guard isReplacing,
+              let waveform,
+              let session = model.replacementSession,
+              let selectedTakeID = session.selectedTakeID,
+              model.replacementTakeWaveformID == selectedTakeID,
+              let takeWaveform = model.replacementTakeWaveform else {
+            replacementCompositeWaveform = nil
+            return
+        }
+        replacementCompositeWaveform = waveform.previewReplacing(
+            start: session.region.start,
+            end: session.region.end,
+            with: takeWaveform
+        )
     }
 
     private var extensionShelf: some View {
@@ -778,13 +891,30 @@ private struct PlaybackSection: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
                 .overlay {
                     if isTrimming, waveform != nil {
-                        TrimSelectionOverlay(start: $trimStart, end: $trimEnd, duration: trimDuration)
+                        TrimSelectionOverlay(
+                            start: $trimStart,
+                            end: $trimEnd,
+                            duration: trimDuration,
+                            onSeek: { player.seek(toFraction: $0) }
+                        )
                             .padding(.horizontal, 8)
+                    } else if isReplacing, waveform != nil {
+                        AudioRangeSelectionOverlay(
+                            start: $replacementStart,
+                            end: $replacementEnd,
+                            duration: trimDuration,
+                            purpose: .replace,
+                            isLocked: model.replacementSession != nil,
+                            onSeek: { player.seek(toFraction: $0) }
+                        )
+                        .padding(.horizontal, 8)
                     }
                 }
 
             if isTrimming {
                 trimControls
+            } else if isReplacing {
+                replacementControls
             } else {
                 HStack {
                     Text("0:00")
@@ -797,6 +927,180 @@ private struct PlaybackSection: View {
                 .foregroundStyle(.secondary)
             }
         }
+    }
+
+    @ViewBuilder
+    private var replacementControls: some View {
+        VStack(spacing: 9) {
+            Text("Replace \(EntryListView.formatDuration(replacementStart)) – "
+                + "\(EntryListView.formatDuration(replacementEnd)) · "
+                + EntryListView.formatDuration(
+                    model.replacementSession?.region.duration ?? replacementSelection.length
+                ))
+                .font(.callout.weight(.semibold).monospacedDigit())
+
+            if model.replacementSession == nil {
+                HStack(spacing: 6) {
+                    Button("−0.01 Start") {
+                        replacementStart = max(0, replacementStart - 0.01)
+                    }
+                    Button("+0.01 Start") {
+                        replacementStart = min(replacementEnd - 0.5, replacementStart + 0.01)
+                    }
+                    Button("−0.01 End") {
+                        replacementEnd = max(replacementStart + 0.5, replacementEnd - 0.01)
+                    }
+                    Button("+0.01 End") {
+                        replacementEnd = min(trimDuration, replacementEnd + 0.01)
+                    }
+                }
+                .font(.caption)
+                .controlSize(.small)
+            }
+
+            replacementTransport
+
+            if let label = model.replacementPreviewLabel {
+                Text("Hearing: \(label)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if model.recorder.currentEntryPath == entry.relativePath,
+               case .replacementTake? = model.recorder.sessionTarget {
+                VStack(spacing: 7) {
+                    ProgressView(
+                        value: min(model.recorder.elapsed,
+                                   model.replacementSession?.region.duration ?? 1),
+                        total: model.replacementSession?.region.duration ?? 1
+                    )
+                    Text("Recording Take \((model.replacementSession?.takes.count ?? 0) + 1) · "
+                        + EntryListView.formatDuration(model.recorder.elapsed))
+                        .font(.caption.monospacedDigit())
+                    Button("Stop Early") {
+                        Task { await model.stopReplacementTake() }
+                    }
+                    .help("Keep this attempt as an Incomplete Take")
+                }
+            } else if let session = model.replacementSession {
+                if !session.takes.isEmpty {
+                    VStack(spacing: 5) {
+                        ForEach(session.takes) { take in
+                            HStack(spacing: 7) {
+                                Button {
+                                    Task { await model.selectReplacementTake(take) }
+                                } label: {
+                                    Image(systemName: session.selectedTakeID == take.id
+                                        ? "checkmark.circle.fill" : "circle")
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(take.status != .complete)
+                                Text("Take \(take.number)")
+                                    .fontWeight(.semibold)
+                                Text(EntryListView.formatDuration(take.duration))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                Text(take.createdAt.formatted(date: .omitted, time: .shortened))
+                                    .foregroundStyle(.tertiary)
+                                if take.status == .incomplete {
+                                    Text("Incomplete")
+                                        .foregroundStyle(.orange)
+                                }
+                                Spacer()
+                                Button("Play") { Task { await model.playReplacementTake(take) } }
+                                Button("Play in Context") {
+                                    Task { await model.previewReplacementInContext(take) }
+                                }
+                                .disabled(take.status != .complete)
+                                if let url = model.replacementTakeURL(take) {
+                                    ShareLink(item: url) {
+                                        Image(systemName: "square.and.arrow.up")
+                                    }
+                                    .help("Export Take \(take.number)")
+                                }
+                                Button(role: .destructive) {
+                                    Task { await model.deleteReplacementTake(take) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .help("Delete Take \(take.number)")
+                            }
+                            .font(.caption)
+                        }
+                    }
+                    .padding(8)
+                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
+                }
+
+                HStack(spacing: 9) {
+                    Button("Cancel") { Task { await model.cancelReplacement() } }
+                    Button("Change Region…") { showingChangeRegionConfirm = true }
+                        .disabled(session.takes.isEmpty)
+                    Spacer()
+                    Button("Try Again") {
+                        Task { await model.startReplacementTake(for: entry, selection: replacementSelection) }
+                    }
+                    Button("Bake Selected Take…") { showingBakeConfirm = true }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!session.selectedTakeCanBake)
+                }
+            } else {
+                HStack(spacing: 12) {
+                    Button("Cancel") { Task { await model.cancelReplacement() } }
+                    Spacer()
+                    Button("Record a Take") {
+                        Task { await model.startReplacementTake(for: entry, selection: replacementSelection) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!replacementSelection.isValidReplacement(ofDuration: trimDuration))
+                }
+            }
+        }
+        .frame(maxWidth: 620)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("replacement-controls")
+    }
+
+    private var replacementTransport: some View {
+        let isCapturing = model.recorder.currentEntryPath == entry.relativePath
+            && model.recorder.sessionTarget != nil
+        return HStack(spacing: 22 * controlScale) {
+            TransportButton(
+                systemImage: "gobackward.15",
+                size: 17 * controlScale,
+                help: "Back 15 seconds"
+            ) {
+                player.skip(-15)
+            }
+
+            TransportButton(
+                systemImage: player.isPlaying ? "pause.fill" : "play.fill",
+                size: 24 * controlScale,
+                help: player.isPlaying ? "Pause preview" : "Play preview"
+            ) {
+                player.togglePlayPause()
+            }
+            .accessibilityLabel(player.isPlaying ? "Pause replacement preview" : "Play replacement preview")
+
+            TransportButton(
+                systemImage: "goforward.15",
+                size: 17 * controlScale,
+                help: "Forward 15 seconds"
+            ) {
+                player.skip(15)
+            }
+        }
+        .padding(.horizontal, 22 * controlScale)
+        .padding(.vertical, 6 * controlScale)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.separator.opacity(0.7), lineWidth: 1))
+        .fixedSize()
+        .disabled(isCapturing)
+        .help(isCapturing ? "Playback is unavailable while recording a replacement take." : "Audition and position the loaded audio")
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("replacement-playback-transport")
     }
 
     private var audioDragURL: URL? {
@@ -861,12 +1165,12 @@ private struct PlaybackSection: View {
 
     @ViewBuilder
     private var waveformArea: some View {
-        if let waveform {
+        if let waveform = displayedWaveform {
             WaveformView(peaks: waveform.peaks, progress: player.progress) { fraction in
                 player.seek(toFraction: fraction)
             }
             // In trim mode the drag handles own the waveform surface.
-            .allowsHitTesting(!isTrimming)
+            .allowsHitTesting(!isTrimming && !isReplacing)
         } else if let waveformError {
             ContentUnavailableView {
                 Label("No Waveform", systemImage: "waveform.slash")
@@ -963,8 +1267,8 @@ private struct PlaybackSection: View {
             systemImage: "scissors",
             size: 15 * controlScale,
             help: trimBlockedReason
-                ?? (isTrimming ? "Trimming — drag the yellow handles, then press Trim…"
-                               : "Trim — crop the audio to a selected range"),
+                ?? (isTrimming ? "Trimming — drag the yellow handles, then press Trim… (T to cancel)"
+                               : "Trim — crop the audio to a selected range (T)"),
             tint: isTrimming
                 ? AnyShapeStyle(Color.yellow)
                 : AnyShapeStyle(trimBlockedReason == nil ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
@@ -991,8 +1295,8 @@ private struct PlaybackSection: View {
                 : player.skipSilence
                 ? "Skip Silence: On — skipping pauses longer than "
                     + String(format: "%.1f", SilenceGap.defaultThreshold)
-                    + " seconds. Click to turn off."
-                : "Skip Silence: Off — click to skip pauses longer than "
+                    + " seconds. Click or press S to turn off."
+                : "Skip Silence: Off — click or press S to skip pauses longer than "
                     + String(format: "%.1f", SilenceGap.defaultThreshold)
                     + " seconds.",
             tint: selectedSourceUnavailable

@@ -17,6 +17,7 @@ enum TranscriptionSeam {
         case recorded
         case imported
         case extended
+        case replaced
     }
 
     /// The active vault's queue; owned by `AppModel`, swapped on vault change.

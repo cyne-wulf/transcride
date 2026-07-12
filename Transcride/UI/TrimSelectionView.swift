@@ -3,27 +3,46 @@ import SwiftUI
 /// Trim-mode overlay for the playback waveform (AUD-3): the kept range stays
 /// bright inside a bordered window with draggable edge handles, Voice Memos
 /// style; the discarded portions are dimmed. Times are seconds into the audio.
-struct TrimSelectionOverlay: View {
+struct AudioRangeSelectionOverlay: View {
     @Binding var start: Double
     @Binding var end: Double
     let duration: Double
 
-    /// Time (seconds) under the active handle when its drag began. Cumulative
-    /// drag translations apply against this, not the live value — combining a
-    /// rebuilt handle position with a cumulative translation double-counts.
-    @State private var dragBaseTime: Double?
-    /// Dragging stays local to this overlay. Publishing through the bindings
-    /// on every mouse event would invalidate PlaybackSection and redraw the
-    /// full waveform repeatedly, which is visibly slow on long recordings.
-    @State private var previewStart: Double?
-    @State private var previewEnd: Double?
-    @State private var regionDragBase: TrimSelection?
+    private struct GesturePreview: Equatable {
+        var interaction: AudioRangeSelectionPointerInteraction
+        var currentX: Double
+
+        var selection: AudioRangeSelection {
+            interaction.selection(at: currentX)
+        }
+    }
+
+    /// GestureState resets automatically on completion and cancellation. This
+    /// prevents an interrupted pointer sequence from stranding a drag base and
+    /// making later handle or region drags appear frozen.
+    @GestureState private var gesturePreview: GesturePreview?
+
+    var purpose: Purpose = .trim
+    var isLocked = false
+    var onSeek: ((Double) -> Void)?
+
+    enum Purpose {
+        case trim
+        case replace
+
+        var noun: String { self == .trim ? "trim" : "replacement" }
+    }
 
     private static let handleHitWidth: CGFloat = 28
     private static let visibleHandleWidth: CGFloat = 11
 
-    private var displayedStart: Double { previewStart ?? start }
-    private var displayedEnd: Double { previewEnd ?? end }
+    private var displayedStart: Double {
+        gesturePreview?.selection.start ?? start
+    }
+
+    private var displayedEnd: Double {
+        gesturePreview?.selection.end ?? end
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -38,14 +57,28 @@ struct TrimSelectionOverlay: View {
                     .fill(.black.opacity(0.38))
                     .frame(width: max(0, width - endX))
                     .offset(x: endX)
-                selectionRegion(startX: startX, endX: endX, width: width)
+                selectionRegion(startX: startX, endX: endX)
                 RoundedRectangle(cornerRadius: 5)
                     .strokeBorder(Color.yellow, lineWidth: 2)
                     .frame(width: max(4, endX - startX))
                     .offset(x: startX)
-                handle(atX: startX, width: width, isStart: true)
-                handle(atX: endX, width: width, isStart: false)
+                if !isLocked {
+                    handle(atX: startX, isLeading: true)
+                    handle(atX: endX, isLeading: false)
+                }
             }
+            // Offsets change where the selection and handles are drawn, but
+            // they do not contribute to a ZStack's layout bounds. Without an
+            // explicit full-width frame, the parent gesture's hit-test surface
+            // can stop around the middle of the waveform even while the right
+            // edge and handle remain visibly drawn beyond it.
+            .frame(
+                width: width,
+                height: geometry.size.height,
+                alignment: .leading
+            )
+            .contentShape(Rectangle())
+            .gesture(pointerGesture(width: width))
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("trim-selection-overlay")
@@ -57,40 +90,17 @@ struct TrimSelectionOverlay: View {
         return CGFloat(min(max(0, time / duration), 1)) * width
     }
 
-    private func selectionRegion(startX: CGFloat, endX: CGFloat, width: CGFloat) -> some View {
+    private func selectionRegion(startX: CGFloat, endX: CGFloat) -> some View {
         Rectangle()
             .fill(Color.yellow.opacity(0.11))
             .frame(width: max(4, endX - startX))
-            .contentShape(Rectangle())
             .offset(x: startX)
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard width > 0, duration > 0 else { return }
-                        let base = regionDragBase
-                            ?? TrimSelection(start: displayedStart, end: displayedEnd)
-                        regionDragBase = base
-                        let delta = Double(value.translation.width / width) * duration
-                        let nextStart = min(max(0, base.start + delta), max(0, duration - base.length))
-                        previewStart = nextStart
-                        previewEnd = nextStart + base.length
-                    }
-                    .onEnded { _ in
-                        if let previewStart, let previewEnd {
-                            start = previewStart
-                            end = previewEnd
-                        }
-                        previewStart = nil
-                        previewEnd = nil
-                        regionDragBase = nil
-                    }
-            )
             .help("Drag to move the selected range without changing its length")
-            .accessibilityLabel("Move trim selection")
+            .accessibilityLabel("Move \(purpose.noun) selection")
     }
 
-    private func handle(atX xPosition: CGFloat, width: CGFloat, isStart: Bool) -> some View {
-        ZStack(alignment: isStart ? .leading : .trailing) {
+    private func handle(atX xPosition: CGFloat, isLeading: Bool) -> some View {
+        ZStack(alignment: isLeading ? .leading : .trailing) {
             Color.clear
             RoundedRectangle(cornerRadius: 3)
                 .fill(Color.yellow)
@@ -106,34 +116,79 @@ struct TrimSelectionOverlay: View {
             .contentShape(Rectangle())
             // Keep the entire handle inside the clipped waveform shelf: the
             // start tab grows rightward and the end tab grows leftward.
-            .offset(x: isStart ? xPosition : xPosition - Self.handleHitWidth)
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard width > 0, duration > 0 else { return }
-                        let base = dragBaseTime ?? (isStart ? start : end)
-                        dragBaseTime = base
-                        let proposed = base + Double(value.translation.width / width) * duration
-                        if isStart {
-                            previewStart = min(
-                                max(0, proposed), displayedEnd - TrimSelection.minimumKeptSeconds
-                            )
-                        } else {
-                            previewEnd = max(
-                                min(duration, proposed), displayedStart + TrimSelection.minimumKeptSeconds
-                            )
-                        }
+            .offset(x: isLeading ? xPosition : xPosition - Self.handleHitWidth)
+            .help(isLeading
+                ? "Drag to set where the \(purpose.noun) starts"
+                : "Drag to set where the \(purpose.noun) ends")
+            .accessibilityLabel(isLeading
+                ? "\(purpose.noun.capitalized) start handle"
+                : "\(purpose.noun.capitalized) end handle")
+    }
+
+    private func pointerGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .updating($gesturePreview) { value, preview, _ in
+                guard let interaction = interaction(for: value.startLocation.x, width: width) else {
+                    preview = nil
+                    return
+                }
+                preview = GesturePreview(
+                    interaction: interaction,
+                    currentX: Double(value.location.x)
+                )
+            }
+            .onChanged { value in
+                guard let interaction = interaction(for: value.startLocation.x, width: width),
+                      interaction.target == .waveform,
+                      let fraction = interaction.seekFraction(at: Double(value.location.x)) else {
+                    return
+                }
+                onSeek?(fraction)
+            }
+            .onEnded { value in
+                guard let interaction = interaction(for: value.startLocation.x, width: width) else {
+                    return
+                }
+                let currentX = Double(value.location.x)
+                switch interaction.target {
+                case .firstHandle, .secondHandle:
+                    if interaction.isDrag(at: currentX) {
+                        commit(interaction.selection(at: currentX))
+                    } else if let fraction = interaction.seekFraction(at: currentX) {
+                        onSeek?(fraction)
                     }
-                    .onEnded { _ in
-                        if isStart, let previewStart { start = previewStart }
-                        if !isStart, let previewEnd { end = previewEnd }
-                        previewStart = nil
-                        previewEnd = nil
-                        dragBaseTime = nil
+                case .region:
+                    if interaction.isDrag(at: currentX) {
+                        commit(interaction.selection(at: currentX))
+                    } else if let fraction = interaction.seekFraction(at: currentX) {
+                        onSeek?(fraction)
                     }
-            )
-            .help(isStart ? "Drag to set where the kept audio starts"
-                          : "Drag to set where the kept audio ends")
-            .accessibilityLabel(isStart ? "Trim start handle" : "Trim end handle")
+                case .waveform:
+                    if let fraction = interaction.seekFraction(at: currentX) {
+                        onSeek?(fraction)
+                    }
+                }
+            }
+    }
+
+    private func interaction(
+        for pointerDownX: CGFloat, width: CGFloat
+    ) -> AudioRangeSelectionPointerInteraction? {
+        guard width > 0, duration > 0 else { return nil }
+        return AudioRangeSelectionPointerInteraction(
+            selection: AudioRangeSelection(start: start, end: end),
+            duration: duration,
+            width: Double(width),
+            pointerDownX: Double(pointerDownX),
+            handleHitWidth: Double(Self.handleHitWidth),
+            isLocked: isLocked
+        )
+    }
+
+    private func commit(_ selection: AudioRangeSelection) {
+        start = selection.start
+        end = selection.end
     }
 }
+
+typealias TrimSelectionOverlay = AudioRangeSelectionOverlay

@@ -17,6 +17,9 @@ struct KeyboardShortcutsCommands: Commands {
 }
 
 struct KeyboardShortcutsView: View {
+    @Environment(\.dismissWindow) private var dismissWindow
+    @FocusState private var receivesEscape: Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Label("Keyboard Shortcuts", systemImage: "keyboard")
@@ -53,15 +56,40 @@ struct KeyboardShortcutsView: View {
                         ShortcutRow(
                             keys: ["Z"],
                             title: "Enter Zen mode",
-                            detail: "Distraction-free recording. Esc leaves once the recording is stopped."
+                            detail: "Distraction-free recording. Esc asks before discarding an active recording."
+                        ),
+                        ShortcutRow(
+                            keys: ["Esc"],
+                            title: "Cancel recording",
+                            detail: "Asks for confirmation, then discards an active recording, extension, or replacement take."
                         ),
                     ])
 
                     shortcutSection("Playback", rows: [
                         ShortcutRow(
+                            keys: ["⌘", "Z"],
+                            title: "Undo last clip operation",
+                            detail: "Restores the selected clip's prior audio version. Text fields and the note editor keep native text undo."
+                        ),
+                        ShortcutRow(
+                            keys: ["⌘", "⇧", "Z"],
+                            title: "Redo clip operation",
+                            detail: "Reapplies the selected clip's most recently undone audio version."
+                        ),
+                        ShortcutRow(
                             keys: ["Space"],
                             title: "Play or pause",
                             detail: "While no recording is active."
+                        ),
+                        ShortcutRow(
+                            keys: ["T"],
+                            title: "Toggle trim mode",
+                            detail: "Starts trimming the selected audio clip; press T or Esc to cancel without changing it."
+                        ),
+                        ShortcutRow(
+                            keys: ["S"],
+                            title: "Toggle Skip Silence",
+                            detail: "Turns automatic silence skipping on or off throughout the app."
                         ),
                         ShortcutRow(
                             keys: ["←"],
@@ -74,9 +102,14 @@ struct KeyboardShortcutsView: View {
                             detail: "Moves the playback position forward without changing clip selection."
                         ),
                         ShortcutRow(
+                            keys: ["0", "–", "9"],
+                            title: "Jump through the track",
+                            detail: "0 jumps to the start; 1–8 jump in 10% increments; 9 jumps to the end."
+                        ),
+                        ShortcutRow(
                             keys: ["Esc"],
-                            title: "Cancel trimming",
-                            detail: "Leaves trim mode without changing the audio."
+                            title: "Close or cancel",
+                            detail: "Closes the frontmost popup or window, then exits an active trim, replacement, recording, or Zen mode."
                         ),
                         ShortcutRow(
                             keys: ["["],
@@ -170,6 +203,17 @@ struct KeyboardShortcutsView: View {
         }
         .padding(28)
         .frame(width: 560, height: 620, alignment: .topLeading)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($receivesEscape)
+        .onKeyPress(.escape) {
+            dismissWindow(id: KeyboardShortcutsCommands.windowID)
+            return .handled
+        }
+        .onExitCommand {
+            dismissWindow(id: KeyboardShortcutsCommands.windowID)
+        }
+        .onAppear { receivesEscape = true }
     }
 
     private func shortcutSection(_ title: String, rows: [ShortcutRow]) -> some View {

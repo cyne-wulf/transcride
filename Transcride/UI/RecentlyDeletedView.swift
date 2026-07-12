@@ -87,8 +87,7 @@ struct RecentlyDeletedView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The retained audio replaces the entry's current trim or compression. "
-                + "The derived version is discarded and the entry is re-transcribed.")
+            Text("The retained audio replaces the entry's current version. Matching replacement edit history is restored when available, and the entry is re-transcribed.")
         }
     }
 
@@ -96,7 +95,7 @@ struct RecentlyDeletedView: View {
     /// so it confirms first; every other kind restores immediately.
     private func requestRestore(_ item: TrashItem) {
         if item.kind == .audioVersion || item.kind == .preTrimAudio
-            || item.kind == .preCompressionAudio {
+            || item.kind == .preCompressionAudio || item.kind == .preReplacementAudio {
             restoringPreTrim = item
             showRestorePreTrimPrompt = true
         } else {
@@ -147,6 +146,7 @@ struct RecentlyDeletedView: View {
         case .preTrimAudio: "scissors"
         case .preExtensionAudio: "record.circle"
         case .preCompressionAudio: "arrow.down.right.and.arrow.up.left"
+        case .preReplacementAudio: "waveform.badge.plus"
         case .item: item.isEntry ? "waveform" : "folder"
         }
     }

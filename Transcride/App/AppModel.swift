@@ -171,6 +171,77 @@ final class AppModel {
         trimModeActive = active
     }
 
+    /// Shared trim eligibility for the transport control, menu request, and
+    /// app-wide T shortcut. Keeping this in the model prevents a shortcut from
+    /// entering a mode that the visible control would reject.
+    func trimBlockedReason(for entry: Entry, duration: Double? = nil) -> String? {
+        guard entry.hasAudio else {
+            return entry.audioUnavailableExplanation ?? "No audio is available to trim."
+        }
+        if recorder.currentEntryPath == entry.relativePath {
+            return "Stop the recording before trimming."
+        }
+        if replacementModeActive {
+            return "Finish or cancel replacing audio before trimming."
+        }
+        if compressingEntryPaths.contains(entry.relativePath) {
+            return "Wait for audio compression to finish."
+        }
+        if clipMutationEntryPaths.contains(entry.relativePath) {
+            return "Wait for the current audio operation to finish."
+        }
+        if transcriptionBusyEntryPaths.contains(entry.relativePath) {
+            return "Wait for the transcription to finish before trimming."
+        }
+        if let duration, duration <= TrimSelection.minimumKeptSeconds {
+            return "This audio is too short to trim."
+        }
+        return nil
+    }
+
+    /// T mirrors the scissors control: enter trim when available, or leave an
+    /// active trim without changing the source audio.
+    private func toggleTrimFromShortcut() {
+        if trimModeActive {
+            cancelTrimRequestRevision &+= 1
+            return
+        }
+        guard let entry = selectedEntry else {
+            errorMessage = "Select an audio clip before trimming."
+            return
+        }
+        if let reason = trimBlockedReason(for: entry, duration: entry.duration) {
+            errorMessage = reason
+            return
+        }
+        requestEntryAction(.trim)
+    }
+
+    /// Workflow-level Escape fallback. Native menus, popovers, sheets, alerts,
+    /// and auxiliary windows get the responder-chain command first; this runs
+    /// only after no foreground transient surface consumes it.
+    @discardableResult
+    func handleExitCommand() -> Bool {
+        if isCancelRecordingConfirmationPresented { return false }
+        if recorder.state == .recording || recorder.state == .paused {
+            isCancelRecordingConfirmationPresented = true
+            return true
+        }
+        if let replacementEntryPath {
+            Task { await cancelReplacement(expectedEntryPath: replacementEntryPath) }
+            return true
+        }
+        if trimModeActive {
+            cancelTrimRequestRevision &+= 1
+            return true
+        }
+        if recorder.isZenMode, recorder.state == .idle {
+            recorder.isZenMode = false
+            return true
+        }
+        return false
+    }
+
     var sidebarSelection: SidebarSelection? = .folder("") {
         didSet {
             guard sidebarSelection != oldValue else { return }
@@ -214,7 +285,14 @@ final class AppModel {
     var selectedEntryID: String? {
         didSet {
             // PLY: switching entries stops playback; returning doesn't resume.
-            if selectedEntryID != oldValue { player.unload() }
+            guard selectedEntryID != oldValue else { return }
+            player.unload()
+            // Replace is a focused, entry-local transaction. Navigating away
+            // is an exit from that transaction; retaining its global lock
+            // strands unrelated entry actions until relaunch.
+            if let replacementEntryPath, selectedEntryID != replacementEntryPath {
+                Task { await cancelReplacement(expectedEntryPath: replacementEntryPath) }
+            }
         }
     }
     var selectedTrashItemID: String? {
@@ -225,6 +303,7 @@ final class AppModel {
         }
     }
     var errorMessage: String?
+    var isCancelRecordingConfirmationPresented = false
     /// Informational notice kept separate from errors so a protected edited
     /// layer does not look like a failed retranscription.
     var transcriptNoticeMessage: String?
@@ -232,6 +311,17 @@ final class AppModel {
     private(set) var extensionRecoveries: [RecoverableRecordingExtension] = []
     private(set) var extensionRecoveryProcessingIDs: Set<String> = []
     private(set) var compressingEntryPaths: Set<RelativePath> = []
+    private(set) var clipMutationEntryPaths: Set<RelativePath> = []
+    private(set) var replacementSession: ReplacementTakeSession?
+    private(set) var replacementEntryPath: RelativePath?
+    private(set) var replacementPreviewLabel: String?
+    private(set) var replacementTakeWaveform: WaveformData?
+    private(set) var replacementTakeWaveformID: UUID?
+    private var replacementPreviewURL: URL?
+    private var replacementPreviewTakeID: UUID?
+    private var replacementPreviewGeneration: UUID?
+
+    var replacementModeActive: Bool { replacementEntryPath != nil }
     private(set) var unsupportedExtensionEntryPaths: Set<RelativePath> = []
     var isExtensionRecoveryPresented = false
 
@@ -302,7 +392,11 @@ final class AppModel {
 
     /// Opens `url` as the vault, replacing any current vault.
     func openVault(at url: URL, isSecurityScoped: Bool, saveBookmark: Bool) async {
-        if recorder.isActive {
+        if replacementModeActive {
+            // Finish the old vault's temporary transaction against the old
+            // VaultService before replacing it below.
+            await cancelReplacement()
+        } else if recorder.isActive {
             stopLiveTranscription()
             _ = await recorder.stop() // finalize into the old vault first
         }
@@ -409,6 +503,15 @@ final class AppModel {
         }
         isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
 
+        let replacementDiscovery = await service.replacementTakeSessions()
+        for path in replacementDiscovery.committedEntryPaths {
+            queueExtensionRetranscription(
+                entryRelativePath: path,
+                source: TranscriptionSeam.Source.replaced.rawValue
+            )
+            audioRevision &+= 1
+        }
+
         watcher = FSEventsWatcher(url: url) { [weak self] paths in
             Task {
                 await service.synchronizeSearchIndex(changedAbsolutePaths: paths)
@@ -421,6 +524,24 @@ final class AppModel {
         trashRetentionDays = await service.trashRetentionDays()
         _ = try? await service.purgeTrash()
         await refresh()
+        if let recovered = replacementDiscovery.recoverable.first {
+            replacementSession = recovered
+            replacementEntryPath = recovered.entryRelativePath
+            selectedEntryID = recovered.entryRelativePath
+            replacementPreviewLabel = recovered.takes.isEmpty
+                ? "Recovered replacement session"
+                : "Recovered Take \(recovered.takes.last?.number ?? 1)"
+            if replacementDiscovery.recoverable.count > 1 {
+                recordingRecoveryNoticeMessage = "Recovered \(replacementDiscovery.recoverable.count) replacement sessions. The first is open; no take was baked automatically."
+            } else {
+                recordingRecoveryNoticeMessage = "Recovered a replacement session. Its captured take is available for review and was not baked automatically."
+            }
+            if let selectedTake = recovered.selectedTake {
+                await prepareReplacementPreview(
+                    for: selectedTake, scope: .region, autoplay: false
+                )
+            }
+        }
 
         // The vault is already usable. Index construction starts only after
         // the opening scan and runs on the VaultService actor, so it cannot
@@ -792,7 +913,10 @@ final class AppModel {
     private let escapeKeyCode: UInt16 = 53
     private let deleteKeyCode: UInt16 = 51
     private let zenKeyCode: UInt16 = 6
+    private let undoKeyCode: UInt16 = 6
     private let extendKeyCode: UInt16 = 14
+    private let skipSilenceKeyCode: UInt16 = 1
+    private let trimKeyCode: UInt16 = 17
     private let findKeyCode: UInt16 = 3
     private let leftBracketKeyCode: UInt16 = 33
     private let rightBracketKeyCode: UInt16 = 30
@@ -801,6 +925,15 @@ final class AppModel {
     private let rightArrowKeyCode: UInt16 = 124
     private let downArrowKeyCode: UInt16 = 125
     private let upArrowKeyCode: UInt16 = 126
+
+    /// Top-row and numeric-keypad digit positions. Like common media players,
+    /// 1...8 seek in 10% increments while 9 means the end of the track.
+    private let playbackFractionsByKeyCode: [UInt16: Double] = [
+        29: 0.0, 18: 0.1, 19: 0.2, 20: 0.3, 21: 0.4,
+        23: 0.5, 22: 0.6, 26: 0.7, 28: 0.8, 25: 1.0,
+        82: 0.0, 83: 0.1, 84: 0.2, 85: 0.3, 86: 0.4,
+        87: 0.5, 88: 0.6, 89: 0.7, 91: 0.8, 92: 1.0,
+    ]
 
     /// Returns true when the event was consumed.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
@@ -812,6 +945,16 @@ final class AppModel {
         // shortcuts. Only an actual editor or field editor owns typing keys.
         let editingTextView = focusedTextView?.isEditable == true ? focusedTextView : nil
 
+        if keyCode == escapeKeyCode, modifiers.isEmpty {
+            // Let the responder chain dismiss anything visibly in front of the
+            // workbench. The global fallback is only for altered app modes,
+            // which must cancel even when blank window chrome owns focus.
+            guard editingTextView == nil, !foregroundPresentationOwnsEscape else {
+                return false
+            }
+            return handleExitCommand()
+        }
+
         if keyCode == findKeyCode, modifiers == [.command, .shift] {
             presentVaultSearch()
             return true
@@ -822,8 +965,26 @@ final class AppModel {
             return selectedEntry != nil
         }
 
-        if keyCode == escapeKeyCode, modifiers.isEmpty, trimModeActive {
-            cancelTrimRequestRevision &+= 1
+        if keyCode == undoKeyCode,
+           modifiers == .command || modifiers == [.command, .shift] {
+            // Editable fields and the Markdown editor keep their native
+            // NSText undo manager. Clip history is only active outside text.
+            guard editingTextView == nil else { return false }
+            guard let entry = selectedEntry else {
+                // Match standard macOS undo behavior: with no applicable
+                // document/clip, the command is consumed as a silent no-op.
+                return true
+            }
+            if let reason = clipEditBlockReason(for: entry) {
+                errorMessage = reason
+                return true
+            }
+            Task {
+                await performClipEdit(
+                    modifiers.contains(.shift) ? .redo : .undo,
+                    for: entry
+                )
+            }
             return true
         }
 
@@ -851,10 +1012,28 @@ final class AppModel {
             return true
         }
 
+        if keyCode == trimKeyCode {
+            // Plain T mirrors the trim control from every non-editing pane.
+            // Consuming unavailable attempts also prevents List type-selection
+            // from scrolling the middle pane to titles beginning with T.
+            guard modifiers.isEmpty, editingTextView == nil else { return false }
+            toggleTrimFromShortcut()
+            return true
+        }
+
+        if keyCode == skipSilenceKeyCode {
+            // Skip Silence is an app-wide persisted playback preference, so S
+            // may toggle it even when focus is outside the detail pane.
+            guard modifiers.isEmpty, editingTextView == nil else { return false }
+            player.skipSilence.toggle()
+            return true
+        }
+
         if keyCode == zenKeyCode {
             // Plain Z enters Zen from anywhere except text input. Once Zen is
             // active, Escape remains the deliberate exit control.
             guard modifiers.isEmpty, editingTextView == nil else { return false }
+            if case .replacementTake? = recorder.sessionTarget { return true }
             recorder.isZenMode = true
             return true
         }
@@ -884,6 +1063,15 @@ final class AppModel {
             return true
         }
 
+        if let fraction = playbackFractionsByKeyCode[keyCode] {
+            // Ignore the numeric-pad flag AppKit adds automatically, but do
+            // not steal modified digits or digits typed into an editor.
+            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
+            guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
+            player.seek(toFraction: fraction)
+            return true
+        }
+
         if keyCode == upArrowKeyCode || keyCode == downArrowKeyCode {
             // Option-Up/Down navigates the far-left folder/sidebar pane while
             // leaving keyboard focus in the clip list. Plain Up/Down falls
@@ -898,7 +1086,9 @@ final class AppModel {
             // straight to Recently Deleted. Text editing keeps ownership of
             // either chord while an editable field or note has focus.
             guard modifiers == .command || modifiers == .shift, editingTextView == nil,
-                  let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath
+                  let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath,
+                  !replacementModeActive,
+                  !clipMutationEntryPaths.contains(entry.relativePath)
             else { return false }
             Task { await deleteItem(atRelativePath: entry.relativePath) }
             return true
@@ -912,13 +1102,24 @@ final class AppModel {
                 focusedTextView.insertText(" ", replacementRange: focusedTextView.selectedRange())
                 return true
             }
-            return false // falls through to the File-menu item
+            // Handle the recording intent here instead of falling through to
+            // SwiftUI's menu equivalent, whose dispatch depends on pane focus.
+            switch recorder.state {
+            case .recording, .paused:
+                Task { await stopRecording() }
+            case .finalizing:
+                break // consume repeats while the recording is being installed
+            case .idle:
+                Task { await startRecording() }
+            }
+            return true
         }
         if modifiers.isEmpty, editingTextView == nil {
             // While recording, Space is the pause/resume control; playback
             // only gets Space when the recorder is idle.
             switch recorder.state {
             case .recording:
+                if case .replacementTake? = recorder.sessionTarget { return true }
                 recorder.pause()
                 return true
             case .paused:
@@ -934,6 +1135,20 @@ final class AppModel {
             }
         }
         return false
+    }
+
+    /// Sheets, alerts, SwiftUI popovers, and auxiliary windows own their first
+    /// Escape. `NSPanel` covers AppKit/SwiftUI transient panels; the named
+    /// windows are ordinary NSWindows and therefore need explicit recognition.
+    private var foregroundPresentationOwnsEscape: Bool {
+        guard let window = NSApp.keyWindow else { return false }
+        if window.sheetParent != nil || window.attachedSheet != nil { return true }
+        if window is NSPanel { return true }
+        let identifier = window.identifier?.rawValue
+        return identifier == "keyboard-shortcuts"
+            || identifier == "about"
+            || window.title == "Keyboard Shortcuts"
+            || window.title == "About Transcride"
     }
 
     private func moveSidebarSelection(by offset: Int) -> Bool {
@@ -1000,12 +1215,403 @@ final class AppModel {
         guard entry.hasAudio else { return entry.audioDeleted ? .audioDeleted : .noAudio }
         if recorder.isActive { return .recorderBusy }
         if trimModeActive { return .entryBusy("trimming") }
+        if replacementModeActive { return .entryBusy("replacing audio") }
         if compressingEntryPaths.contains(entry.relativePath) {
             return .entryBusy("compressing")
+        }
+        if clipMutationEntryPaths.contains(entry.relativePath) {
+            return .entryBusy("updating audio")
         }
         if transcriptionBusyEntryPaths.contains(entry.relativePath) { return .transcriptionBusy }
         if unsupportedExtensionEntryPaths.contains(entry.relativePath) { return .unsupportedAudio }
         return nil
+    }
+
+    func replacementBlockedReason(for entry: Entry) -> String? {
+        guard entry.hasAudio else { return entry.audioUnavailableExplanation ?? "No audio is available." }
+        if recorder.isActive { return "Stop the active recording before replacing audio." }
+        if trimModeActive { return "Finish or cancel trimming before replacing audio." }
+        if compressingEntryPaths.contains(entry.relativePath) {
+            return "Wait for audio compression to finish."
+        }
+        if clipMutationEntryPaths.contains(entry.relativePath) {
+            return "Wait for the current audio operation to finish."
+        }
+        if transcriptionBusyEntryPaths.contains(entry.relativePath) {
+            return "Wait for transcription to finish before replacing audio."
+        }
+        if replacementModeActive {
+            return replacementEntryPath == entry.relativePath
+                ? "A replacement session is already active."
+                : "Finish the current replacement session first."
+        }
+        return nil
+    }
+
+    func beginReplacement(for entry: Entry) {
+        guard replacementBlockedReason(for: entry) == nil else { return }
+        player.clearPlaybackRange()
+        player.pause()
+        replacementTakeWaveform = nil
+        replacementTakeWaveformID = nil
+        replacementPreviewTakeID = nil
+        replacementEntryPath = entry.relativePath
+        replacementPreviewLabel = "Current Audio"
+    }
+
+    func startReplacementTake(
+        for entry: Entry, selection: AudioRangeSelection
+    ) async {
+        guard let service, let vaultURL, let audioName = entry.audioFileName,
+              replacementEntryPath == entry.relativePath,
+              !recorder.isActive else { return }
+        // Audition playback must never bleed into microphone capture.
+        player.pause()
+        let session: ReplacementTakeSession
+        if let existing = replacementSession {
+            session = existing
+        } else {
+            let timeline: ReplacementTimeline
+            do {
+                timeline = try await service.replacementTimeline(
+                    entryRelativePath: entry.relativePath, audioFileName: audioName
+                )
+            } catch {
+                errorMessage = "The audio timeline could not be read for replacement: \(error.localizedDescription)"
+                return
+            }
+            let preciseSelection = selection.clamped(toDuration: timeline.duration)
+            guard preciseSelection.isValidReplacement(ofDuration: timeline.duration) else { return }
+            let region = ReplacementRegion(
+                selection: preciseSelection,
+                timelineDuration: timeline.duration,
+                sampleRate: timeline.sampleRate
+            )
+            session = ReplacementTakeSession(
+                entryRelativePath: entry.relativePath,
+                sourceAudioFileName: audioName,
+                timelineDuration: timeline.duration,
+                region: region
+            )
+            replacementSession = session
+        }
+        guard await RecorderService.ensureMicPermission() else {
+            errorMessage = "Transcride needs microphone access to record a replacement take. Enable it in System Settings → Privacy & Security → Microphone, then try again."
+            return
+        }
+        do {
+            var capturing = session
+            capturing.phase = .capturing
+            replacementSession = capturing
+            try await service.saveReplacementSession(capturing)
+            let quality = RecordingQuality(
+                rawValue: UserDefaults.standard.string(forKey: PreferenceKey.recordingQuality) ?? ""
+            ) ?? .compressed
+            let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
+            let target = ReplacementRecordingTarget(
+                entryRelativePath: entry.relativePath,
+                sessionID: capturing.id,
+                region: capturing.region,
+                takeNumber: capturing.takes.count + 1
+            )
+            recorder.onReplacementBoundaryReached = { [weak self] in
+                Task { @MainActor [weak self] in await self?.stopReplacementTake() }
+            }
+            try recorder.start(
+                entryURL: vaultURL.appendingRelativePath(entry.relativePath),
+                relativePath: entry.relativePath,
+                quality: quality,
+                preferredMicUID: micUID,
+                target: .replacementTake(target)
+            )
+            replacementPreviewLabel = "Recording Take \(target.takeNumber)"
+        } catch {
+            replacementSession?.phase = .failed
+            replacementSession?.failureMessage = error.localizedDescription
+            errorMessage = "The replacement take could not start: \(error.localizedDescription)"
+        }
+    }
+
+    func stopReplacementTake() async {
+        guard case .replacementTake? = recorder.sessionTarget,
+              let service, var session = replacementSession else { return }
+        let sessionID = session.id
+        let entryRelativePath = session.entryRelativePath
+        recorder.onReplacementBoundaryReached = nil
+        guard let outcome = await recorder.stop(),
+              let take = outcome.replacementTake else {
+            if replacementSession?.id != sessionID {
+                try? await service.cancelReplacementSession(
+                    entryRelativePath: entryRelativePath
+                )
+                return
+            }
+            errorMessage = recorder.alertMessage ?? "The replacement take could not be finalized."
+            return
+        }
+        // Main-actor methods are re-entrant across recorder finalization. If
+        // Cancel ran meanwhile, do not allow the completed encode to recreate
+        // the discarded ledger; clean it once more after finalization.
+        guard replacementSession?.id == sessionID,
+              replacementEntryPath == entryRelativePath else {
+            try? await service.cancelReplacementSession(entryRelativePath: entryRelativePath)
+            return
+        }
+        session.appendTake(take)
+        replacementSession = session
+        replacementPreviewLabel = take.status == .complete
+            ? "Take \(take.number)" : "Incomplete Take \(take.number)"
+        do {
+            try await service.saveReplacementSession(session)
+        } catch {
+            errorMessage = "The take was captured but its session could not be saved: \(error.localizedDescription)"
+        }
+        if take.status == .complete {
+            await prepareReplacementPreview(for: take, scope: .region, autoplay: false)
+        }
+    }
+
+    func selectReplacementTake(_ take: ReplacementTake) async {
+        if replacementSession?.selectedTakeID == take.id {
+            await prepareReplacementPreview(for: take, scope: .region, autoplay: false)
+            return
+        }
+        replacementSession?.selectedTakeID = take.id
+        replacementTakeWaveform = nil
+        replacementTakeWaveformID = nil
+        if let session = replacementSession, let service {
+            try? await service.saveReplacementSession(session)
+        }
+        if take.status == .complete {
+            await prepareReplacementPreview(for: take, scope: .region, autoplay: false)
+        }
+    }
+
+    func playReplacementTake(_ take: ReplacementTake) async {
+        guard let service, let session = replacementSession else { return }
+        if take.status == .complete {
+            if session.selectedTakeID != take.id {
+                await selectReplacementTake(take)
+            }
+            await prepareReplacementPreview(for: take, scope: .region, autoplay: true)
+            return
+        }
+        let url = await service.replacementTakeURL(
+            entryRelativePath: session.entryRelativePath, fileName: take.fileName
+        )
+        player.clearPlaybackRange()
+        player.load(url: url, knownDuration: take.duration)
+        player.play()
+        replacementPreviewLabel = "Incomplete Take \(take.number)"
+    }
+
+    func replacementTakeURL(_ take: ReplacementTake) -> URL? {
+        guard let vaultURL, let session = replacementSession else { return nil }
+        return vaultURL.appendingRelativePath(session.entryRelativePath)
+            .appending(
+                path: AudioReplacementArtifacts.sessionDirectoryName,
+                directoryHint: .isDirectory
+            )
+            .appending(path: take.fileName)
+    }
+
+    func previewReplacementInContext(_ take: ReplacementTake) async {
+        guard let session = replacementSession, take.status == .complete else { return }
+        if session.selectedTakeID != take.id {
+            await selectReplacementTake(take)
+        }
+        await prepareReplacementPreview(for: take, scope: .fullContext, autoplay: true)
+    }
+
+    private enum ReplacementPreviewScope {
+        case region
+        case fullContext
+    }
+
+    private func prepareReplacementPreview(
+        for take: ReplacementTake,
+        scope: ReplacementPreviewScope,
+        autoplay: Bool
+    ) async {
+        guard let service, let session = replacementSession,
+              session.takes.contains(where: { $0.id == take.id }),
+              take.status == .complete else { return }
+
+        if replacementPreviewTakeID == take.id, replacementPreviewURL != nil,
+           replacementTakeWaveformID == take.id {
+            configureReplacementPlayback(
+                session: session, take: take, scope: scope, autoplay: autoplay
+            )
+            return
+        }
+
+        let generation = UUID()
+        replacementPreviewGeneration = generation
+        player.unload()
+        replacementPreviewLabel = "Preparing Take \(take.number)…"
+        do {
+            let takeWaveform = try await service.replacementTakeWaveform(
+                entryRelativePath: session.entryRelativePath, fileName: take.fileName
+            )
+            guard replacementPreviewGeneration == generation,
+                  replacementSession?.id == session.id,
+                  replacementSession?.selectedTakeID == take.id else { return }
+            replacementTakeWaveform = takeWaveform
+            replacementTakeWaveformID = take.id
+
+            let url = try await service.replacementContextPreview(session: session, take: take)
+            guard replacementPreviewGeneration == generation,
+                  replacementSession?.id == session.id,
+                  replacementSession?.selectedTakeID == take.id else {
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                return
+            }
+            if let old = replacementPreviewURL {
+                try? FileManager.default.removeItem(at: old.deletingLastPathComponent())
+            }
+            replacementPreviewURL = url
+            replacementPreviewTakeID = take.id
+            player.load(url: url, knownDuration: session.timelineDuration)
+            configureReplacementPlayback(
+                session: session, take: take, scope: scope, autoplay: autoplay
+            )
+        } catch {
+            guard replacementPreviewGeneration == generation else { return }
+            errorMessage = "The replacement preview could not be prepared: \(error.localizedDescription)"
+        }
+    }
+
+    private func configureReplacementPlayback(
+        session: ReplacementTakeSession,
+        take: ReplacementTake,
+        scope: ReplacementPreviewScope,
+        autoplay: Bool
+    ) {
+        player.pause()
+        switch scope {
+        case .region:
+            player.setPlaybackRange(start: session.region.start, end: session.region.end)
+            player.seek(to: session.region.start)
+            replacementPreviewLabel = "Take \(take.number) — replacement region"
+        case .fullContext:
+            player.clearPlaybackRange()
+            player.seek(to: 0)
+            replacementPreviewLabel = "Preview in Context — Take \(take.number)"
+        }
+        if autoplay { player.play() }
+    }
+
+    func deleteReplacementTake(_ take: ReplacementTake) async {
+        guard let service, var session = replacementSession,
+              recorder.sessionTarget == nil else { return }
+        do {
+            if replacementPreviewTakeID == take.id {
+                replacementPreviewGeneration = nil
+                player.unload()
+                if let old = replacementPreviewURL {
+                    try? FileManager.default.removeItem(at: old.deletingLastPathComponent())
+                }
+                replacementPreviewURL = nil
+                replacementPreviewTakeID = nil
+            }
+            try await service.deleteReplacementTake(
+                entryRelativePath: session.entryRelativePath, fileName: take.fileName
+            )
+            session.takes.removeAll { $0.id == take.id }
+            if session.selectedTakeID == take.id {
+                session.selectedTakeID = session.takes.last(where: { $0.status == .complete })?.id
+            }
+            replacementSession = session
+            try await service.saveReplacementSession(session)
+            if let selected = session.selectedTake {
+                await prepareReplacementPreview(
+                    for: selected, scope: .region, autoplay: false
+                )
+            } else {
+                replacementTakeWaveform = nil
+                replacementTakeWaveformID = nil
+            }
+        } catch {
+            errorMessage = "The take could not be deleted: \(error.localizedDescription)"
+        }
+    }
+
+    func bakeSelectedReplacement() async {
+        guard let service, let session = replacementSession,
+              let take = session.selectedTake, session.selectedTakeCanBake else { return }
+        player.unload()
+        do {
+            transcriptionQueue?.evictItems(underPath: session.entryRelativePath)
+            _ = try await service.bakeReplacement(session: session, take: take)
+            audioRevision &+= 1
+            queueExtensionRetranscription(
+                entryRelativePath: session.entryRelativePath,
+                source: TranscriptionSeam.Source.replaced.rawValue
+            )
+            try? await service.cancelReplacementSession(
+                entryRelativePath: session.entryRelativePath
+            )
+            replacementSession = nil
+            replacementEntryPath = nil
+            replacementPreviewLabel = nil
+            replacementTakeWaveform = nil
+            replacementTakeWaveformID = nil
+            replacementPreviewGeneration = nil
+            replacementPreviewTakeID = nil
+            await refresh { self.selectedEntryID = session.entryRelativePath }
+        } catch {
+            errorMessage = "The replacement was not installed. Your current audio and complete takes are safe: \(error.localizedDescription)"
+        }
+    }
+
+    func cancelReplacement() async {
+        guard let replacementEntryPath else { return }
+        await cancelReplacement(expectedEntryPath: replacementEntryPath)
+    }
+
+    private func cancelReplacement(expectedEntryPath: RelativePath) async {
+        guard replacementEntryPath == expectedEntryPath else { return }
+        if case .replacementTake(let target)? = recorder.sessionTarget,
+           target.entryRelativePath == expectedEntryPath {
+            recorder.cancelReplacementCapture()
+        }
+        // Clear the app-wide mutation lock before awaiting disk cleanup. This
+        // makes every exit path converge immediately and also invalidates any
+        // in-flight take finalization before it can append to the UI ledger.
+        replacementSession = nil
+        replacementEntryPath = nil
+        replacementPreviewLabel = nil
+        replacementTakeWaveform = nil
+        replacementTakeWaveformID = nil
+        replacementPreviewGeneration = nil
+        replacementPreviewTakeID = nil
+        let previewURL = replacementPreviewURL
+        replacementPreviewURL = nil
+        player.unload()
+        if let previewURL {
+            try? FileManager.default.removeItem(at: previewURL.deletingLastPathComponent())
+        }
+        var cleanupError: Error?
+        if let service {
+            do {
+                try await service.cancelReplacementSession(
+                    entryRelativePath: expectedEntryPath
+                )
+            } catch {
+                cleanupError = error
+            }
+        }
+        // A take/context preview uses the same player as canonical playback.
+        // Explicitly restore the selected entry's real audio; merely pausing
+        // leaves Cancel sounding as if the replacement had persisted.
+        if selectedEntryID == expectedEntryPath,
+           let entry = snapshot?.entry(withID: expectedEntryPath),
+           let url = audioURL(for: entry) {
+            player.load(url: url, knownDuration: entry.duration)
+        }
+        if let cleanupError {
+            errorMessage = "The replacement was cancelled, but its temporary files could not be removed yet. They will be discarded on relaunch: \(cleanupError.localizedDescription)"
+        }
     }
 
     func validateExtensionAvailability(for entry: Entry) async {
@@ -1051,6 +1657,10 @@ final class AppModel {
     }
 
     func stopRecording() async {
+        if case .replacementTake? = recorder.sessionTarget {
+            await stopReplacementTake()
+            return
+        }
         stopLiveTranscription()
         guard let outcome = await recorder.stop() else { return }
         let relPath = outcome.entryRelativePath
@@ -1063,7 +1673,7 @@ final class AppModel {
             }
             do {
                 transcriptionQueue?.evictItems(underPath: relPath)
-                let extensionOutcome = try await service.extendAudio(
+                _ = try await service.extendAudio(
                     target: target, segmentURL: segmentURL
                 )
                 audioRevision &+= 1
@@ -1071,9 +1681,6 @@ final class AppModel {
                     entryRelativePath: relPath, source: TranscriptionSeam.Source.extended.rawValue
                 )
                 recorder.completeExtensionWorkflow()
-                if extensionOutcome.normalized {
-                    recordingRecoveryNoticeMessage = "The extension was appended successfully. The combined audio was normalized to M4A; the untouched pre-extension file remains recoverable in Recently Deleted."
-                }
                 await refresh { self.selectedEntryID = relPath }
             } catch {
                 recorder.completeExtensionWorkflow(error: error)
@@ -1091,12 +1698,68 @@ final class AppModel {
         await refresh { self.selectedEntryID = relPath }
     }
 
+    var cancelRecordingConfirmationMessage: String {
+        switch recorder.sessionTarget {
+        case .extensionOf:
+            "Are you sure you want to cancel recording? The captured extension will be discarded and the existing recording will remain unchanged."
+        case .replacementTake:
+            "Are you sure you want to cancel recording? This replacement take will be discarded. Any earlier takes will remain available."
+        default:
+            "Are you sure you want to cancel recording? The recording will be permanently discarded."
+        }
+    }
+
+    func discardActiveRecording() async {
+        isCancelRecordingConfirmationPresented = false
+        stopLiveTranscription()
+        guard let cancelled = recorder.cancelActiveCapture() else { return }
+        recorder.isZenMode = false
+
+        switch cancelled.target {
+        case .newEntry:
+            do {
+                try await service?.removeEmptyEntryFolder(at: cancelled.entryRelativePath)
+                await refresh()
+            } catch {
+                errorMessage = "The recording was discarded, but its empty folder could not be removed: \(error.localizedDescription)"
+            }
+        case .extensionOf:
+            await refresh { self.selectedEntryID = cancelled.entryRelativePath }
+            restoreCanonicalPlayback(for: cancelled.entryRelativePath)
+        case .replacementTake:
+            if var session = replacementSession,
+               session.entryRelativePath == cancelled.entryRelativePath {
+                session.phase = .ready
+                session.failureMessage = nil
+                replacementSession = session
+                replacementPreviewLabel = session.selectedTake.map { "Take \($0.number)" }
+                    ?? "Current Audio"
+                do {
+                    try await service?.saveReplacementSession(session)
+                } catch {
+                    errorMessage = "The take was discarded, but the replacement session could not be updated: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func restoreCanonicalPlayback(for entryRelativePath: RelativePath) {
+        guard selectedEntryID == entryRelativePath,
+              let entry = snapshot?.entry(withID: entryRelativePath),
+              let url = audioURL(for: entry) else { return }
+        player.load(url: url, knownDuration: entry.duration)
+    }
+
     func finishRecoveredExtension(_ recovery: RecoverableRecordingExtension) async {
         guard let service, !extensionRecoveryProcessingIDs.contains(recovery.id) else { return }
         extensionRecoveryProcessingIDs.insert(recovery.id)
-        defer { extensionRecoveryProcessingIDs.remove(recovery.id) }
+        clipMutationEntryPaths.insert(recovery.entryRelativePath)
+        defer {
+            extensionRecoveryProcessingIDs.remove(recovery.id)
+            clipMutationEntryPaths.remove(recovery.entryRelativePath)
+        }
         do {
-            let outcome = try await service.finishRecoveredExtension(recovery)
+            _ = try await service.finishRecoveredExtension(recovery)
             queueExtensionRetranscription(
                 entryRelativePath: recovery.entryRelativePath,
                 source: "extension-recovery"
@@ -1104,9 +1767,6 @@ final class AppModel {
             extensionRecoveries.removeAll { $0.id == recovery.id }
             isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
             audioRevision &+= 1
-            recordingRecoveryNoticeMessage = outcome.normalized
-                ? "The extension was recovered and appended. The combined audio was normalized to M4A, and the pre-extension file remains recoverable in Recently Deleted."
-                : "The extension was recovered and appended. Full retranscription has been queued."
             await refresh { self.selectedEntryID = recovery.entryRelativePath }
         } catch {
             errorMessage = "The extension could not be finished. Its segment remains recoverable: \(error.localizedDescription)"
@@ -1128,7 +1788,6 @@ final class AppModel {
             extensionRecoveries.removeAll { $0.id == recovery.id }
             isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
             await refresh { self.selectedEntryID = newPath }
-            recordingRecoveryNoticeMessage = "The interrupted extension was saved as a separate recording and queued for transcription. The original entry was unchanged."
         } catch {
             errorMessage = "The extension segment could not be saved as a new entry: \(error.localizedDescription)"
         }
@@ -1152,6 +1811,7 @@ final class AppModel {
             $0.entryRelativePath == entryRelativePath
                 && $0.isRetranscribe
                 && ($0.source == TranscriptionSeam.Source.extended.rawValue
+                    || $0.source == TranscriptionSeam.Source.replaced.rawValue
                     || $0.source == "extension-recovery")
         }
         guard !alreadyQueued else { return }
@@ -1307,6 +1967,9 @@ final class AppModel {
     /// retranscription is enqueued — word timings from the old audio are
     /// meaningless against the new file.
     func trimAudio(for entry: Entry, selection: TrimSelection) async {
+        guard !clipMutationEntryPaths.contains(entry.relativePath) else { return }
+        clipMutationEntryPaths.insert(entry.relativePath)
+        defer { clipMutationEntryPaths.remove(entry.relativePath) }
         if player.url == audioURL(for: entry) { player.unload() }
         transcriptionQueue?.evictItems(underPath: entry.relativePath)
         await perform("trimAudio [\(entry.relativePath)]") { service in
@@ -1340,19 +2003,71 @@ final class AppModel {
         if player.url == audioURL(for: entry) { player.unload() }
         transcriptionQueue?.evictItems(underPath: entry.relativePath)
         await perform("compressAudio [\(entry.relativePath)]") { service in
-            let outcome = try await service.compressAudio(atEntryPath: entry.relativePath)
+            _ = try await service.compressAudio(atEntryPath: entry.relativePath)
             await MainActor.run {
                 self.audioRevision &+= 1
-                self.recordingRecoveryNoticeMessage = String(
-                    format: "Compression removed %.1f seconds of silence. The original audio remains recoverable in Recently Deleted.",
-                    outcome.removedDuration
-                )
                 self.transcriptionQueue?.enqueue(
                     entryRelativePath: entry.relativePath,
                     source: "compress",
                     isRetranscribe: true
                 )
             }
+        }
+    }
+
+    /// Why version-backed clip undo/redo cannot safely run right now. This is
+    /// intentionally entry-aware: changing one clip must not race its recorder,
+    /// file swap, or transcript writer.
+    func clipEditBlockReason(for entry: Entry) -> String? {
+        guard entry.hasAudio else { return "This clip has no audio to undo or redo." }
+        if recorder.isActive || recorder.state == .finalizing || recorder.sessionTarget != nil {
+            return "Finish or cancel the active recording before undoing or redoing clip audio."
+        }
+        if trimModeActive {
+            return "Finish or cancel trimming before undoing or redoing clip audio."
+        }
+        if replacementModeActive {
+            return "Finish or cancel Replace Audio before undoing or redoing clip audio."
+        }
+        if compressingEntryPaths.contains(entry.relativePath)
+            || clipMutationEntryPaths.contains(entry.relativePath) {
+            return "Wait for the current audio operation to finish before undoing or redoing it."
+        }
+        if transcriptionBusyEntryPaths.contains(entry.relativePath) {
+            return "Wait for this clip's transcription to finish before undoing or redoing its audio."
+        }
+        return nil
+    }
+
+    func performClipEdit(_ direction: ClipEditDirection, for entry: Entry) async {
+        guard let service else { return }
+        if let reason = clipEditBlockReason(for: entry) {
+            errorMessage = reason
+            return
+        }
+        let path = entry.relativePath
+        clipMutationEntryPaths.insert(path)
+        defer { clipMutationEntryPaths.remove(path) }
+        if player.url == audioURL(for: entry) { player.unload() }
+        do {
+            guard let outcome = try await service.performClipEditSwap(
+                entryPath: path, direction: direction
+            ) else {
+                // An empty undo/redo stack is normal command state, not an
+                // error that should interrupt the user with an alert.
+                return
+            }
+            audioRevision &+= 1
+            transcriptionQueue?.enqueue(
+                entryRelativePath: path,
+                source: outcome.operation.transcriptionSource,
+                isRetranscribe: true
+            )
+            await refresh { self.selectedEntryID = path }
+            refreshVaultSearchIfVisible()
+        } catch {
+            errorMessage = "The clip could not be \(direction == .undo ? "undone" : "redone"): \(error.localizedDescription)"
+            await refresh { self.selectedEntryID = path }
         }
     }
 
@@ -1380,7 +2095,8 @@ final class AppModel {
             && snapshot?.entry(withID: item.originalPath)?.audioDeleted == false
         let restoresTimelineVersion = item.kind == .audioVersion
             || item.kind == .preTrimAudio || item.kind == .preExtensionAudio
-            || item.kind == .preCompressionAudio || isLegacyAudioVersion
+            || item.kind == .preCompressionAudio || item.kind == .preReplacementAudio
+            || isLegacyAudioVersion
         // An audio restore rearranges files the player or a running
         // transcription may hold open; both must let go first.
         if item.kind.isAudio, let vaultURL,
@@ -1390,9 +2106,19 @@ final class AppModel {
         }
         if restoresTimelineVersion {
             transcriptionQueue?.evictItems(underPath: item.originalPath)
+            clipMutationEntryPaths.insert(item.originalPath)
+        }
+        defer {
+            if restoresTimelineVersion {
+                clipMutationEntryPaths.remove(item.originalPath)
+            }
         }
         await perform("restore [\(item.trashedName)]") { service in
-            _ = try await service.restore(item)
+            if restoresTimelineVersion {
+                _ = try await service.restoreTimelineVersion(item)
+            } else {
+                _ = try await service.restore(item)
+            }
             await MainActor.run {
                 self.audioRevision &+= 1
                 if restoresTimelineVersion {
@@ -1400,7 +2126,9 @@ final class AppModel {
                     // audio; bring the text back in line with the disk.
                     self.recordingRecoveryNoticeMessage = item.kind == .preExtensionAudio
                         ? "Restored the selected audio version. The version that was active remains recoverable in Recently Deleted."
-                        : "Restored the selected audio. The replaced trim or compression was discarded and can be regenerated."
+                        : (item.kind == .preReplacementAudio
+                           ? "Restored the selected pre-replacement audio and its matching edit-history baseline. The displaced version remains recoverable in Recently Deleted."
+                           : "Restored the selected audio. The version that was active remains recoverable in Recently Deleted.")
                     self.transcriptionQueue?.enqueue(
                         entryRelativePath: item.originalPath,
                         source: item.kind == .preTrimAudio
@@ -1408,7 +2136,9 @@ final class AppModel {
                             : (item.kind == .preExtensionAudio
                                ? "extension-restore"
                                : (item.kind == .preCompressionAudio
-                                  ? "compression-restore" : "audio-version-restore")),
+                                  ? "compression-restore"
+                                  : (item.kind == .preReplacementAudio
+                                     ? "replacement-restore" : "audio-version-restore"))),
                         isRetranscribe: true
                     )
                 }

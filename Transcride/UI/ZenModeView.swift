@@ -1,9 +1,8 @@
 import SwiftUI
 
 /// REC-5: chrome-free full-window recording view — waveform, elapsed time,
-/// pause/stop only (plus record when idle). Esc exits once recording is
-/// stopped; while recording, Esc is ignored so it can't be dismissed by
-/// accident mid-take.
+/// pause/stop only (plus record when idle). Esc exits while idle and asks for
+/// confirmation before discarding an active capture.
 struct ZenModeView: View {
     @Environment(AppModel.self) private var model
     @FocusState private var focused: Bool
@@ -57,10 +56,10 @@ struct ZenModeView: View {
         .focusEffectDisabled()
         .focused($focused)
         .onKeyPress(.escape) {
-            exitIfStopped()
+            model.handleExitCommand()
             return .handled
         }
-        .onExitCommand { exitIfStopped() }
+        .onExitCommand { model.handleExitCommand() }
         .onAppear {
             focused = true
             model.prepareLiveTranscription()
@@ -71,11 +70,7 @@ struct ZenModeView: View {
     private var escHint: String {
         recorder.state == .idle
             ? "esc to leave zen mode"
-            : "stop the recording, then esc to leave"
-    }
-
-    private func exitIfStopped() {
-        if recorder.state == .idle { recorder.isZenMode = false }
+            : "esc to cancel and discard the recording"
     }
 
     @ViewBuilder

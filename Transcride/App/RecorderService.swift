@@ -42,6 +42,7 @@ final class RecorderService {
     enum SessionTarget: Equatable, Sendable {
         case newEntry
         case extensionOf(RecordingExtensionTarget)
+        case replacementTake(ReplacementRecordingTarget)
     }
 
     struct FinalizationOutcome: Sendable {
@@ -49,6 +50,8 @@ final class RecorderService {
         var target: SessionTarget
         var duration: Double
         var extensionSegmentURL: URL?
+        var replacementTake: ReplacementTake?
+        var replacementTakeURL: URL?
     }
 
     enum State {
@@ -94,6 +97,11 @@ final class RecorderService {
     private var configurationChangePending = false
     private var isHandlingConfigurationChange = false
     private var reportedSinkError = false
+    private var replacementBoundaryRequested = false
+
+    /// AppModel installs this only while a replacement attempt is active. The
+    /// trigger comes from the sink's frame-derived elapsed time, never a UI timer.
+    var onReplacementBoundaryReached: (() -> Void)?
 
     var isActive: Bool { state != .idle }
 
@@ -143,6 +151,7 @@ final class RecorderService {
         let partialName = switch target {
         case .newEntry: Self.partialFileName
         case .extensionOf: RecordingExtensionArtifacts.partialFileName
+        case .replacementTake: AudioReplacementArtifacts.partialFileName
         }
         let cafURL = entryURL.appending(path: partialName)
         let file = try AVAudioFile(
@@ -223,6 +232,7 @@ final class RecorderService {
         configurationChangePending = false
         isHandlingConfigurationChange = false
         reportedSinkError = false
+        replacementBoundaryRequested = false
         state = .recording
 
         // REC-3: if the input device disappears (or the graph reconfigures)
@@ -243,6 +253,7 @@ final class RecorderService {
 
     func pause() {
         guard state == .recording else { return }
+        if case .replacementTake? = sessionTarget { return }
         engine?.pause()
         state = .paused
         if extensionSession != nil {
@@ -253,6 +264,7 @@ final class RecorderService {
 
     func resume() {
         guard state == .paused else { return }
+        if case .replacementTake? = sessionTarget { return }
         do {
             try engine?.start()
             state = .recording
@@ -409,6 +421,12 @@ final class RecorderService {
         guard state == .recording || state == .paused else { return }
         self.elapsed = elapsed
         livePeaks = peaksTail
+        if case .replacementTake(let target)? = sessionTarget,
+           elapsed >= target.region.duration,
+           !replacementBoundaryRequested {
+            replacementBoundaryRequested = true
+            onReplacementBoundaryReached?()
+        }
         if let error, !reportedSinkError {
             reportedSinkError = true
             pause()
@@ -446,6 +464,8 @@ final class RecorderService {
         let relPath = currentEntryPath
         let duration = Double(result.frames) / sampleRate
         var extensionSegmentURL: URL?
+        var replacementTake: ReplacementTake?
+        var replacementTakeURL: URL?
         do {
             switch sessionTarget {
             case .newEntry:
@@ -463,6 +483,15 @@ final class RecorderService {
                 extensionSession?.segmentDuration = duration
                 try extensionSession?.transition(to: .segmentReady)
                 persistExtensionSession(in: entryURL)
+            case .replacementTake(let target):
+                let finalized = try await Self.finalizeReplacementTake(
+                    entryURL: entryURL,
+                    target: target,
+                    capturedFrames: Int64(result.frames),
+                    quality: recordingQuality
+                )
+                replacementTake = finalized.take
+                replacementTakeURL = finalized.url
             }
             if let writeError = result.error {
                 alertMessage = """
@@ -481,14 +510,14 @@ final class RecorderService {
             alertMessage = "The recording could not be finalized: \(error.localizedDescription)"
         }
 
-        if case .newEntry = sessionTarget {
+        if case .extensionOf = sessionTarget {
+            retainedExtensionEntryURL = entryURL
+        } else {
             state = .idle
             currentEntryPath = nil
             self.sessionTarget = nil
             elapsed = 0
             livePeaks = []
-        } else {
-            retainedExtensionEntryURL = entryURL
         }
         DebugLog.append("recorder: stopped [\(relPath ?? "?")] duration=\(duration)")
         guard let relPath else { return nil }
@@ -496,8 +525,70 @@ final class RecorderService {
             entryRelativePath: relPath,
             target: sessionTarget,
             duration: duration,
-            extensionSegmentURL: extensionSegmentURL
+            extensionSegmentURL: extensionSegmentURL,
+            replacementTake: replacementTake,
+            replacementTakeURL: replacementTakeURL
         )
+    }
+
+    /// Abandons an in-progress replacement attempt without promoting the
+    /// partial journal to a take. Replacement capture is temporary until the
+    /// user explicitly bakes, so Cancel must have a true discard path rather
+    /// than going through normal recording finalization.
+    func cancelReplacementCapture() {
+        guard case .replacementTake? = sessionTarget,
+              state == .recording || state == .paused else { return }
+        _ = cancelActiveCapture()
+    }
+
+    /// Stops a live capture without finalizing or promoting its journal.
+    /// The caller owns any higher-level cleanup, such as removing the empty
+    /// folder created for a brand-new recording or restoring playback for an
+    /// existing entry.
+    func cancelActiveCapture() -> (target: SessionTarget, entryRelativePath: RelativePath)? {
+        guard state == .recording || state == .paused,
+              let target = sessionTarget,
+              let entryRelativePath = currentEntryPath else { return nil }
+        if let configChangeObserver {
+            NotificationCenter.default.removeObserver(configChangeObserver)
+            self.configChangeObserver = nil
+        }
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        _ = sink?.finish()
+        if let entryURL {
+            let partialFileName = switch target {
+            case .newEntry: Self.partialFileName
+            case .extensionOf: RecordingExtensionArtifacts.partialFileName
+            case .replacementTake: AudioReplacementArtifacts.partialFileName
+            }
+            try? FileManager.default.removeItem(
+                at: entryURL.appending(path: partialFileName)
+            )
+            if case .extensionOf = target {
+                try? FileManager.default.removeItem(
+                    at: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+                )
+            }
+        }
+        engine = nil
+        sink = nil
+        entryURL = nil
+        retainedExtensionEntryURL = nil
+        extensionSession = nil
+        baselineInputSignature = nil
+        recordingStartUptime = nil
+        configurationChangePending = false
+        currentEntryPath = nil
+        sessionTarget = nil
+        elapsed = 0
+        livePeaks = []
+        replacementBoundaryRequested = false
+        onReplacementBoundaryReached = nil
+        state = .idle
+        return (target, entryRelativePath)
     }
 
     /// Finishes the app-wide operation after composition either succeeds or
@@ -592,6 +683,67 @@ final class RecorderService {
             DebugLog.append("extension segment remux failed (kept CAF): \(error)")
             return retained
         }
+    }
+
+    private nonisolated static func finalizeReplacementTake(
+        entryURL: URL,
+        target: ReplacementRecordingTarget,
+        capturedFrames: Int64,
+        quality: RecordingQuality
+    ) async throws -> (take: ReplacementTake, url: URL) {
+        let fm = FileManager.default
+        let partialURL = entryURL.appending(path: AudioReplacementArtifacts.partialFileName)
+        let sessionDirectory = entryURL.appending(
+            path: AudioReplacementArtifacts.sessionDirectoryName, directoryHint: .isDirectory
+        )
+        try fm.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+        let takeID = UUID()
+        let takeName = AudioReplacementArtifacts.takeFileName(id: takeID)
+        let outputURL = sessionDirectory.appending(path: takeName)
+        let exactCAF = sessionDirectory.appending(path: ".exact-\(takeID.uuidString).caf")
+
+        let input = try AVAudioFile(forReading: partialURL)
+        let eligibleFrames = min(Int64(input.length), target.region.frameCount)
+        let output = try AVAudioFile(
+            forWriting: exactCAF,
+            settings: input.fileFormat.settings,
+            commonFormat: input.processingFormat.commonFormat,
+            interleaved: input.processingFormat.isInterleaved
+        )
+        var remaining = AVAudioFramePosition(eligibleFrames)
+        while remaining > 0 {
+            let capacity = AVAudioFrameCount(min(remaining, 4096))
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: input.processingFormat, frameCapacity: capacity
+            ) else { throw RecorderError.formatUnsupported }
+            try input.read(into: buffer, frameCount: capacity)
+            guard buffer.frameLength > 0 else { break }
+            try output.write(from: buffer)
+            remaining -= AVAudioFramePosition(buffer.frameLength)
+        }
+        try await Task.detached {
+            try CrashTolerantAudioJournal.encodeM4A(
+                from: exactCAF, to: outputURL, encoding: quality.outputEncoding
+            )
+        }.value
+        try? fm.removeItem(at: exactCAF)
+        try? fm.removeItem(at: partialURL)
+
+        let status: ReplacementTakeStatus = ReplacementTakeEligibility.classify(
+            capturedFrames: capturedFrames,
+            capturedSampleRate: target.region.sampleRate,
+            for: target.region
+        ) == .eligible || capturedFrames >= target.region.frameCount ? .complete : .incomplete
+        let take = ReplacementTake(
+            id: takeID,
+            number: target.takeNumber,
+            fileName: takeName,
+            capturedFrames: eligibleFrames,
+            sampleRate: target.region.sampleRate,
+            createdAt: .now,
+            status: status
+        )
+        return (take, outputURL)
     }
 }
 

@@ -84,7 +84,8 @@ struct ToolbarFlexibleSpaceInstaller: NSViewRepresentable {
     }
 
     private static let middleControlLabels = [
-        "middlequeue", "middlesort", "transcription queue", "sort entries", "sort",
+        "middleimport", "middlequeue", "middlesort", "import audio",
+        "transcription queue", "sort entries", "sort",
     ]
 
     private static func itemMatches(_ item: NSToolbarItem, any needles: [String]) -> Bool {

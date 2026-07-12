@@ -18,6 +18,9 @@ struct AboutCommands: Commands {
 }
 
 struct AboutView: View {
+    @Environment(\.dismissWindow) private var dismissWindow
+    @FocusState private var receivesEscape: Bool
+
     private var version: String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "—"
@@ -71,6 +74,17 @@ struct AboutView: View {
         .padding(.horizontal, 40)
         .padding(.vertical, 28)
         .frame(width: 420)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($receivesEscape)
+        .onKeyPress(.escape) {
+            dismissWindow(id: AboutCommands.windowID)
+            return .handled
+        }
+        .onExitCommand {
+            dismissWindow(id: AboutCommands.windowID)
+        }
+        .onAppear { receivesEscape = true }
     }
 
     private func creditRow(_ name: String, detail: String) -> some View {

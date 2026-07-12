@@ -111,4 +111,21 @@ struct WaveformTests {
         #expect(WaveformData.load(from: url) == nil)
         #expect(WaveformData.load(from: dir.appending(path: "absent.json")) == nil)
     }
+
+    @Test func replacementPreviewSplicesTakePeaksWithoutChangingTimeline() {
+        let original = WaveformData(
+            peaksPerSecond: 2,
+            duration: 5,
+            peaks: [0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4, 0.5, 0.5]
+        )
+        let take = WaveformData(peaksPerSecond: 2, duration: 2, peaks: [0.9, 0.8])
+
+        let preview = original.previewReplacing(start: 1, end: 3, with: take)
+
+        #expect(preview.duration == original.duration)
+        #expect(preview.peaksPerSecond == original.peaksPerSecond)
+        #expect(preview.peaks.count == original.peaks.count)
+        #expect(preview.peaks == [0.1, 0.1, 0.9, 0.9, 0.8, 0.8, 0.4, 0.4, 0.5, 0.5])
+        #expect(original.peaks[2] == 0.2)
+    }
 }

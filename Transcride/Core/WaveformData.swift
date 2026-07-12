@@ -50,6 +50,40 @@ struct WaveformData: Codable, Equatable, Sendable {
         let data = try JSONEncoder().encode(self)
         try AtomicFile.write(data, to: url)
     }
+
+    /// Returns a display-only composite whose selected timeline interval uses
+    /// peaks from a replacement take. The canonical cache is never mutated or
+    /// written; the take is resampled to the exact number of timeline peak
+    /// windows so the waveform remains duration preserving.
+    func previewReplacing(
+        start: Double, end: Double, with replacement: WaveformData
+    ) -> WaveformData {
+        guard duration > 0, peaksPerSecond > 0, !peaks.isEmpty,
+              !replacement.peaks.isEmpty, end > start else { return self }
+        let clampedStart = min(max(0, start), duration)
+        let clampedEnd = min(max(clampedStart, end), duration)
+        let startIndex = min(peaks.count, max(0, Int(floor(clampedStart * Double(peaksPerSecond)))))
+        let endIndex = min(
+            peaks.count,
+            max(startIndex, Int(ceil(clampedEnd * Double(peaksPerSecond))))
+        )
+        let targetCount = endIndex - startIndex
+        guard targetCount > 0 else { return self }
+
+        var composite = peaks
+        for offset in 0..<targetCount {
+            let sourceIndex = min(
+                replacement.peaks.count - 1,
+                offset * replacement.peaks.count / targetCount
+            )
+            composite[startIndex + offset] = replacement.peaks[sourceIndex]
+        }
+        return WaveformData(
+            peaksPerSecond: peaksPerSecond,
+            duration: duration,
+            peaks: composite
+        )
+    }
 }
 
 /// Downsampling for display: one value (0…1 of the view height) per drawn

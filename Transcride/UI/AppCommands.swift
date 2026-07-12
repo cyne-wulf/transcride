@@ -5,7 +5,7 @@ import SwiftUI
 /// controls; sheets and prompts owned by views are reached via the request
 /// pattern (`requestEntryAction` & friends).
 ///
-/// Monitor-owned shortcuts (Space, E, Z, `[`, `]`, `\`, ⇧⌫, ⌘⌫) stay in AppModel's key
+/// Monitor-owned shortcuts (Space, ⇧Space, E, T, S, Z, 0–9, ⌘Z, ⌘⇧Z, `[`, `]`, `\`, ⇧⌫, ⌘⌫) stay in AppModel's key
 /// monitor — giving menu items those key equivalents would fire them while
 /// the monitor deliberately defers to text editing. Their menu items carry no
 /// equivalent; the Help → Keyboard Shortcuts window documents the keys.
@@ -201,7 +201,9 @@ struct AppCommands: Commands {
             Button("Trim Audio…") {
                 model.requestEntryAction(.trim)
             }
-            .disabled(entry?.hasAudio != true)
+            .disabled(entry.map {
+                model.trimBlockedReason(for: $0, duration: $0.duration) != nil
+            } ?? true)
 
             Button("Compress Audio…") {
                 model.requestEntryAction(.compress)
@@ -245,7 +247,7 @@ struct AppCommands: Commands {
 
     private var playbackCommands: some Commands {
         CommandMenu("Playback") {
-            // Space, Left/Right Arrow, [, ], and \ are key-monitor shortcuts
+            // Space, T, S, 0–9, Left/Right Arrow, [, ], and \ are key-monitor shortcuts
             // (see header note).
             Button(model.player.isPlaying ? "Pause" : "Play") {
                 model.player.togglePlayPause()

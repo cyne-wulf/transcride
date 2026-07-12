@@ -102,10 +102,15 @@ struct AudioCompressionTests {
 
         _ = try TrashStore(vaultRoot: root).restore(original)
         #expect(try String(contentsOf: entry.appending(path: "audio.m4a"), encoding: .utf8) == "original")
-        #expect(try TrashStore(vaultRoot: root).items().isEmpty)
+        let redo = try #require(
+            try TrashStore(vaultRoot: root).items().first(where: { $0.kind == .preCompressionAudio })
+        )
+        let redoURL = TrashStore(vaultRoot: root).trashDirectory
+            .appending(path: redo.trashedName).appending(path: "audio.m4a")
+        #expect(try String(contentsOf: redoURL, encoding: .utf8) == "compressed")
     }
 
-    @Test func legacyDisplacedCompressedAudioRestoresOneWay() throws {
+    @Test func legacyDisplacedCompressedAudioRestoresSymmetrically() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "transcride-legacy-compress-vault-\(UUID().uuidString)", directoryHint: .isDirectory)
         let path = "transcride-2026-07-11T06-00-00-legacy-compress"
@@ -127,6 +132,6 @@ struct AudioCompressionTests {
 
         #expect(try String(contentsOf: entry.appending(path: "audio.m4a"), encoding: .utf8) == "compressed")
         #expect(!FileManager.default.fileExists(atPath: entry.appending(path: "audio-2.m4a").path))
-        #expect(try store.items().isEmpty)
+        #expect(try store.items().contains(where: { $0.kind == .audioVersion }))
     }
 }

@@ -14,6 +14,12 @@ struct AudioExtensionOutcome: Sendable {
     var trashedName: String
 }
 
+struct ClipEditSwapOutcome: Sendable {
+    var operation: ClipEditOperation
+    var entryRelativePath: RelativePath
+    var duration: Double
+}
+
 /// Background actor owning all vault file I/O so the main thread never touches
 /// the disk. Wraps the scanner (with its cache), mutation operations, and trash.
 actor VaultService {
@@ -21,6 +27,7 @@ actor VaultService {
     private var scanner = VaultScanner()
     private let operations: VaultOperations
     private let trash: TrashStore
+    private let clipEditHistory: ClipEditHistoryStore
     private let settings: VaultSettingsStore
     private var searchIndex: VaultSearchIndex?
 
@@ -28,6 +35,7 @@ actor VaultService {
         self.rootURL = rootURL
         self.operations = VaultOperations(vaultRoot: rootURL)
         self.trash = TrashStore(vaultRoot: rootURL)
+        self.clipEditHistory = ClipEditHistoryStore(vaultRoot: rootURL)
         self.settings = VaultSettingsStore(vaultRoot: rootURL)
     }
 
@@ -150,6 +158,11 @@ actor VaultService {
         try EntryMetadata.setDuration(duration, inEntry: entryURL)
         RecordingExtensionRecovery.removeArtifacts(in: entryURL)
         synchronizeSearchIndex(relativePaths: [recovery.entryRelativePath])
+        recordClipEdit(
+            .extend,
+            entryPath: recovery.entryRelativePath,
+            trashedName: staged.trashedName
+        )
         return AudioExtensionOutcome(
             audioFileName: audioName,
             combinedDuration: duration,
@@ -453,6 +466,7 @@ actor VaultService {
             newDuration: newDuration,
             toEntryAt: relPath
         )
+        recordClipEdit(.trim, entryPath: relPath, trashedName: outcome.trashedName)
         synchronizeSearchIndex(relativePaths: [relPath])
         return outcome
     }
@@ -494,6 +508,7 @@ actor VaultService {
             removedDuration: plan.removedDuration,
             toEntryAt: relPath
         )
+        recordClipEdit(.compress, entryPath: relPath, trashedName: outcome.trashedName)
         synchronizeSearchIndex(relativePaths: [relPath])
         return outcome
     }
@@ -533,6 +548,11 @@ actor VaultService {
                 expectedSourceFileName: target.sourceAudioFileName,
                 toEntryAt: target.entryRelativePath
             )
+            recordClipEdit(
+                .extend,
+                entryPath: target.entryRelativePath,
+                trashedName: applied.trashedName
+            )
             if AudioExtensionFailureInjector.shared.consume(.afterSafeSwap) {
                 // Keep the manifest at `.swapping` and the segment in place.
                 // Relaunch recovery can prove the visible combined audio and
@@ -563,6 +583,257 @@ actor VaultService {
             failExtensionManifest(in: entryURL, message: error.localizedDescription)
             throw error
         }
+    }
+
+    // MARK: - Replace selected audio (RPL)
+
+    func saveReplacementSession(_ session: ReplacementTakeSession) throws {
+        let entryURL = rootURL.appendingRelativePath(session.entryRelativePath)
+        let directory = entryURL.appending(
+            path: AudioReplacementArtifacts.sessionDirectoryName, directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try AtomicFile.write(
+            encoder.encode(session),
+            to: directory.appending(path: AudioReplacementArtifacts.sessionFileName)
+        )
+    }
+
+    /// Relaunch recovery for duration-locked attempts. A crash journal is
+    /// promoted to a playable CAF take without ever baking it automatically.
+    func replacementTakeSessions() -> ReplacementSessionDiscovery {
+        var sessions: [ReplacementTakeSession] = []
+        var committed: [RelativePath] = []
+        for entry in scanner.scan(root: rootURL).allEntries {
+            let entryURL = rootURL.appendingRelativePath(entry.relativePath)
+            let cancellationMarker = entryURL.appending(
+                path: AudioReplacementArtifacts.cancellationMarkerFileName
+            )
+            if ReplacementSessionDisposition.classify(
+                hasCancellationMarker: FileManager.default.fileExists(
+                    atPath: cancellationMarker.path
+                )
+            ) == .discard {
+                // Cancellation is authoritative even if the process died
+                // between recording the intent and deleting temporary takes.
+                try? discardReplacementArtifacts(in: entryURL)
+                continue
+            }
+            let directory = entryURL.appending(
+                path: AudioReplacementArtifacts.sessionDirectoryName, directoryHint: .isDirectory
+            )
+            let manifest = directory.appending(path: AudioReplacementArtifacts.sessionFileName)
+            guard let data = try? Data(contentsOf: manifest),
+                  var session = try? JSONDecoder().decode(
+                    ReplacementTakeSession.self, from: data
+                  ) else { continue }
+            if session.phase == .swapping || session.phase == .retranscribing,
+               let selectedID = session.selectedTakeID,
+               AudioReplacementStore.loadRecipe(in: entryURL)?.sources
+                .contains(where: { $0.id == selectedID }) == true {
+                committed.append(session.entryRelativePath)
+                try? cancelReplacementSession(entryRelativePath: session.entryRelativePath)
+                continue
+            }
+            let partial = entryURL.appending(path: AudioReplacementArtifacts.partialFileName)
+            if FileManager.default.fileExists(atPath: partial.path),
+               let file = try? AVAudioFile(forReading: partial) {
+                let id = UUID()
+                let name = AudioReplacementArtifacts.takeFileName(
+                    id: id, fileExtension: "caf"
+                )
+                let destination = directory.appending(path: name)
+                do {
+                    try? FileManager.default.removeItem(at: destination)
+                    try FileManager.default.moveItem(at: partial, to: destination)
+                    let captured = min(Int64(file.length), session.region.frameCount)
+                    let eligibility = ReplacementTakeEligibility.classify(
+                        capturedFrames: Int64(file.length),
+                        capturedSampleRate: session.region.sampleRate,
+                        for: session.region
+                    )
+                    session.appendTake(ReplacementTake(
+                        id: id,
+                        number: session.takes.count + 1,
+                        fileName: name,
+                        capturedFrames: captured,
+                        sampleRate: session.region.sampleRate,
+                        createdAt: .now,
+                        status: eligibility == .eligible || Int64(file.length) >= session.region.frameCount
+                            ? .complete : .incomplete
+                    ))
+                    try? saveReplacementSession(session)
+                } catch {
+                    DebugLog.append("replacement partial recovery deferred: \(error)")
+                }
+            }
+            session.phase = .ready
+            sessions.append(session)
+        }
+        return ReplacementSessionDiscovery(
+            recoverable: sessions.sorted { $0.id.uuidString < $1.id.uuidString },
+            committedEntryPaths: committed
+        )
+    }
+
+    func replacementTakeURL(
+        entryRelativePath: RelativePath, fileName: String
+    ) -> URL {
+        rootURL.appendingRelativePath(entryRelativePath)
+            .appending(path: AudioReplacementArtifacts.sessionDirectoryName, directoryHint: .isDirectory)
+            .appending(path: fileName)
+    }
+
+    func replacementTakeWaveform(
+        entryRelativePath: RelativePath, fileName: String
+    ) async throws -> WaveformData {
+        try await WaveformGenerator.generate(
+            fromAudioAt: replacementTakeURL(
+                entryRelativePath: entryRelativePath, fileName: fileName
+            )
+        )
+    }
+
+    func deleteReplacementTake(
+        entryRelativePath: RelativePath, fileName: String
+    ) throws {
+        try FileManager.default.removeItem(
+            at: replacementTakeURL(entryRelativePath: entryRelativePath, fileName: fileName)
+        )
+    }
+
+    func cancelReplacementSession(entryRelativePath: RelativePath) throws {
+        let entryURL = rootURL.appendingRelativePath(entryRelativePath)
+        // Persist the user's decision before deleting anything. A crash or
+        // filesystem error can leave this marker behind; discovery treats it
+        // as a discard request and never resurrects the cancelled take list.
+        try AtomicFile.write(
+            Data("cancelled".utf8),
+            to: entryURL.appending(path: AudioReplacementArtifacts.cancellationMarkerFileName)
+        )
+        try discardReplacementArtifacts(in: entryURL)
+    }
+
+    private func discardReplacementArtifacts(in entryURL: URL) throws {
+        let fm = FileManager.default
+        let directory = entryURL.appending(
+            path: AudioReplacementArtifacts.sessionDirectoryName, directoryHint: .isDirectory
+        )
+        let partial = entryURL.appending(path: AudioReplacementArtifacts.partialFileName)
+        if fm.fileExists(atPath: directory.path) { try fm.removeItem(at: directory) }
+        if fm.fileExists(atPath: partial.path) { try fm.removeItem(at: partial) }
+        let marker = entryURL.appending(
+            path: AudioReplacementArtifacts.cancellationMarkerFileName
+        )
+        if fm.fileExists(atPath: marker.path) { try fm.removeItem(at: marker) }
+    }
+
+    func replacementContextPreview(
+        session: ReplacementTakeSession, take: ReplacementTake
+    ) async throws -> URL {
+        let entryURL = rootURL.appendingRelativePath(session.entryRelativePath)
+        guard audioFileName(atEntryPath: session.entryRelativePath) == session.sourceAudioFileName else {
+            throw AudioReplacementError.sourceChanged
+        }
+        return try await AudioReplacementPreviewRenderer.render(
+            canonicalURL: entryURL.appending(path: session.sourceAudioFileName),
+            takeURL: replacementTakeURL(
+                entryRelativePath: session.entryRelativePath, fileName: take.fileName
+            ),
+            region: session.region
+        )
+    }
+
+    /// Reads the canonical asset duration at replacement-session creation time.
+    /// Entry frontmatter intentionally rounds duration for readability and is
+    /// therefore not precise enough to define a frame-locked edit timeline.
+    func replacementTimeline(
+        entryRelativePath: RelativePath, audioFileName: String
+    ) async throws -> ReplacementTimeline {
+        guard self.audioFileName(atEntryPath: entryRelativePath) == audioFileName else {
+            throw AudioReplacementError.sourceChanged
+        }
+        let audioURL = rootURL.appendingRelativePath(entryRelativePath)
+            .appending(path: audioFileName)
+        let duration = try await AudioImportFormat.probeDuration(of: audioURL)
+        return ReplacementTimeline(duration: duration)
+    }
+
+    func bakeReplacement(
+        session: ReplacementTakeSession, take: ReplacementTake
+    ) async throws -> AudioReplacementApplier.Outcome {
+        guard session.selectedTakeCanBake, take.id == session.selectedTakeID else {
+            throw AudioReplacementError.invalidRecipe
+        }
+        let entryURL = rootURL.appendingRelativePath(session.entryRelativePath)
+        guard audioFileName(atEntryPath: session.entryRelativePath) == session.sourceAudioFileName else {
+            throw AudioReplacementError.sourceChanged
+        }
+        let sourceURL = entryURL.appending(path: session.sourceAudioFileName)
+        let canonicalDuration = try await AudioImportFormat.probeDuration(of: sourceURL)
+        let lockedTimeline = ReplacementTimeline(
+            duration: session.timelineDuration, sampleRate: session.region.sampleRate
+        )
+        guard lockedTimeline.matches(
+            duration: canonicalDuration,
+            toleranceFrames: ReplacementTimeline.roundedMetadataToleranceFrames(
+                sampleRate: session.region.sampleRate
+            )
+        ) else {
+            throw AudioReplacementError.sourceChanged
+        }
+        let sourceBytes = Int64(
+            (try? sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        )
+        try AudioReplacementStore.ensureDiskSpace(
+            at: entryURL, estimatedBytes: max(32 * 1_024 * 1_024, sourceBytes * 3)
+        )
+        let takeURL = replacementTakeURL(
+            entryRelativePath: session.entryRelativePath, fileName: take.fileName
+        )
+        var durableSession = session
+        durableSession.phase = .rendering
+        try saveReplacementSession(durableSession)
+        let prepared = try AudioReplacementStore.prepare(
+            entryURL: entryURL,
+            canonicalAudioURL: sourceURL,
+            canonicalDuration: canonicalDuration,
+            takeURL: takeURL,
+            take: take,
+            region: session.region
+        )
+        let candidate = entryURL.appending(path: AudioReplacementArtifacts.candidateFileName)
+        let rendered = try await AudioReplacementRenderer.render(
+            recipe: prepared.recipe,
+            sourcesDirectory: prepared.directoryURL,
+            outputURL: candidate
+        )
+        durableSession.phase = .swapping
+        try saveReplacementSession(durableSession)
+        let outcome = try AudioReplacementApplier(vaultRoot: rootURL).apply(
+            renderedFileAt: rendered.url,
+            nextHistoryDirectory: prepared.directoryURL,
+            expectedSourceFileName: session.sourceAudioFileName,
+            duration: rendered.duration,
+            toEntryAt: session.entryRelativePath
+        )
+        recordClipEdit(
+            .replace,
+            entryPath: session.entryRelativePath,
+            trashedName: outcome.trashedName
+        )
+        do {
+            let waveform = try await WaveformGenerator.generate(
+                fromAudioAt: entryURL.appending(path: outcome.audioFileName)
+            )
+            try waveform.write(to: WaveformData.url(inEntry: entryURL))
+        } catch {
+            DebugLog.append("replacement waveform regeneration deferred: \(error)")
+        }
+        synchronizeSearchIndex(relativePaths: [session.entryRelativePath])
+        return outcome
     }
 
     private func updateExtensionManifest(
@@ -682,10 +953,119 @@ actor VaultService {
         try trash.items()
     }
 
+    func clipEditHistory(for entryPath: RelativePath) throws -> ClipEditEntryHistory {
+        let names = Set(try trash.items().map(\.trashedName))
+        return clipEditHistory.history(for: entryPath, existingTrashNames: names)
+    }
+
+    /// Atomically swaps the top undo/redo version into the selected entry,
+    /// regenerates its derived audio state, and transfers the command to the
+    /// opposite stack. The hand-edited Markdown body is never rewritten here.
+    func performClipEditSwap(
+        entryPath: RelativePath,
+        direction: ClipEditDirection
+    ) async throws -> ClipEditSwapOutcome? {
+        let before = try trash.items()
+        let names = Set(before.map(\.trashedName))
+        let history = clipEditHistory.history(
+            for: entryPath, existingTrashNames: names
+        )
+        let command: ClipEditCommand?
+        switch direction {
+        case .undo: command = history.undo.last
+        case .redo: command = history.redo.last
+        }
+        guard let command,
+              let item = before.first(where: {
+                  $0.trashedName == command.versionTrashedName
+                      && $0.originalPath == entryPath && $0.kind.isTimelineVersion
+              }) else {
+            try? clipEditHistory.reconcile(existingTrashNames: names)
+            return nil
+        }
+
+        let restored = try trash.restoreAudioWithOutcome(item)
+        guard let displacedName = restored.displacedTrashedName else {
+            // There was no canonical audio to preserve as the inverse. The
+            // requested restore succeeded, but continuing the keyboard chain
+            // would falsely promise redo, so prune the consumed command.
+            try? clipEditHistory.reconcile(
+                existingTrashNames: Set(try trash.items().map(\.trashedName))
+            )
+            return nil
+        }
+        let afterNames = Set(try trash.items().map(\.trashedName))
+        _ = try clipEditHistory.completeSwap(
+            direction: direction,
+            entryPath: entryPath,
+            restoredVersionName: command.versionTrashedName,
+            displacedVersionName: displacedName,
+            existingTrashNames: afterNames.union([command.versionTrashedName])
+        )
+
+        let entryURL = rootURL.appendingRelativePath(entryPath)
+        guard let audioName = audioFileName(atEntryPath: entryPath) else {
+            throw VaultError.notFound(entryPath.appendingComponent("audio"))
+        }
+        let audioURL = entryURL.appending(path: audioName)
+        let duration = try await AudioImportFormat.probeDuration(of: audioURL)
+        try? EntryMetadata.setDuration(duration, inEntry: entryURL)
+        try? TranscriptAlignmentState.markStale(inEntry: entryURL)
+        do {
+            let waveform = try await WaveformGenerator.generate(fromAudioAt: audioURL)
+            try waveform.write(to: WaveformData.url(inEntry: entryURL))
+        } catch {
+            // The complete canonical version is already installed. Waveform
+            // remains a rebuildable cache and EntryDetail will retry on load.
+            DebugLog.append("undo/redo waveform regeneration deferred: \(error)")
+        }
+        synchronizeSearchIndex(relativePaths: [entryPath])
+        return ClipEditSwapOutcome(
+            operation: command.operation,
+            entryRelativePath: entryPath,
+            duration: duration
+        )
+    }
+
+    /// A manual Recently Deleted timeline restore is itself a reversible clip
+    /// operation. The displaced canonical wrapper becomes the undo target.
+    func restoreTimelineVersion(_ item: TrashItem) throws -> AudioVersionRestoreOutcome {
+        let outcome = try trash.restoreAudioWithOutcome(item)
+        if let displaced = outcome.displacedTrashedName {
+            recordClipEdit(
+                .restoreVersion,
+                entryPath: item.originalPath,
+                trashedName: displaced
+            )
+        }
+        synchronizeSearchIndex(relativePaths: [outcome.entryPath])
+        return outcome
+    }
+
     func restore(_ item: TrashItem) throws -> RelativePath {
         let path = try trash.restore(item)
         synchronizeSearchIndex(relativePaths: [path])
         return path
+    }
+
+    private func recordClipEdit(
+        _ operation: ClipEditOperation,
+        entryPath: RelativePath,
+        trashedName: String
+    ) {
+        do {
+            let names = Set(try trash.items().map(\.trashedName))
+            try clipEditHistory.record(
+                operation: operation,
+                entryPath: entryPath,
+                versionTrashedName: trashedName,
+                existingTrashNames: names
+            )
+        } catch {
+            // The version itself is still safe and visible in Recently
+            // Deleted even if the optional shortcut ledger cannot be written.
+            DebugLog.append("clip edit history write deferred: \(error)")
+        }
     }
 
     func deletePermanently(_ item: TrashItem) throws {

@@ -35,6 +35,8 @@ final class PlayerService {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var playbackRangeEndObserver: Any?
+    private(set) var playbackRange: ClosedRange<Double>?
     private var silenceRouter = SilenceGapRouter()
 
     init() {
@@ -101,6 +103,7 @@ final class PlayerService {
 
     func unload() {
         if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
+        removePlaybackRangeEndObserver()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         player?.pause()
         player = nil
@@ -113,6 +116,7 @@ final class PlayerService {
         loadFailed = false
         speed = 1.0
         silenceRouter.clear()
+        playbackRange = nil
     }
 
     // MARK: - Transport
@@ -123,7 +127,12 @@ final class PlayerService {
 
     func play() {
         guard let player else { return }
-        if duration > 0, currentTime >= duration - 0.05 {
+        if let playbackRange {
+            if currentTime < playbackRange.lowerBound
+                || currentTime >= playbackRange.upperBound - 0.05 {
+                seekInternally(to: playbackRange.lowerBound)
+            }
+        } else if duration > 0, currentTime >= duration - 0.05 {
             player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
             currentTime = 0
         }
@@ -143,6 +152,30 @@ final class PlayerService {
     func seek(to seconds: Double) {
         seekRevision &+= 1
         seekInternally(to: seconds)
+    }
+
+    /// Restricts transport and playback to a temporary audition range. Trim
+    /// uses this to make Play represent the retained result, without changing
+    /// the canonical audio or leaking the range into ordinary playback.
+    func setPlaybackRange(start: Double, end: Double) {
+        guard duration > 0 else { return }
+        let lower = min(max(0, start), duration)
+        let upper = min(max(lower, end), duration)
+        guard upper - lower > 0.001 else {
+            clearPlaybackRange()
+            return
+        }
+
+        playbackRange = lower...upper
+        installPlaybackRangeEndObserver(at: upper)
+        if currentTime < lower || currentTime >= upper {
+            seekInternally(to: lower)
+        }
+    }
+
+    func clearPlaybackRange() {
+        removePlaybackRangeEndObserver()
+        playbackRange = nil
     }
 
     var silenceDetectionMode: SilenceDetectionMode { silenceRouter.mode }
@@ -186,7 +219,13 @@ final class PlayerService {
 
     private func seekInternally(to seconds: Double) {
         guard let player else { return }
-        let clamped = min(max(0, seconds), duration > 0 ? duration : seconds)
+        let wholeFileClamped = min(max(0, seconds), duration > 0 ? duration : seconds)
+        let clamped: Double
+        if let playbackRange {
+            clamped = min(max(playbackRange.lowerBound, wholeFileClamped), playbackRange.upperBound)
+        } else {
+            clamped = wholeFileClamped
+        }
         currentTime = clamped
         player.seek(
             to: CMTime(seconds: clamped, preferredTimescale: 600),
@@ -217,5 +256,29 @@ final class PlayerService {
         }
         isPlaying = false
         if duration > 0 { currentTime = duration }
+    }
+
+    private func installPlaybackRangeEndObserver(at end: Double) {
+        removePlaybackRangeEndObserver()
+        guard let player else { return }
+        playbackRangeEndObserver = player.addBoundaryTimeObserver(
+            forTimes: [NSValue(time: CMTime(seconds: end, preferredTimescale: 600))],
+            queue: .main
+        ) { [weak self, weak player] in
+            Task { @MainActor [weak self, weak player] in
+                guard let self, self.player === player,
+                      let playbackRange = self.playbackRange else { return }
+                player?.pause()
+                self.isPlaying = false
+                self.currentTime = playbackRange.upperBound
+            }
+        }
+    }
+
+    private func removePlaybackRangeEndObserver() {
+        if let playbackRangeEndObserver, let player {
+            player.removeTimeObserver(playbackRangeEndObserver)
+        }
+        playbackRangeEndObserver = nil
     }
 }

@@ -28,6 +28,17 @@ struct RootView: View {
             Text(model.errorMessage ?? "")
         }
         .alert(
+            "Cancel Recording?",
+            isPresented: $model.isCancelRecordingConfirmationPresented
+        ) {
+            Button("Keep Recording", role: .cancel) {}
+            Button("Discard Recording", role: .destructive) {
+                Task { await model.discardActiveRecording() }
+            }
+        } message: {
+            Text(model.cancelRecordingConfirmationMessage)
+        }
+        .alert(
             "Original Transcript Updated",
             isPresented: Binding(
                 get: { model.transcriptNoticeMessage != nil },
@@ -48,6 +59,9 @@ struct RootView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(model.recordingRecoveryNoticeMessage ?? "")
+        }
+        .onExitCommand {
+            model.handleExitCommand()
         }
     }
 }

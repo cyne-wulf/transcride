@@ -243,6 +243,12 @@ The detailed post-v1 sequence is already written:
   local-only summarization model. The implementation must benchmark below 8 GB peak
   resident memory, store Summary as a separate derived Markdown artifact, preserve
   both transcript layers, and mark summaries stale rather than regenerating silently.
+- `PRD-20.md`: a far-horizon, versioned `transcride` CLI and agent interface. The
+  root command self-describes the supported media/vault contract and current vault;
+  `transcride import <audio-file>` uses the canonical import/transcription path; and
+  vault discovery, job status, stable JSON/errors, idempotency, app/CLI coordination,
+  signing, and local-only security make the surface safe for automation. Milestones
+  11–19 remain intentionally unspecified for nearer product work.
 
 Silence-removal compression was implemented after 1.1 as a standalone destructive
 audio action. Its per-entry source is either audio below -40 dBFS or validated timed
@@ -256,9 +262,9 @@ at mutation time; unavailable speech timing blocks before rendering or swapping.
 Master-PRD/post-program items still deferred: cloud engines (implement the existing
 engine protocol), sync (coordinate external mutations through `VaultService` and
 search invalidation), AI chapters/action items/chat beyond the scoped PRD-10 Summary
-layer (new derived artifacts must never replace the Markdown source of truth), iOS
-capture, plugins, localization, and an auto-update framework. Transcride remains
-local-only and telemetry-free unless the product
+layer (new derived artifacts must never replace the Markdown source of truth), the
+PRD-20 CLI/agent interface, iOS capture, plugins, localization, and an auto-update
+framework. Transcride remains local-only and telemetry-free unless the product
 principles are explicitly changed.
 
 ## Build, test, install, and release

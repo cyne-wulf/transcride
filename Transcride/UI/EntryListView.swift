@@ -60,6 +60,18 @@ struct EntryListView: View {
             if let entry = model.selectedEntry { beginRename(entry) }
         }
         .toolbar {
+            ToolbarItem(id: "middleImport") {
+                Button {
+                    model.importViaPanel()
+                } label: {
+                    Label("Import Audio", systemImage: "plus")
+                }
+                .disabled(model.phase != .ready)
+                .help("Import Audio")
+                .accessibilityLabel("Import Audio")
+                .accessibilityIdentifier("middleImport")
+            }
+
             if let queue = model.transcriptionQueue {
                 ToolbarItem(id: "middleQueue") {
                     TranscriptionQueueButton(queue: queue) {
