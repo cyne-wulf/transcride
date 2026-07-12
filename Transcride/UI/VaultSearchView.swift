@@ -48,7 +48,15 @@ struct VaultSearchView: View {
             Divider()
             resultsContent
         }
-        .frame(minWidth: 720, idealWidth: 780, minHeight: 500, idealHeight: 580)
+        .frame(
+            minWidth: 720,
+            idealWidth: 780,
+            maxWidth: .infinity,
+            minHeight: 500,
+            idealHeight: 580,
+            maxHeight: .infinity,
+            alignment: .top
+        )
         .onAppear { searchFieldFocused = true }
     }
 

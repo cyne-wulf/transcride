@@ -286,12 +286,11 @@ private struct TrashAudioPreview: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
 
-            Button { player.skip(-15) } label: {
-                Image(systemName: "gobackward.15")
-                    .font(.system(size: 19 * scale))
-            }
-            .buttonStyle(.plain)
-            .help("Back 15 seconds")
+            AdaptiveSkipButton(
+                player: player,
+                direction: .backward,
+                size: 19 * scale
+            )
 
             Button { player.togglePlayPause() } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
@@ -301,12 +300,11 @@ private struct TrashAudioPreview: View {
             .disabled(preview.audioUnavailableReason != nil)
             .help(player.isPlaying ? "Pause" : "Play")
 
-            Button { player.skip(15) } label: {
-                Image(systemName: "goforward.15")
-                    .font(.system(size: 19 * scale))
-            }
-            .buttonStyle(.plain)
-            .help("Forward 15 seconds")
+            AdaptiveSkipButton(
+                player: player,
+                direction: .forward,
+                size: 19 * scale
+            )
         }
         .padding(.horizontal, 22 * scale)
         .padding(.vertical, 7 * scale)

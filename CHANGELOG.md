@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-07-12
+
+### Highlights
+
+- Replace an exact selected audio region from the entry's three-dot menu or by
+  pressing `R`, using the same precise range selector as Trim.
+- Record and retain multiple complete or incomplete replacement takes, audition
+  each take alone or in context, and bake only an exact-duration complete take.
+- Keep the recording's total duration and later timeline positions stable across
+  repeated and overlapping replacements with retained source material and a
+  non-destructive edit recipe.
+- Validate replacement renders before a safe swap, retain pre-replacement audio
+  in Recently Deleted, recover interrupted sessions, and never auto-bake an
+  uncertain take after relaunch.
+- Fully retranscribe each baked replacement while keeping hand-edited Markdown
+  byte-identical and preserving one ordinary canonical audio file for other apps.
+- Add contextual 1–60 second playback skips based on clip duration, visible vault
+  search and in-note Find controls, and improved search-window sizing.
 - Add a Loop Audio toggle to an entry's three-dot menu; looping preserves the
   selected playback speed and works with Skip Silence.
 - Add a per-entry **Silence Detection** picker shared by Skip Silence and Compress
@@ -19,6 +37,10 @@
 - Persist `silence_detection: waveform|speech` per entry while preserving unknown
   frontmatter and keep that preference through rename, move, duplicate, compression,
   and audio-version restore.
+
+All 17 Milestone 7 verification checks passed, including repeated overlapping
+replacement bakes, crash/failure recovery, accessibility, regressions, and the
+complete automated suite. The release tree passes 315 tests across 47 suites.
 
 ## 1.1.0 — 2026-07-11
 

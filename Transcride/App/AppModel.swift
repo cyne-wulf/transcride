@@ -916,6 +916,7 @@ final class AppModel {
     private let zenKeyCode: UInt16 = 6
     private let undoKeyCode: UInt16 = 6
     private let extendKeyCode: UInt16 = 14
+    private let replaceKeyCode: UInt16 = 15
     private let skipSilenceKeyCode: UInt16 = 1
     private let trimKeyCode: UInt16 = 17
     private let findKeyCode: UInt16 = 3
@@ -1013,6 +1014,23 @@ final class AppModel {
             return true
         }
 
+        if keyCode == replaceKeyCode {
+            // Plain R enters Replace Audio for the selected clip. Keep this
+            // in the focus-aware monitor so typing in a field or note editor
+            // retains the letter normally.
+            guard modifiers.isEmpty, editingTextView == nil else { return false }
+            guard let entry = selectedEntry else {
+                errorMessage = "Select an audio clip before replacing audio."
+                return true
+            }
+            if let reason = replacementBlockedReason(for: entry) {
+                errorMessage = reason
+            } else {
+                beginReplacement(for: entry)
+            }
+            return true
+        }
+
         if keyCode == trimKeyCode {
             // Plain T mirrors the trim control from every non-editing pane.
             // Consuming unavailable attempts also prevents List type-selection
@@ -1052,7 +1070,7 @@ final class AppModel {
         }
 
         if keyCode == leftArrowKeyCode || keyCode == rightArrowKeyCode {
-            // Left/Right skip the loaded audio by 15 seconds. Up/Down are
+            // Left/Right use the loaded clip's contextual skip interval. Up/Down are
             // deliberately not intercepted so list clip selection keeps its
             // native keyboard behavior.
             // AppKit marks arrow events as numeric-pad/function keys even on
@@ -1060,7 +1078,11 @@ final class AppModel {
             // modifiers and must not block the shortcut.
             let explicitModifiers = modifiers.subtracting([.numericPad, .function])
             guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            player.skip(keyCode == rightArrowKeyCode ? 15 : -15)
+            if keyCode == rightArrowKeyCode {
+                player.skipForward()
+            } else {
+                player.skipBackward()
+            }
             return true
         }
 

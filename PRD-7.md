@@ -12,14 +12,14 @@ The replacement has exactly the selected duration, so the total recording length
 
 **In:** three-dot-menu entry point; reuse of the trim selector; exact-duration range locking; multiple temporary takes for one selection; take preview in context; choosing and baking a take; repeatable replacements; non-destructive edit recipe/source retention; safe composite rendering; duration/waveform/transcript refresh; crash-safe take capture; version recovery.
 
-**Out:** a permanently visible Replace button; keyboard shortcut; global command; inserting audio that changes total duration; deleting time; stretching a take; automatic time-stretching; multitrack mixing; overlapping audible layers; fades/crossfades beyond tiny anti-click boundaries; a full DAW timeline.
+**Out:** a permanently visible Replace button; menu-bar command; inserting audio that changes total duration; deleting time; stretching a take; automatic time-stretching; multitrack mixing; overlapping audible layers; fades/crossfades beyond tiny anti-click boundaries; a full DAW timeline.
 
 ## Entry point and selection
 
 ### Niche menu-only feature (RPL-1)
 
 - **Replace Audio…** is accessible only from the selected entry's three-dot More menu.
-- Do not add Replace to the playback pill, waveform toolbar, menu bar, context menu, Keyboard Shortcuts window, command palette, or global controls. The feature should remain discoverable for someone looking for advanced entry actions without making the normal recording interface more complex.
+- Do not add Replace to the playback pill, waveform toolbar, menu bar, context menu, command palette, or global controls. Plain **R** starts Replace Audio for the selected entry when text input is not focused, and is documented in the Keyboard Shortcuts window. The visible feature should remain discoverable for someone looking for advanced entry actions without making the normal recording interface more complex.
 - Show the action only for an entry with available, writable audio. Disable it with a specific explanation while that entry is recording/extending, transcribing, trimming, restoring, deleting, or otherwise mutating.
 - Choosing Replace Audio enters a focused replacement mode in the existing playback area. It does not begin microphone capture immediately.
 
@@ -107,7 +107,7 @@ The replacement has exactly the selected duration, so the total recording length
 
 ## Decisions already made (do not relitigate)
 
-- Replace Audio is a niche feature accessible only through the entry's three-dot menu.
+- Replace Audio is a niche feature accessible through the entry's three-dot menu or the plain **R** shortcut.
 - Replace reuses the trim selector. There is one range-selection interaction, not two.
 - A take must have exactly the selected duration. Recording stops automatically at the boundary; incomplete takes cannot be baked.
 - Multiple attempts may be recorded for one locked region and auditioned before choosing one.
@@ -129,7 +129,7 @@ The replacement has exactly the selected duration, so the total recording length
 
 **Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. Fix failures and re-run affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [x] Open an entry's three-dot menu: Replace Audio… appears there. Confirm it appears nowhere else—no playback-pill button, menu-bar command, shortcut listing, or global control.
+- [x] Open an entry's three-dot menu: Replace Audio… appears there. Confirm it has no playback-pill button, menu-bar command, or global control. Select an audio entry and press plain **R** outside text input: Replace starts, and the shortcut appears in Keyboard Shortcuts.
 - [x] Enter Replace: the waveform uses the same handles and behavior as Trim. Select a distinctive spoken phrase and verify the exact start, end, and duration are clear.
 - [x] Record Take 1: after the countdown it records for exactly the selected duration and stops automatically. Record two more attempts; all three remain independently playable.
 - [x] Stop one attempt early: it is labeled Incomplete, remains playable/exportable, and Bake is disabled for it rather than padding or stretching it silently.

@@ -1,13 +1,13 @@
 # Transcride project state
 
 Last updated: 2026-07-12
-Release line: 1.1.0 (build 2)
+Release line: 1.2.0 (build 3)
 Verified gate: Milestone 7, 17/17 human checks
 Platform: macOS 15+, Apple silicon, Swift 6, SwiftUI
 
 ## Product state
 
-Milestones 1–7 are complete. Version 1.1 delivers the complete local workflow:
+Milestones 1–7 are complete. Version 1.2 delivers the complete local workflow:
 record or import audio, transcribe it on-device, review it against synchronized
 playback, edit a Markdown layer, search the vault, export or copy the knowledge,
 optionally delete the audio while retaining the note, and safely extend an existing
@@ -216,6 +216,17 @@ by occurrence ordinal; user-authored text absent from the original has no time c
   Entry, and Discard Segment. Debug builds add deterministic failure seams before
   composition, before safe swap, and immediately after safe swap.
 
+### Milestone 7
+
+- Plain `R` starts Replace Audio for the selected entry when text input is not
+  focused, while the three-dot menu remains its only visible entry action.
+- Playback skip buttons and Left/Right Arrow choose a contextual 1–60 second
+  interval from the loaded clip's duration instead of always skipping 15 seconds.
+- Vault search and in-note Find gained visible controls during the final polish
+  pass; their existing keyboard shortcuts remain available.
+- Replacement capture starts directly without the optional countdown. Debug builds
+  include explicit one-shot render and safe-swap failure commands.
+
 ## Known issues and technical debt
 
 ### P1 — release/distribution blockers
@@ -327,9 +338,9 @@ Before publishing a binary release:
 2. Archive Release from a clean checkout.
 3. Sign every nested component, notarize with `notarytool`, staple, package as DMG,
    and validate with both `codesign --verify --deep --strict` and `spctl -a`.
-4. Test recording permission, model download, vault bookmarks, relaunch, and the v1.1
+4. Test recording permission, model download, vault bookmarks, relaunch, and the v1.2
    acceptance flow from a clean macOS user account.
-5. Tag the verified source as `milestone-6` and `v1.1.0`; publish release notes from
+5. Tag the verified source as `milestone-7` and `v1.2.0`; publish release notes from
    `CHANGELOG.md` and attach only notarized artifacts.
 
 The current machine has no valid code-signing identities. Source/tag publication is

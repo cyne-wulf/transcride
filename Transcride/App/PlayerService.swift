@@ -19,6 +19,13 @@ final class PlayerService {
     /// Incremented by user-driven seeks (word clicks, waveform scrubs and
     /// transport skips). Transcript views use it to resume auto-follow.
     private(set) var seekRevision = 0
+    var skipIntervalSeconds: Int {
+        PlaybackSkipInterval.seconds(forClipDuration: duration)
+    }
+    var skipIntervalMenuLabel: String {
+        let unit = skipIntervalSeconds == 1 ? "Second" : "Seconds"
+        return "\(skipIntervalSeconds) \(unit)"
+    }
     var skipSilence: Bool {
         didSet { UserDefaults.standard.set(skipSilence, forKey: Self.skipSilencePreferenceKey) }
     }
@@ -235,6 +242,14 @@ final class PlayerService {
 
     func skip(_ delta: Double) {
         seek(to: currentTime + delta)
+    }
+
+    func skipBackward() {
+        skip(-Double(skipIntervalSeconds))
+    }
+
+    func skipForward() {
+        skip(Double(skipIntervalSeconds))
     }
 
     /// Steps to the adjacent entry in `speeds`; +1 faster, -1 slower

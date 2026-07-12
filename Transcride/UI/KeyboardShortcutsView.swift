@@ -87,19 +87,24 @@ struct KeyboardShortcutsView: View {
                             detail: "Starts trimming the selected audio clip; press T or Esc to cancel without changing it."
                         ),
                         ShortcutRow(
+                            keys: ["R"],
+                            title: "Replace selected audio",
+                            detail: "Starts Replace Audio for the selected clip. Typing in an editor still works normally."
+                        ),
+                        ShortcutRow(
                             keys: ["S"],
                             title: "Toggle Skip Silence",
                             detail: "Turns automatic silence skipping on or off throughout the app."
                         ),
                         ShortcutRow(
                             keys: ["←"],
-                            title: "Back 15 seconds",
-                            detail: "Moves the playback position back without changing clip selection."
+                            title: "Skip back contextually",
+                            detail: "Moves back by 1–60 seconds based on the clip's total duration, without changing clip selection."
                         ),
                         ShortcutRow(
                             keys: ["→"],
-                            title: "Forward 15 seconds",
-                            detail: "Moves the playback position forward without changing clip selection."
+                            title: "Skip forward contextually",
+                            detail: "Moves forward by 1–60 seconds based on the clip's total duration, without changing clip selection."
                         ),
                         ShortcutRow(
                             keys: ["0", "–", "9"],

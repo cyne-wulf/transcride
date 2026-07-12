@@ -14,6 +14,9 @@ struct EntryListView: View {
 
     private var folder: FolderNode? { model.selectedFolder }
     private var isFavoritesView: Bool { model.sidebarSelection == .favorites }
+    private var displayedNavigationTitle: String {
+        isFavoritesView ? "Favorites" : folder.map(folderTitle) ?? "Entries"
+    }
 
     var body: some View {
         @Bindable var model = model
@@ -54,12 +57,23 @@ struct EntryListView: View {
                 ContentUnavailableView("No Folder Selected", systemImage: "folder")
             }
         }
-        .navigationTitle(isFavoritesView ? "Favorites" : folder.map(folderTitle) ?? "Entries")
+        .navigationTitle("")
         .onChange(of: model.renameEntryRequestRevision) { _, _ in
             // Entry → Rename… routes here; same prompt as the context menu.
             if let entry = model.selectedEntry { beginRename(entry) }
         }
         .toolbar {
+            if #available(macOS 26.0, *) {
+                ToolbarItem(id: "middleTitle", placement: .navigation) {
+                    middleTitleAndSearch
+                }
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(id: "middleTitle", placement: .navigation) {
+                    middleTitleAndSearch
+                }
+            }
+
             ToolbarItem(id: "middleImport") {
                 Button {
                     model.importViaPanel()
@@ -112,6 +126,31 @@ struct EntryListView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The title is saved into the entry’s frontmatter and appended to its folder name as a slug.")
+        }
+    }
+
+    private var middleTitleAndSearch: some View {
+        HStack(spacing: 10) {
+            Text(displayedNavigationTitle)
+                .font(.headline)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Button {
+                model.presentVaultSearch()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(.quaternary, in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(model.phase != .ready)
+            .help("Search this vault")
+            .accessibilityLabel("Search this vault")
+            .accessibilityIdentifier("middleGlobalSearch")
         }
     }
 

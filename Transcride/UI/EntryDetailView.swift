@@ -1067,13 +1067,11 @@ private struct PlaybackSection: View {
         let isCapturing = model.recorder.currentEntryPath == entry.relativePath
             && model.recorder.sessionTarget != nil
         return HStack(spacing: 22 * controlScale) {
-            TransportButton(
-                systemImage: "gobackward.15",
-                size: 17 * controlScale,
-                help: "Back 15 seconds"
-            ) {
-                player.skip(-15)
-            }
+            AdaptiveSkipButton(
+                player: player,
+                direction: .backward,
+                size: 17 * controlScale
+            )
 
             TransportButton(
                 systemImage: player.isPlaying ? "pause.fill" : "play.fill",
@@ -1084,13 +1082,11 @@ private struct PlaybackSection: View {
             }
             .accessibilityLabel(player.isPlaying ? "Pause replacement preview" : "Play replacement preview")
 
-            TransportButton(
-                systemImage: "goforward.15",
-                size: 17 * controlScale,
-                help: "Forward 15 seconds"
-            ) {
-                player.skip(15)
-            }
+            AdaptiveSkipButton(
+                player: player,
+                direction: .forward,
+                size: 17 * controlScale
+            )
         }
         .padding(.horizontal, 22 * controlScale)
         .padding(.vertical, 6 * controlScale)
@@ -1199,11 +1195,11 @@ private struct PlaybackSection: View {
 
             speedControl
 
-            TransportButton(
-                systemImage: "gobackward.15", size: 19 * controlScale, help: "Back 15 seconds"
-            ) {
-                player.skip(-15)
-            }
+            AdaptiveSkipButton(
+                player: player,
+                direction: .backward,
+                size: 19 * controlScale
+            )
 
             TransportButton(
                 systemImage: player.isPlaying ? "pause.fill" : "play.fill",
@@ -1213,11 +1209,11 @@ private struct PlaybackSection: View {
                 player.togglePlayPause()
             }
 
-            TransportButton(
-                systemImage: "goforward.15", size: 19 * controlScale, help: "Forward 15 seconds"
-            ) {
-                player.skip(15)
-            }
+            AdaptiveSkipButton(
+                player: player,
+                direction: .forward,
+                size: 19 * controlScale
+            )
 
             skipSilenceControl
 

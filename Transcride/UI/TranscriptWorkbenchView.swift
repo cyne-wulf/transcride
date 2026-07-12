@@ -246,10 +246,7 @@ struct TranscriptWorkbenchView: View {
         .onChange(of: findQuery) { _, _ in updateFindMatches(resetSelection: true) }
         .onChange(of: document?.body) { _, _ in updateFindMatches() }
         .onChange(of: model.inNoteFindRequestRevision) { _, _ in
-            showingFind = true
-            searchNavigationRange = nil
-            updateFindMatches(resetSelection: true)
-            findFieldFocused = true
+            toggleFindBar()
         }
         .task(id: model.transcriptNavigationRequest?.id) {
             handleNavigationRequestIfNeeded()
@@ -342,6 +339,14 @@ struct TranscriptWorkbenchView: View {
             }
 
             Button {
+                model.requestInNoteFind()
+            } label: {
+                Label("Find", systemImage: "magnifyingglass")
+            }
+            .accessibilityLabel(showingFind ? "Close Find" : "Find in Note")
+            .help(showingFind ? "Close Find (⌘F)" : "Find in Note (⌘F)")
+
+            Button {
                 copyCurrentLayer()
             } label: {
                 Label(copyConfirmed ? "Copied" : "Copy as Markdown",
@@ -397,9 +402,7 @@ struct TranscriptWorkbenchView: View {
             .disabled(findMatches.isEmpty)
             .help("Next Match")
             Button {
-                showingFind = false
-                findQuery = ""
-                findMatches = []
+                closeFindBar()
             } label: {
                 Image(systemName: "xmark")
             }
@@ -577,6 +580,25 @@ struct TranscriptWorkbenchView: View {
         }
         findMatches = matches
         if resetSelection || !matches.indices.contains(findMatchIndex) { findMatchIndex = 0 }
+    }
+
+    private func toggleFindBar() {
+        if showingFind {
+            closeFindBar()
+            return
+        }
+        showingFind = true
+        searchNavigationRange = nil
+        updateFindMatches(resetSelection: true)
+        findFieldFocused = true
+    }
+
+    private func closeFindBar() {
+        showingFind = false
+        findQuery = ""
+        findMatches = []
+        findMatchIndex = 0
+        findFieldFocused = false
     }
 
     private func cycleFind(forward: Bool) {
