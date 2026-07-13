@@ -13,6 +13,7 @@ final class GlobalShortcutService {
     private var registrations: [GlobalShortcutAction: EventHotKeyRef] = [:]
     private var activePreferences: GlobalShortcutPreferences?
     private var eventHandler: EventHandlerRef?
+    private var pressedActions: Set<GlobalShortcutAction> = []
 
     init() {
         installEventHandler()
@@ -55,10 +56,16 @@ final class GlobalShortcutService {
     }
 
     private func installEventHandler() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
+        var eventTypes = [
+            EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)
+            ),
+            EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyReleased)
+            ),
+        ]
         let status = InstallEventHandler(
             GetApplicationEventTarget(),
             { _, event, userData in
@@ -79,11 +86,14 @@ final class GlobalShortcutService {
                 else { return OSStatus(eventNotHandledErr) }
                 let service = Unmanaged<GlobalShortcutService>
                     .fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in service.onAction?(action) }
+                let isPressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
+                Task { @MainActor in
+                    service.receiveHotKeyEvent(action: action, isPressed: isPressed)
+                }
                 return noErr
             },
-            1,
-            &eventType,
+            eventTypes.count,
+            &eventTypes,
             Unmanaged.passUnretained(self).toOpaque(),
             &eventHandler
         )
@@ -91,6 +101,15 @@ final class GlobalShortcutService {
             statuses = Dictionary(uniqueKeysWithValues: GlobalShortcutAction.allCases.map {
                 ($0, .failed("The system hotkey handler could not start (OSStatus \(status))."))
             })
+        }
+    }
+
+    func receiveHotKeyEvent(action: GlobalShortcutAction, isPressed: Bool) {
+        if isPressed {
+            guard pressedActions.insert(action).inserted else { return }
+            onAction?(action)
+        } else {
+            pressedActions.remove(action)
         }
     }
 
@@ -136,6 +155,7 @@ final class GlobalShortcutService {
     private func unregisterAll() {
         for registration in registrations.values { UnregisterEventHotKey(registration) }
         registrations.removeAll()
+        pressedActions.removeAll()
     }
 
     private func carbonModifiers(_ modifiers: GlobalShortcutModifiers) -> UInt32 {
@@ -151,17 +171,15 @@ final class GlobalShortcutService {
 
     private static func identifier(for action: GlobalShortcutAction) -> UInt32 {
         switch action {
-        case .startNewRecording: 1
+        case .toggleRecording: 1
         case .pauseResumeRecording: 2
-        case .stopAndSaveRecording: 3
         }
     }
 
     private static func action(for identifier: UInt32) -> GlobalShortcutAction? {
         switch identifier {
-        case 1: .startNewRecording
+        case 1: .toggleRecording
         case 2: .pauseResumeRecording
-        case 3: .stopAndSaveRecording
         default: nil
         }
     }
@@ -175,7 +193,7 @@ final class GlobalShortcutService {
 }
 
 enum GlobalShortcutPreferencesStore {
-    static let defaultsKey = "globalShortcutPreferencesV1"
+    static let defaultsKey = "globalShortcutPreferencesV2"
 
     static func load(defaults: UserDefaults = .standard) -> GlobalShortcutPreferences {
         guard let data = defaults.data(forKey: defaultsKey),

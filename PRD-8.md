@@ -17,11 +17,10 @@ Let the user control Transcride from any app using configurable system-wide keyb
 ### Keybinds menu (GLB-1)
 
 - Add a dedicated **Keybinds** pane in Settings and keep Help → Keyboard Shortcuts as the readable reference. The Settings pane is where the user enables, disables, records, changes, and resets global shortcuts.
-- Provide three global actions:
-  1. **Start New Recording**
+- Provide two global actions:
+  1. **Start / Stop & Save Recording**
   2. **Pause / Resume Recording**
-  3. **Stop & Save Recording**
-- Ship defaults that are unlikely to collide with ordinary editing: **⌃⌥⌘R** to start, **⌃⌥⌘P** to pause/resume, and **⌃⌥⌘S** to stop and save. The user may clear or replace each binding.
+- Ship simple defaults: **⌥R** starts a new recording while idle and stops and saves the active recording; **⌥P** pauses or resumes. These are defaults only—the user may clear or replace either binding.
 - Shortcut capture requires at least one non-Shift modifier and rejects a modifier-only chord, plain typing key, or duplicate assignment. Show the recorded chord in standard macOS glyph order.
 - Detect registration failures and likely conflicts. A shortcut that could not be registered is visibly marked and must not appear enabled. Never silently steal a chord from another application.
 - Include **Enable Global Controls**, **Show indicator while Transcride is in the background**, and **Reset to Defaults** controls. Settings persist across relaunch.
@@ -37,11 +36,11 @@ Let the user control Transcride from any app using configurable system-wide keyb
 
 ### Recording command semantics (GLB-3)
 
-- **Start New Recording** uses the same intent as the main New Recording button. It records into the last valid selected folder when available, otherwise the vault root. It never extends the currently selected entry.
+- **Start / Stop & Save Recording** uses the same intents as the main recording controls. While idle it starts a new recording in the last valid selected folder when available, otherwise the vault root; while recording or paused it stops and saves. It never extends the currently selected entry.
 - Start is ignored when a recording is already active, accompanied by state feedback rather than a second recording. It is unavailable without an open writable vault, microphone permission, or usable input device.
 - The first global Start may trigger the standard macOS microphone permission prompt. If setup or permission requires foreground interaction, activate Transcride and show the exact required step; do not pretend recording began.
 - **Pause / Resume** is one state-dependent binding: recording → paused, paused → recording. When idle or finalizing it performs no destructive action and the indicator gives brief unavailable feedback.
-- **Stop & Save** stops capture, finalizes the file, persists the transcription queue item, and then reports Finished/Recording Saved. It is not a discard command. When idle it does nothing beyond brief unavailable feedback.
+- The active-state behavior of **Start / Stop & Save** stops capture, finalizes the file, persists the transcription queue item, and then reports Finished/Recording Saved. It is not a discard command.
 - Commands are serialized so rapid or repeated key presses cannot create two entries, double-stop, resume during finalization, or enqueue transcription twice.
 - A globally started recording has every normal guarantee: selected quality/microphone, live capture safety, pause/resume, Milestone 6 crash recovery, waveform generation, plain vault files, and automatic transcription.
 
@@ -99,7 +98,7 @@ Internal/transitional states may also appear when necessary:
 
 ## Decisions already made (do not relitigate)
 
-- There are three configurable global commands: Start, Pause/Resume, and Stop & Save.
+- There are two configurable global commands: Start/Stop & Save and Pause/Resume.
 - Global Start always creates a new recording; it never extends an entry.
 - Global controls work while Transcride is running without focus. They do not work after the process has quit.
 - The background indicator is floating, draggable, position-persistent, and visible only when Transcride is not active.
@@ -110,7 +109,7 @@ Internal/transitional states may also appear when necessary:
 
 ## Definition of done
 
-- All three configurable shortcuts work from at least Finder, Safari, a full-screen app, and another Space without activating Transcride.
+- Both configurable shortcuts work from at least Finder, Safari, a full-screen app, and another Space without activating Transcride.
 - Unit tests cover chord validation; duplicate/default handling; persistence; registration-state mapping; serialized command transitions; rapid-key-repeat suppression; indicator presentation states; saved-state timeout; screen-anchor restoration/clamping.
 - Integration tests cover registration/unregistration; minimized/hidden/background operation; permission/setup failure; start/pause/resume/stop-save; finalization failure; sleep/wake; display removal; app activation hiding the panel; Milestone 6 recovery of a globally started recording.
 - The global listener observes only registered chords. Privacy review confirms there is no general keystroke capture or telemetry.
@@ -120,10 +119,10 @@ Internal/transitional states may also appear when necessary:
 
 **Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. On failure, fix it and repeat affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [ ] Open Keybinds settings: the three defaults appear, can be changed/cleared/reset, reject plain or duplicate chords, and report a deliberately conflicting/reserved chord honestly.
-- [ ] With Transcride behind Finder, press Start: Transcride does not take focus, a new recording begins in the expected vault folder, and the floating indicator changes from Ready to Recording immediately.
-- [ ] Press Pause/Resume twice while typing in another app: the indicator clearly changes to Paused with a frozen timer, then Recording with the timer advancing; the shortcut characters do not leak into the foreground app.
-- [ ] Press Stop & Save: the indicator shows Saving, then Recording Saved only after finalization succeeds, including final duration; it returns to Ready after the confirmation interval.
+- [ ] Open Keybinds settings: the two defaults (**⌥R** and **⌥P**) appear, can be changed/cleared/reset, reject plain or duplicate chords, and report a deliberately conflicting/reserved chord honestly.
+- [ ] With Transcride behind Finder, press **⌥R**: Transcride does not take focus, a new recording begins in the expected vault folder, and the floating indicator changes from Ready to Recording immediately.
+- [ ] Press **⌥P** twice while typing in another app: the indicator clearly changes to Paused with a frozen timer, then Recording with the timer advancing; the shortcut characters do not leak into the foreground app.
+- [ ] Press **⌥R** again: the indicator shows Saving, then Recording Saved only after finalization succeeds, including final duration; it returns to Ready after the confirmation interval.
 - [ ] Play the saved audio in Transcride: it contains the expected speech, excludes the pause interval, has waveform/duration metadata, and automatically transcribes.
 - [ ] Repeat from Safari, a full-screen app, another Space, a minimized Transcride window, and a hidden Transcride app. No action unexpectedly brings the main window forward.
 - [ ] Drag the indicator to another corner and relaunch: it returns there. Disconnect that monitor: the indicator moves fully onto an available screen. Reset Indicator Position works.

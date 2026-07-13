@@ -404,12 +404,12 @@ final class AppModel {
             guard let self else { return }
             Task {
                 switch action {
-                case .startNewRecording:
-                    await self.performRecordingCommand(.startNew)
+                case .toggleRecording:
+                    await self.performRecordingCommand(
+                        self.recorder.state == .idle ? .startNew : .stopAndSave
+                    )
                 case .pauseResumeRecording:
                     await self.performRecordingCommand(.pauseResume)
-                case .stopAndSaveRecording:
-                    await self.performRecordingCommand(.stopAndSave)
                 }
             }
         }
@@ -1332,14 +1332,13 @@ final class AppModel {
 
     var globalRecordingPresentationState: GlobalRecordingPresentationState {
         if let globalRecordingTransientState { return globalRecordingTransientState }
-        let start = (globalShortcutPreferences.bindings[.startNewRecording] ?? nil)?.glyphDescription ?? ""
+        let toggle = (globalShortcutPreferences.bindings[.toggleRecording] ?? nil)?.glyphDescription ?? ""
         let pause = (globalShortcutPreferences.bindings[.pauseResumeRecording] ?? nil)?.glyphDescription ?? ""
-        let stop = (globalShortcutPreferences.bindings[.stopAndSaveRecording] ?? nil)?.glyphDescription ?? ""
         switch recorder.state {
         case .recording:
-            return .recording(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: stop)
+            return .recording(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: toggle)
         case .paused:
-            return .paused(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: stop)
+            return .paused(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: toggle)
         case .finalizing:
             return .saving(elapsed: recorder.elapsed)
         case .idle:
@@ -1363,10 +1362,10 @@ final class AppModel {
                capacity < 32 * 1_024 * 1_024 {
                 return .needsAttention("The vault volume is too low on free disk space to record safely.")
             }
-            if globalShortcutService.statuses[.startNewRecording]?.isRegistered != true {
-                return .needsAttention("The Start shortcut is unavailable. Open Keybinds settings.")
+            if globalShortcutService.statuses[.toggleRecording]?.isRegistered != true {
+                return .needsAttention("The Start / Stop shortcut is unavailable. Open Keybinds settings.")
             }
-            return .ready(startShortcut: start)
+            return .ready(startShortcut: toggle)
         }
     }
 

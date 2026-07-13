@@ -18,7 +18,7 @@ struct GlobalRecordingIntegrationTests {
         #expect(GlobalShortcutPreferencesStore.load(defaults: defaults) == changed)
 
         var obsolete = changed
-        obsolete.version = 0
+        obsolete.version = GlobalShortcutPreferences.currentVersion - 1
         GlobalShortcutPreferencesStore.save(obsolete, defaults: defaults)
         #expect(GlobalShortcutPreferencesStore.load(defaults: defaults) == .defaults)
     }
@@ -39,6 +39,21 @@ struct GlobalRecordingIntegrationTests {
         for action in GlobalShortcutAction.allCases {
             #expect(service.statuses[action] == .disabled)
         }
+        service.shutdown()
+    }
+
+    @Test func serviceEmitsOncePerPhysicalPress() {
+        let service = GlobalShortcutService()
+        var actions: [GlobalShortcutAction] = []
+        service.onAction = { actions.append($0) }
+
+        service.receiveHotKeyEvent(action: .toggleRecording, isPressed: true)
+        service.receiveHotKeyEvent(action: .toggleRecording, isPressed: true)
+        #expect(actions == [.toggleRecording])
+
+        service.receiveHotKeyEvent(action: .toggleRecording, isPressed: false)
+        service.receiveHotKeyEvent(action: .toggleRecording, isPressed: true)
+        #expect(actions == [.toggleRecording, .toggleRecording])
         service.shutdown()
     }
 

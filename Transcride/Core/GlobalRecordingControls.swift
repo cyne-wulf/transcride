@@ -1,17 +1,15 @@
 import Foundation
 
 enum GlobalShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
-    case startNewRecording
+    case toggleRecording
     case pauseResumeRecording
-    case stopAndSaveRecording
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .startNewRecording: "Start New Recording"
+        case .toggleRecording: "Start / Stop & Save Recording"
         case .pauseResumeRecording: "Pause / Resume Recording"
-        case .stopAndSaveRecording: "Stop & Save Recording"
         }
     }
 }
@@ -61,14 +59,11 @@ struct GlobalShortcutChord: Codable, Hashable, Sendable {
         return labels[keyCode] ?? "Key (keyCode)"
     }
 
-    static let defaultStart = Self(
-        keyCode: 15, modifiers: [.control, .option, .command]
+    static let defaultToggleRecording = Self(
+        keyCode: 15, modifiers: [.option]
     )
     static let defaultPauseResume = Self(
-        keyCode: 35, modifiers: [.control, .option, .command]
-    )
-    static let defaultStopAndSave = Self(
-        keyCode: 1, modifiers: [.control, .option, .command]
+        keyCode: 35, modifiers: [.option]
     )
 }
 
@@ -89,7 +84,7 @@ enum GlobalShortcutValidation: Equatable, Sendable {
 }
 
 struct GlobalShortcutPreferences: Codable, Equatable, Sendable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     var version = currentVersion
     var isEnabled = true
@@ -97,9 +92,8 @@ struct GlobalShortcutPreferences: Codable, Equatable, Sendable {
     var bindings: [GlobalShortcutAction: GlobalShortcutChord?]
 
     static let defaults = Self(bindings: [
-        .startNewRecording: .defaultStart,
+        .toggleRecording: .defaultToggleRecording,
         .pauseResumeRecording: .defaultPauseResume,
-        .stopAndSaveRecording: .defaultStopAndSave,
     ])
 
     func validation(

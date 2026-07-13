@@ -5,12 +5,11 @@ import Testing
 struct GlobalRecordingControlsTests {
     @Test func defaultsMatchProductChords() {
         let preferences = GlobalShortcutPreferences.defaults
-        #expect(preferences.bindings[.startNewRecording] == .defaultStart)
+        #expect(preferences.bindings[.toggleRecording] == .defaultToggleRecording)
         #expect(preferences.bindings[.pauseResumeRecording] == .defaultPauseResume)
-        #expect(preferences.bindings[.stopAndSaveRecording] == .defaultStopAndSave)
-        #expect(GlobalShortcutChord.defaultStart.glyphDescription == "⌃⌥⌘R")
-        #expect(GlobalShortcutChord.defaultPauseResume.glyphDescription == "⌃⌥⌘P")
-        #expect(GlobalShortcutChord.defaultStopAndSave.glyphDescription == "⌃⌥⌘S")
+        #expect(GlobalShortcutAction.allCases.count == 2)
+        #expect(GlobalShortcutChord.defaultToggleRecording.glyphDescription == "⌥R")
+        #expect(GlobalShortcutChord.defaultPauseResume.glyphDescription == "⌥P")
     }
 
     @Test func validationRejectsPlainShiftAndDuplicates() {
@@ -21,8 +20,8 @@ struct GlobalRecordingControlsTests {
 
         let preferences = GlobalShortcutPreferences.defaults
         #expect(preferences.validation(
-            for: .pauseResumeRecording, chord: .defaultStart
-        ) == .duplicate(.startNewRecording))
+            for: .pauseResumeRecording, chord: .defaultToggleRecording
+        ) == .duplicate(.toggleRecording))
     }
 
     @Test func preferencesRoundTrip() throws {
@@ -47,8 +46,8 @@ struct GlobalRecordingControlsTests {
     @Test func presentationExpiresToReady() {
         let now = Date(timeIntervalSince1970: 100)
         let saved = GlobalRecordingPresentationState.saved(duration: 4, until: now)
-        #expect(saved.stateAfterExpiring(at: now, readyShortcut: "⌃⌥⌘R") == .ready(
-            startShortcut: "⌃⌥⌘R"
+        #expect(saved.stateAfterExpiring(at: now, readyShortcut: "⌥R") == .ready(
+            startShortcut: "⌥R"
         ))
     }
 
