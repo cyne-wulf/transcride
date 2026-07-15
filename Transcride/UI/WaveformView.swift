@@ -8,14 +8,10 @@ import SwiftUI
 /// moves, so both layers consume cached column means instead of rescanning the
 /// full peak array on every frame.
 struct WaveformView: View {
-    var peaks: [Float]
-    /// Changes only when the waveform content changes, not as playback moves.
-    var cacheID: String
+    var displayCache: WaveformDisplayCache
     /// 0…1 played fraction.
     var progress: Double
     var onScrub: (Double) -> Void
-
-    @State private var displayCache = WaveformDisplayCache()
 
     var body: some View {
         GeometryReader { geometry in
@@ -39,15 +35,6 @@ struct WaveformView: View {
                         onScrub(min(1, max(0, value.location.x / width)))
                     }
             )
-        }
-        .task(id: cacheID) {
-            displayCache = WaveformDisplayCache()
-            let sourcePeaks = peaks
-            let cache = await Task.detached(priority: .userInitiated) {
-                WaveformDisplayCache(peaks: sourcePeaks)
-            }.value
-            guard !Task.isCancelled else { return }
-            displayCache = cache
         }
     }
 

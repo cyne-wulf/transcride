@@ -118,6 +118,8 @@ struct WaveformTests {
         try original.write(to: url)
         let loaded = try #require(WaveformData.load(from: url))
         #expect(loaded == original)
+        #expect(loaded.displayCache.peakCount == loaded.peaks.count)
+        #expect(loaded.displayCache.columnValues(columns: 3).count == 3)
 
         // Corrupt/unknown content is treated as missing (regenerate).
         try AtomicFile.write("{}", to: url)

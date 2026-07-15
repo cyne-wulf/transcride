@@ -1202,9 +1202,7 @@ private struct PlaybackSection: View {
     private var waveformArea: some View {
         if let waveform = displayedWaveform {
             WaveformView(
-                peaks: waveform.peaks,
-                cacheID: "\(entry.relativePath)|audio:\(model.audioRevision)"
-                    + "|replacement:\(model.replacementTakeWaveformID?.uuidString ?? "none")",
+                displayCache: waveform.displayCache,
                 progress: player.progress
             ) { fraction in
                 player.seek(toFraction: fraction)

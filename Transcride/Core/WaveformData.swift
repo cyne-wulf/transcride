@@ -25,12 +25,44 @@ struct WaveformData: Codable, Equatable, Sendable {
     var peaksPerSecond: Int
     var duration: Double
     var peaks: [Float]
+    /// Derived once with the waveform so the first Canvas render is complete.
+    /// This is intentionally omitted from waveform.json.
+    let displayCache: WaveformDisplayCache
 
     init(peaksPerSecond: Int = WaveformData.standardPeaksPerSecond, duration: Double, peaks: [Float]) {
         self.version = 1
         self.peaksPerSecond = peaksPerSecond
         self.duration = duration
         self.peaks = peaks
+        self.displayCache = WaveformDisplayCache(peaks: peaks)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, peaksPerSecond, duration, peaks
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        peaksPerSecond = try container.decode(Int.self, forKey: .peaksPerSecond)
+        duration = try container.decode(Double.self, forKey: .duration)
+        peaks = try container.decode([Float].self, forKey: .peaks)
+        displayCache = WaveformDisplayCache(peaks: peaks)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(peaksPerSecond, forKey: .peaksPerSecond)
+        try container.encode(duration, forKey: .duration)
+        try container.encode(peaks, forKey: .peaks)
+    }
+
+    static func == (lhs: WaveformData, rhs: WaveformData) -> Bool {
+        lhs.version == rhs.version
+            && lhs.peaksPerSecond == rhs.peaksPerSecond
+            && lhs.duration == rhs.duration
+            && lhs.peaks == rhs.peaks
     }
 
     static func url(inEntry entryURL: URL) -> URL {
