@@ -272,7 +272,11 @@ private struct TrashAudioPreview: View {
     @ViewBuilder
     private var waveform: some View {
         if let data = preview.waveform {
-            WaveformView(peaks: data.peaks, progress: player.progress) { fraction in
+            WaveformView(
+                peaks: data.peaks,
+                cacheID: "trash:\(preview.item.id)",
+                progress: player.progress
+            ) { fraction in
                 player.seek(toFraction: fraction)
             }
         } else if let reason = preview.audioUnavailableReason {

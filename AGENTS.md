@@ -20,4 +20,5 @@ Native macOS (Swift + SwiftUI, macOS 15+, Apple Silicon) voice recorder + transc
   - `xcodebuild -project Transcride.xcodeproj -scheme Transcride -destination 'platform=macOS,arch=arm64' build`
   - `xcodebuild -project Transcride.xcodeproj -scheme Transcride -destination 'platform=macOS,arch=arm64' test`
   - `Scripts/make-fixture-vault.sh [count] [dir]` — generate a fixture vault (default 500 entries into `TestVault-500/`, gitignored)
+  - `Scripts/make-long-entry-fixture.sh --source <entry-dir> [--hours 12]` — loop a real entry into a timed long-input fixture (default `TestVault-12h/`, gitignored; requires Python 3 + FFmpeg)
 - Test target compiles `Transcride/Core` sources directly (no app host); app-layer/UI code lives in `Transcride/App` and `Transcride/UI` and is not unit-tested.

@@ -4,13 +4,18 @@ import SwiftUI
 /// bars, played portion tinted, playhead line, drag anywhere to scrub.
 ///
 /// The bars are drawn in two identical Canvas layers (base + accent) with the
-/// accent layer masked to the played width — so playhead movement only moves
-/// a mask, it never re-renders the peak bars.
+/// accent layer masked to the played width. Canvas may redraw as the playhead
+/// moves, so both layers consume cached column means instead of rescanning the
+/// full peak array on every frame.
 struct WaveformView: View {
     var peaks: [Float]
+    /// Changes only when the waveform content changes, not as playback moves.
+    var cacheID: String
     /// 0…1 played fraction.
     var progress: Double
     var onScrub: (Double) -> Void
+
+    @State private var displayCache = WaveformDisplayCache()
 
     var body: some View {
         GeometryReader { geometry in
@@ -35,11 +40,20 @@ struct WaveformView: View {
                     }
             )
         }
+        .task(id: cacheID) {
+            displayCache = WaveformDisplayCache()
+            let sourcePeaks = peaks
+            let cache = await Task.detached(priority: .userInitiated) {
+                WaveformDisplayCache(peaks: sourcePeaks)
+            }.value
+            guard !Task.isCancelled else { return }
+            displayCache = cache
+        }
     }
 
     private func bars(color: Color) -> some View {
         Canvas { context, size in
-            Self.drawBars(peaks: peaks, context: &context, size: size, color: color)
+            Self.drawBars(cache: displayCache, context: &context, size: size, color: color)
         }
     }
 
@@ -47,13 +61,18 @@ struct WaveformView: View {
     static let barGap: CGFloat = 1
 
     /// One bar per (barWidth+barGap) column; bar heights come from
-    /// `WaveformDisplay.columnValues` (mean per column, loudest column fills
-    /// the height — see there for why max-aggregation is wrong).
-    static func drawBars(peaks: [Float], context: inout GraphicsContext, size: CGSize, color: Color) {
-        guard !peaks.isEmpty, size.width > 0, size.height > 0 else { return }
+    /// the prefix-sum display cache (mean per column, loudest column fills the
+    /// height — see `WaveformDisplay` for why max-aggregation is wrong).
+    static func drawBars(
+        cache: WaveformDisplayCache,
+        context: inout GraphicsContext,
+        size: CGSize,
+        color: Color
+    ) {
+        guard cache.peakCount > 0, size.width > 0, size.height > 0 else { return }
         let step = barWidth + barGap
         let columns = max(1, Int(size.width / step))
-        let values = WaveformDisplay.columnValues(peaks: peaks, columns: columns)
+        let values = cache.columnValues(columns: columns)
         let midY = size.height / 2
 
         var path = Path()

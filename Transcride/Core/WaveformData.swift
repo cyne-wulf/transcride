@@ -95,14 +95,39 @@ struct WaveformData: Codable, Equatable, Sendable {
 /// scale.
 enum WaveformDisplay {
     static func columnValues(peaks: [Float], columns: Int) -> [Float] {
-        guard columns > 0, !peaks.isEmpty else { return [] }
+        WaveformDisplayCache(peaks: peaks).columnValues(columns: columns)
+    }
+}
+
+/// Immutable prefix-sum cache for repeatedly drawing one waveform at changing
+/// widths. Playback updates the playhead many times per second; without this
+/// cache each Canvas frame scans the full peak array twice (base + accent),
+/// which is prohibitively expensive for multi-hour recordings.
+struct WaveformDisplayCache: Sendable {
+    private var prefixSums: [Double]
+
+    init(peaks: [Float] = []) {
+        prefixSums = [Double](repeating: 0, count: peaks.count + 1)
+        for index in peaks.indices {
+            prefixSums[index + 1] = prefixSums[index] + Double(peaks[index])
+        }
+    }
+
+    var peakCount: Int { max(0, prefixSums.count - 1) }
+
+    /// Produces the same mean-per-column normalized display values as the
+    /// one-shot path, but in O(columns) rather than O(peaks).
+    func columnValues(columns: Int) -> [Float] {
+        guard columns > 0, peakCount > 0 else { return [] }
         var values = [Float](repeating: 0, count: columns)
         for column in 0..<columns {
-            let start = column * peaks.count / columns
-            let end = min(max(start + 1, (column + 1) * peaks.count / columns), peaks.count)
-            var sum: Float = 0
-            for index in start..<end { sum += peaks[index] }
-            values[column] = sum / Float(end - start)
+            let start = column * peakCount / columns
+            let end = min(
+                max(start + 1, (column + 1) * peakCount / columns),
+                peakCount
+            )
+            let sum = prefixSums[end] - prefixSums[start]
+            values[column] = Float(sum / Double(end - start))
         }
         let scale = 1 / max(0.25, values.max() ?? 1)
         return values.map { min(1, $0 * scale) }

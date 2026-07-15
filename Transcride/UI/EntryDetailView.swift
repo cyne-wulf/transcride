@@ -1201,7 +1201,12 @@ private struct PlaybackSection: View {
     @ViewBuilder
     private var waveformArea: some View {
         if let waveform = displayedWaveform {
-            WaveformView(peaks: waveform.peaks, progress: player.progress) { fraction in
+            WaveformView(
+                peaks: waveform.peaks,
+                cacheID: "\(entry.relativePath)|audio:\(model.audioRevision)"
+                    + "|replacement:\(model.replacementTakeWaveformID?.uuidString ?? "none")",
+                progress: player.progress
+            ) { fraction in
                 player.seek(toFraction: fraction)
             }
             // In trim mode the drag handles own the waveform surface.

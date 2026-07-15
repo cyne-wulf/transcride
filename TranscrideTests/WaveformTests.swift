@@ -65,6 +65,19 @@ struct WaveformTests {
         #expect(WaveformDisplay.columnValues(peaks: [0.5], columns: 0).isEmpty)
     }
 
+    @Test func displayCacheHandlesTwelveHourWaveformAcrossRepeatedDraws() {
+        let peakCount = 12 * 60 * 60 * WaveformData.standardPeaksPerSecond
+        let peaks = (0..<peakCount).map { Float($0 % 100) / 100 }
+        let cache = WaveformDisplayCache(peaks: peaks)
+
+        #expect(cache.peakCount == 864_000)
+        for columns in [180, 240, 300, 240, 180] {
+            let values = cache.columnValues(columns: columns)
+            #expect(values.count == columns)
+            #expect(values.allSatisfy { $0 >= 0 && $0 <= 1 })
+        }
+    }
+
     @Test func generatorMatchesKnownWAV() async throws {
         let url = try TestAudio.makeWAV(seconds: 2.0, amplitude: 0.5)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
