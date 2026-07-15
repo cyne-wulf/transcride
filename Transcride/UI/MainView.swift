@@ -4,11 +4,15 @@ struct MainView: View {
     @Environment(AppModel.self) private var model
 
     @State private var showingModelOffer = false
+    @State private var responsiveLayout = ResponsiveSplitLayoutState()
+    @State private var splitWidth: CGFloat = 0
+    @State private var middleWidth: CGFloat = ResponsiveSplitLayoutState.middleMinimumWidth
+    @State private var playerWidthRequirement = PlaybackWidthRequirement()
 
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: columnVisibilityBinding) {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 200, ideal: 240)
             } content: {
@@ -21,12 +25,37 @@ struct MainView: View {
                     }
                 }
                 .navigationSplitViewColumnWidth(min: 260, ideal: 320)
-            } detail: {
-                if model.sidebarSelection == .recentlyDeleted {
-                    TrashPreviewView()
-                } else {
-                    EntryDetailView()
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.width
+                } action: { width in
+                    middleWidth = width
+                    scheduleResponsiveLayoutReconciliation()
                 }
+                .background {
+                    ResponsiveSplitViewInstaller(
+                        collapsesMiddleColumn: responsiveLayout.collapsesMiddleColumn
+                    )
+                    .frame(width: 0, height: 0)
+                }
+            } detail: {
+                Group {
+                    if model.sidebarSelection == .recentlyDeleted {
+                        TrashPreviewView(
+                            onPlaybackWidthRequirementChange: updatePlayerWidthRequirement
+                        )
+                    } else {
+                        EntryDetailView(
+                            onPlaybackWidthRequirementChange: updatePlayerWidthRequirement
+                        )
+                    }
+                }
+                .frame(minWidth: protectedDetailWidth)
+            }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                splitWidth = width
+                scheduleResponsiveLayoutReconciliation()
             }
 
             if !model.recorder.isZenMode {
@@ -47,6 +76,12 @@ struct MainView: View {
             }
         }
         .toolbar(model.recorder.isZenMode ? .hidden : .automatic, for: .windowToolbar)
+        .onChange(of: responsiveLayout.collapsesMiddleColumn, initial: true) { _, collapsed in
+            model.setMiddleColumnCollapsed(collapsed)
+        }
+        .onDisappear {
+            model.setMiddleColumnCollapsed(false)
+        }
         .background {
             if #unavailable(macOS 26.0) {
                 ToolbarFlexibleSpaceInstaller(
@@ -78,6 +113,47 @@ struct MainView: View {
             You can manage models anytime in Settings → Transcription.
             """)
         }
+    }
+
+    private var columnVisibilityBinding: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { responsiveLayout.swiftUIVisibility },
+            set: { visibility in
+                guard visibility != responsiveLayout.swiftUIVisibility else { return }
+                responsiveLayout = responsiveLayout.userSelected(
+                    visibility == .all ? .allColumns : .middleAndDetail
+                )
+            }
+        )
+    }
+
+    private func reconcileResponsiveLayout() {
+        let metrics = ResponsiveSplitMetrics(
+            splitWidth: splitWidth,
+            middleWidth: middleWidth,
+            player: playerWidthRequirement
+        )
+        let next = responsiveLayout.reconciled(with: metrics)
+        if next != responsiveLayout {
+            responsiveLayout = next
+        }
+    }
+
+    private func scheduleResponsiveLayoutReconciliation() {
+        DispatchQueue.main.async {
+            reconcileResponsiveLayout()
+        }
+    }
+
+    private func updatePlayerWidthRequirement(_ requirement: PlaybackWidthRequirement) {
+        playerWidthRequirement = requirement
+        scheduleResponsiveLayoutReconciliation()
+    }
+
+    private var protectedDetailWidth: CGFloat? {
+        guard responsiveLayout.presentation != .allColumns,
+              playerWidthRequirement.isPresent else { return nil }
+        return playerWidthRequirement.requiredDetailWidth
     }
 
     private var toolbarReconciliationToken: String {

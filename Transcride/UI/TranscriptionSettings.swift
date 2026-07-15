@@ -11,10 +11,10 @@ struct TranscriptionModelsSection: View {
         Section("Transcription") {
             Picker("Default Model", selection: $defaultModelID) {
                 ForEach(ModelCatalog.available) { info in
-                    Text(info.displayName).tag(info.id)
+                    Text(modelPickerLabel(info)).tag(info.id)
                 }
             }
-            Text("New recordings and imports are transcribed with this model. Retranscribe lets you pick a different one per entry.")
+            Text("Parakeet is the best all-around model. New recordings and imports are transcribed with the selected model; Retranscribe lets you choose a different one per entry.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ForEach(ModelCatalog.available) { info in
@@ -26,6 +26,12 @@ struct TranscriptionModelsSection: View {
                 .foregroundStyle(.secondary)
         }
         .task { await model.modelManager.refresh() }
+    }
+
+    private func modelPickerLabel(_ info: TranscriptionModelInfo) -> String {
+        info.id == ModelCatalog.parakeetV3.id
+            ? info.displayName + " (Recommended)"
+            : info.displayName
     }
 }
 
@@ -125,6 +131,7 @@ struct VocabularySection: View {
     @State private var rows: [Row] = []
     @State private var newTerm = ""
     @State private var loaded = false
+    @State private var transferMessage: String?
     /// Terms added this session and not yet offered for re-apply (VOC-4).
     @State private var pendingReapplyTerms: [String] = []
     @State private var reapplyRequest: ReapplyRequest?
@@ -140,26 +147,61 @@ struct VocabularySection: View {
                 Text("Open a vault to edit its vocabulary.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach($rows) { $row in
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        TextField("Term", text: $row.text)
-                            .textFieldStyle(.plain)
+                        Label("Add Words or Phrases", systemImage: "text.badge.plus")
+                            .font(.subheadline.weight(.medium))
+
+                        Spacer()
+
                         Button {
-                            rows.removeAll { $0.id == row.id }
+                            pasteAndImport()
                         } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .foregroundStyle(.secondary)
+                            Label("Paste & Import", systemImage: "doc.on.clipboard")
                         }
-                        .buttonStyle(.plain)
-                        .help("Remove term")
+                        .help("Import a Markdown or plain-text list from the clipboard")
+
+                        Button {
+                            copyDictionary()
+                        } label: {
+                            Label("Copy Dictionary", systemImage: "doc.on.doc")
+                        }
+                        .disabled(currentTerms.isEmpty)
+                        .help("Copy the vocabulary as a Markdown list")
+                    }
+
+                    HStack {
+                        TextField(
+                            "New vocabulary terms",
+                            text: $newTerm,
+                            prompt: Text("For example: Transcride"),
+                            axis: .vertical
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1 ... 5)
+                        .accessibilityLabel("New vocabulary words or phrases")
+                        .onSubmit(addTerm)
+
+                        Button("Add", action: addTerm)
+                            .disabled(VocabularyFile.parseImportedTerms(newTerm).isEmpty)
+                    }
+
+                    Text("Enter one term, or paste a Markdown or plain-text list. Names, product terms, and jargon should appear exactly as written.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let transferMessage {
+                        Text(transferMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                HStack {
-                    TextField("Add a word or phrase…", text: $newTerm)
-                        .textFieldStyle(.plain)
-                        .onSubmit(addTerm)
-                    Button("Add", action: addTerm)
-                        .disabled(newTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+                .padding(10)
+                .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
                 }
                 if !pendingReapplyTerms.isEmpty {
                     HStack {
@@ -180,7 +222,7 @@ struct VocabularySection: View {
                     }
                 }
                 HStack {
-                    Text("Names and jargon listed here are corrected in every transcript (and passed to models that support biasing). Saved to vocabulary.txt in the vault.")
+                    Text("Whisper Small is the most reliable model for applying custom dictionary words. Other models may apply them some of the time. Terms are saved to vocabulary.txt in the vault.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -194,6 +236,20 @@ struct VocabularySection: View {
                         $0.text.trimmingCharacters(in: .whitespaces).isEmpty
                     })
                     .help("Check every existing transcript against the whole vocabulary")
+                }
+                ForEach($rows) { $row in
+                    HStack {
+                        TextField("Term", text: $row.text)
+                            .textFieldStyle(.plain)
+                        Button {
+                            rows.removeAll { $0.id == row.id }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove term")
+                    }
                 }
             }
         }
@@ -220,14 +276,49 @@ struct VocabularySection: View {
     }
 
     private func addTerm() {
-        let term = newTerm.trimmingCharacters(in: .whitespaces)
-        guard !term.isEmpty else { return }
-        rows.append(Row(text: term))
+        guard importTerms(VocabularyFile.parseImportedTerms(newTerm)) > 0 else { return }
         newTerm = ""
+        transferMessage = nil
+    }
+
+    private var currentTerms: [String] {
+        rows
+            .map { $0.text.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    @discardableResult
+    private func importTerms(_ candidates: [String]) -> Int {
+        var existing = Set(currentTerms)
+        let additions = candidates.filter { existing.insert($0).inserted }
+        guard !additions.isEmpty else { return 0 }
+
+        rows.append(contentsOf: additions.map { Row(text: $0) })
         // Offer re-apply for completed additions only — never per keystroke.
-        if !pendingReapplyTerms.contains(term) {
+        for term in additions where !pendingReapplyTerms.contains(term) {
             pendingReapplyTerms.append(term)
         }
+        return additions.count
+    }
+
+    private func pasteAndImport() {
+        guard let text = NSPasteboard.general.string(forType: .string) else {
+            transferMessage = "The clipboard does not contain text."
+            return
+        }
+        let count = importTerms(VocabularyFile.parseImportedTerms(text))
+        transferMessage = count == 0
+            ? "No new terms were found."
+            : "Imported \(count) new \(count == 1 ? "term" : "terms")."
+    }
+
+    private func copyDictionary() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(
+            VocabularyFile.markdownList(currentTerms),
+            forType: .string
+        )
+        transferMessage = "Copied \(currentTerms.count) \(currentTerms.count == 1 ? "term" : "terms") as Markdown."
     }
 
     private func persist() {

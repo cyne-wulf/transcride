@@ -19,6 +19,34 @@ enum VocabularyFile {
         terms.joined(separator: "\n") + (terms.isEmpty ? "" : "\n")
     }
 
+    /// Parses a clipboard-friendly vocabulary list. In addition to the vault's
+    /// plain one-term-per-line format, accept common Markdown bullets and
+    /// numbered-list markers so a copied dictionary can be pasted back in.
+    static func parseImportedTerms(_ text: String) -> [String] {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .compactMap { rawLine in
+                var term = rawLine.trimmingCharacters(in: .whitespaces)
+                guard !term.isEmpty, !term.hasPrefix("#") else { return nil }
+
+                let bulletPrefixes = ["- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "]
+                if let prefix = bulletPrefixes.first(where: { term.hasPrefix($0) }) {
+                    term.removeFirst(prefix.count)
+                } else if let marker = term.range(
+                    of: #"^\d+[.)]\s+"#,
+                    options: .regularExpression
+                ) {
+                    term.removeSubrange(marker)
+                }
+
+                term = term.trimmingCharacters(in: .whitespaces)
+                return term.isEmpty ? nil : term
+            }
+    }
+
+    static func markdownList(_ terms: [String]) -> String {
+        terms.map { "- \($0)" }.joined(separator: "\n") + (terms.isEmpty ? "" : "\n")
+    }
+
     static func load(fromVault vaultURL: URL) -> [String] {
         guard let text = try? String(contentsOf: url(inVault: vaultURL), encoding: .utf8) else {
             return []
@@ -28,6 +56,34 @@ enum VocabularyFile {
 
     static func save(_ terms: [String], toVault vaultURL: URL) throws {
         try AtomicFile.write(serialize(terms), to: url(inVault: vaultURL))
+    }
+}
+
+/// Builds the natural-language context given to Whisper Small for vocabulary
+/// biasing. A bare comma-separated dictionary looks like preceding transcript
+/// text to Whisper and can be echoed, shuffled, or repeated on short clips.
+/// Framing the same terms as context keeps the spellings available without
+/// inviting the decoder to continue the list.
+enum VocabularyBiasPrompt {
+    static func text(for rawTerms: [String]) -> String? {
+        var seen: Set<String> = []
+        let terms = rawTerms.compactMap { rawTerm -> String? in
+            let term = rawTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty, seen.insert(term).inserted else { return nil }
+            return term
+        }
+        guard !terms.isEmpty else { return nil }
+
+        let list: String
+        switch terms.count {
+        case 1:
+            list = terms[0]
+        case 2:
+            list = "\(terms[0]) and \(terms[1])"
+        default:
+            list = terms.dropLast().joined(separator: ", ") + ", and " + terms.last!
+        }
+        return "Important vocabulary for the following recording includes \(list)."
     }
 }
 

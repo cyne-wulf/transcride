@@ -197,11 +197,15 @@ enum GlobalShortcutPreferencesStore {
 
     static func load(defaults: UserDefaults = .standard) -> GlobalShortcutPreferences {
         guard let data = defaults.data(forKey: defaultsKey),
-              let preferences = try? JSONDecoder().decode(
+              var preferences = try? JSONDecoder().decode(
                 GlobalShortcutPreferences.self, from: data
               ),
-              preferences.version == GlobalShortcutPreferences.currentVersion
+              (2...GlobalShortcutPreferences.currentVersion).contains(preferences.version)
         else { return .defaults }
+        if preferences.version != GlobalShortcutPreferences.currentVersion {
+            preferences.version = GlobalShortcutPreferences.currentVersion
+            save(preferences, defaults: defaults)
+        }
         return preferences
     }
 

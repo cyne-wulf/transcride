@@ -83,13 +83,104 @@ enum GlobalShortcutValidation: Equatable, Sendable {
     }
 }
 
+enum BackgroundIndicatorRetention: String, CaseIterable, Codable, Identifiable, Sendable {
+    case quick
+    case oneMinute
+    case fiveMinutes
+    case tenMinutes
+    case thirtyMinutes
+    case oneHour
+    case never
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .quick: "Quick (3 seconds)"
+        case .oneMinute: "1 minute"
+        case .fiveMinutes: "5 minutes"
+        case .tenMinutes: "10 minutes"
+        case .thirtyMinutes: "30 minutes"
+        case .oneHour: "1 hour"
+        case .never: "Never"
+        }
+    }
+
+    var interval: TimeInterval? {
+        switch self {
+        case .quick: 2.6
+        case .oneMinute: 60
+        case .fiveMinutes: 5 * 60
+        case .tenMinutes: 10 * 60
+        case .thirtyMinutes: 30 * 60
+        case .oneHour: 60 * 60
+        case .never: nil
+        }
+    }
+}
+
 struct GlobalShortcutPreferences: Codable, Equatable, Sendable {
-    static let currentVersion = 2
+    static let currentVersion = 4
 
     var version = currentVersion
     var isEnabled = true
+    var showsMenuBarItem = true
     var showsBackgroundIndicator = true
+    var backgroundIndicatorRetention = BackgroundIndicatorRetention.tenMinutes
     var bindings: [GlobalShortcutAction: GlobalShortcutChord?]
+
+    init(
+        version: Int = currentVersion,
+        isEnabled: Bool = true,
+        showsMenuBarItem: Bool = true,
+        showsBackgroundIndicator: Bool = true,
+        backgroundIndicatorRetention: BackgroundIndicatorRetention = .tenMinutes,
+        bindings: [GlobalShortcutAction: GlobalShortcutChord?]
+    ) {
+        self.version = version
+        self.isEnabled = isEnabled
+        self.showsMenuBarItem = showsMenuBarItem
+        self.showsBackgroundIndicator = showsBackgroundIndicator
+        self.backgroundIndicatorRetention = backgroundIndicatorRetention
+        self.bindings = bindings
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case isEnabled
+        case showsMenuBarItem
+        case showsBackgroundIndicator
+        case backgroundIndicatorRetention
+        case bindings
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 2
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        showsMenuBarItem = try container.decodeIfPresent(
+            Bool.self, forKey: .showsMenuBarItem
+        ) ?? true
+        showsBackgroundIndicator = try container.decodeIfPresent(
+            Bool.self, forKey: .showsBackgroundIndicator
+        ) ?? true
+        backgroundIndicatorRetention = try container.decodeIfPresent(
+            BackgroundIndicatorRetention.self, forKey: .backgroundIndicatorRetention
+        ) ?? .tenMinutes
+        bindings = try container.decode(
+            [GlobalShortcutAction: GlobalShortcutChord?].self, forKey: .bindings
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(showsMenuBarItem, forKey: .showsMenuBarItem)
+        try container.encode(showsBackgroundIndicator, forKey: .showsBackgroundIndicator)
+        try container.encode(backgroundIndicatorRetention, forKey: .backgroundIndicatorRetention)
+        try container.encode(bindings, forKey: .bindings)
+    }
 
     static let defaults = Self(bindings: [
         .toggleRecording: .defaultToggleRecording,
@@ -188,9 +279,31 @@ enum GlobalRecordingPresentationState: Equatable, Sendable {
     case saveFailed(String)
     case unavailable(String, until: Date)
 
+    /// Passive Ready/attention states stay in the main app. The floating
+    /// indicator only accompanies a recording session into the background.
+    var belongsToRecordingSession: Bool {
+        switch self {
+        case .recording, .paused, .saving, .saved, .saveFailed:
+            true
+        case .hidden, .ready, .needsAttention, .unavailable:
+            false
+        }
+    }
+
+    var isCaptureActive: Bool {
+        switch self {
+        case .recording, .paused, .saving:
+            true
+        case .hidden, .ready, .saved, .needsAttention, .saveFailed, .unavailable:
+            false
+        }
+    }
+
     func stateAfterExpiring(at now: Date, readyShortcut: String) -> Self {
         switch self {
-        case .saved(_, let until), .unavailable(_, let until) where now >= until:
+        case .saved(_, let until) where now >= until:
+            .ready(startShortcut: readyShortcut)
+        case .unavailable(_, let until) where now >= until:
             .ready(startShortcut: readyShortcut)
         default:
             self

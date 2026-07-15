@@ -16,6 +16,8 @@ struct RootView: View {
                 MainView()
             }
         }
+        .background(MainWindowIdentityView())
+        .background(AppSceneActionBridge())
         .alert(
             "Something Went Wrong",
             isPresented: Binding(

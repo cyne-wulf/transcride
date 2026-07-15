@@ -23,8 +23,9 @@ Let the user control Transcride from any app using configurable system-wide keyb
 - Ship simple defaults: **⌥R** starts a new recording while idle and stops and saves the active recording; **⌥P** pauses or resumes. These are defaults only—the user may clear or replace either binding.
 - Shortcut capture requires at least one non-Shift modifier and rejects a modifier-only chord, plain typing key, or duplicate assignment. Show the recorded chord in standard macOS glyph order.
 - Detect registration failures and likely conflicts. A shortcut that could not be registered is visibly marked and must not appear enabled. Never silently steal a chord from another application.
-- Include **Enable Global Controls**, **Show indicator while Transcride is in the background**, and **Reset to Defaults** controls. Settings persist across relaunch.
-- The existing in-app shortcuts continue to work. The menu bar and Keyboard Shortcuts window show both local and global chords without implying that a local bare-key shortcut works outside Transcride.
+- Include **Enable Global Controls**, **Show Transcride in menu bar**, **Show indicator while Transcride is in the background**, a post-recording visibility duration from Quick through Never (10 minutes by default), and **Reset to Defaults** controls. Settings persist across relaunch. The menu-bar item is shown by default and can also hide itself persistently.
+- The native menu-bar item shows honest live recording state and elapsed time; Start/Stop & Save and Pause/Resume controls with their current global shortcut assignments; Open Transcride; Settings; Hide Menu Bar Item; and Quit. Its clicked controls remain usable when global shortcuts are disabled and call the same serialized `AppModel` intents.
+- The existing in-app shortcuts continue to work. The menu bar and Keyboard Shortcuts window show both local and global chords without implying that a local bare-key shortcut works outside Transcride or registering a duplicate menu key equivalent.
 
 ### System-wide shortcut behavior (GLB-2)
 
@@ -61,7 +62,7 @@ The indicator clearly distinguishes these states without relying on color alone:
 - **Ready to record:** stationary red ring, label **Ready**, and the Start shortcut. This means a writable vault, microphone authorization, and registered Start shortcut are available.
 - **Recording:** solid red circle with a calm pulse, label **Recording**, increasing recorded-audio timer, and the Pause/Resume and Stop & Save shortcut hints. Respect Reduce Motion by replacing the pulse with a static high-contrast state.
 - **Paused:** non-pulsing red circle containing a pause glyph, label **Paused**, and a frozen recorded-audio timer. It must never look like recording is continuing.
-- **Finished recording / Recording saved:** checkmark plus label **Recording Saved** and final duration for a short confirmation interval, then transition to Ready if Transcride remains unfocused.
+- **Finished recording / Recording saved:** checkmark plus label **Recording Saved** and final duration for a short confirmation interval, then transition to Ready if Transcride remains unfocused. By default the compact indicator remains available for follow-up recordings for 10 minutes after the last save; the user may choose Quick, a longer duration, or Never, and may always dismiss it immediately from its hover control.
 
 Internal/transitional states may also appear when necessary:
 
@@ -92,6 +93,7 @@ Internal/transitional states may also appear when necessary:
 
 - Add a pure, unit-testable global-shortcut model: action ids, chord validation, duplicate/conflict status, persistence representation, and state-dependent availability.
 - `GlobalShortcutService` owns OS registration only. `AppModel` exposes serialized intents for start, pause/resume, and stop/save. The in-app menu, local shortcuts, global shortcuts, and floating indicator all call those same intents.
+- Implement the menu-bar surface as one stable AppKit `NSStatusItem`/`NSMenu` graph. Update existing item titles, symbols, and enablement in place rather than rebuilding rows while AppKit tracks the pointer; sample elapsed time once per second only while the menu is open. It derives state from `AppModel`, remains independent of global-hotkey enablement, and targets the identified main window rather than an auxiliary Settings/help window when opening Transcride.
 - Implement the indicator as a dedicated nonactivating `NSPanel`/window controller hosting SwiftUI content. Keep window-level, Space, drag, and screen-position policy outside ordinary app views.
 - The indicator observes state; it does not own timers, recording state, or finalization tasks. Use the recorder's recorded-audio elapsed value so pauses do not inflate duration.
 - Do not add a general event tap, Accessibility-trusted listener, or background agent unless the human explicitly expands scope after this milestone.
@@ -110,7 +112,7 @@ Internal/transitional states may also appear when necessary:
 ## Definition of done
 
 - Both configurable shortcuts work from at least Finder, Safari, a full-screen app, and another Space without activating Transcride.
-- Unit tests cover chord validation; duplicate/default handling; persistence; registration-state mapping; serialized command transitions; rapid-key-repeat suppression; indicator presentation states; saved-state timeout; screen-anchor restoration/clamping.
+- Unit tests cover chord validation; duplicate/default handling; persistence; registration-state mapping; serialized command transitions; rapid-key-repeat suppression; indicator presentation states; stable menu-item identity and menu presentation mapping; saved-state timeout; screen-anchor restoration/clamping.
 - Integration tests cover registration/unregistration; minimized/hidden/background operation; permission/setup failure; start/pause/resume/stop-save; finalization failure; sleep/wake; display removal; app activation hiding the panel; Milestone 6 recovery of a globally started recording.
 - The global listener observes only registered chords. Privacy review confirms there is no general keystroke capture or telemetry.
 - `xcodebuild test` passes and the installed `/Applications/Transcride.app` is the build used for global-hotkey and multi-Space verification.
@@ -119,10 +121,11 @@ Internal/transitional states may also appear when necessary:
 
 **Verification is interactive.** Present one item at a time with exact steps, wait for pass/fail, and keep a running tally. On failure, fix it and repeat affected passed items. Write the handoff only after every box is human-confirmed.
 
-- [ ] Open Keybinds settings: the two defaults (**⌥R** and **⌥P**) appear, can be changed/cleared/reset, reject plain or duplicate chords, and report a deliberately conflicting/reserved chord honestly.
+- [ ] Open Keybinds settings: the two defaults (**⌥R** and **⌥P**) appear, can be changed/cleared/reset, reject plain or duplicate chords, and report a deliberately conflicting/reserved chord honestly. The menu-bar item and background indicator can be disabled independently, and the indicator's post-recording duration offers Quick through Never with 10 minutes selected by default.
+- [ ] Open the native menu-bar item: it shows live state/time; Start/Stop & Save and Pause/Resume with the current shortcut assignments; Open Transcride; Settings; Hide; and Quit. During a recording, leave it open for at least 15 seconds and repeatedly hover every row plus the nonselectable status header; the highlight never jumps to another row or selects the recording-status region as the timer advances. Disable global shortcuts and confirm clicked recording controls still work. Hide the item, relaunch, confirm it stays hidden, then restore it from Settings. Close/minimize/hide the main window and confirm Open Transcride restores exactly one focused main window.
 - [ ] With Transcride behind Finder, press **⌥R**: Transcride does not take focus, a new recording begins in the expected vault folder, and the floating indicator changes from Ready to Recording immediately.
 - [ ] Press **⌥P** twice while typing in another app: the indicator clearly changes to Paused with a frozen timer, then Recording with the timer advancing; the shortcut characters do not leak into the foreground app.
-- [ ] Press **⌥R** again: the indicator shows Saving, then Recording Saved only after finalization succeeds, including final duration; it returns to Ready after the confirmation interval.
+- [ ] Press **⌥R** again: the indicator shows Saving, then Recording Saved only after finalization succeeds, including final duration; it returns to a clickable Ready circle after the confirmation interval, remains for the configured duration, starts a follow-up recording when clicked, and hides immediately when dismissed from its hover control.
 - [ ] Play the saved audio in Transcride: it contains the expected speech, excludes the pause interval, has waveform/duration metadata, and automatically transcribes.
 - [ ] Repeat from Safari, a full-screen app, another Space, a minimized Transcride window, and a hidden Transcride app. No action unexpectedly brings the main window forward.
 - [ ] Drag the indicator to another corner and relaunch: it returns there. Disconnect that monitor: the indicator moves fully onto an available screen. Reset Indicator Position works.

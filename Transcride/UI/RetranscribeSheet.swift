@@ -1,14 +1,18 @@
 import SwiftUI
 
 /// Retranscribe dialog (TRN-5): model picker (default = the user's default
-/// model) plus the speaker-detection toggle (TRN-6). Confirming enqueues the
-/// entry; the prior original is archived by the applier.
+/// model), an opt-in to make the selection the future default, and the
+/// speaker-detection toggle (TRN-6). Confirming enqueues the entry; the prior
+/// original is archived by the applier.
 struct RetranscribeSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let entry: Entry
 
+    @AppStorage(ModelCatalog.defaultModelPreferenceKey) private var defaultModelID =
+        ModelCatalog.defaultModelID
     @State private var selectedModelID = ModelCatalog.preferredDefaultModelID()
+    @State private var setAsDefaultModel = false
     @State private var detectSpeakers = false
     /// 0 = auto-detect the speaker count.
     @State private var speakerCount = 0
@@ -40,6 +44,8 @@ struct RetranscribeSheet: View {
                     Text(pickerLabel(info)).tag(info.id)
                 }
             }
+            Toggle("Set as default transcription model", isOn: $setAsDefaultModel)
+                .toggleStyle(.checkbox)
             if !selectedIsDownloaded {
                 Text("This model is not downloaded — download it in Settings → Transcription first.")
                     .font(.caption)
@@ -56,6 +62,9 @@ struct RetranscribeSheet: View {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Retranscribe") {
+                    if setAsDefaultModel {
+                        defaultModelID = selectedModelID
+                    }
                     model.transcriptionQueue?.enqueue(
                         entryRelativePath: entry.relativePath,
                         source: "retranscribe",

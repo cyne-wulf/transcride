@@ -6,7 +6,7 @@ struct TranscrideApp: App {
     @NSApplicationDelegateAdaptor(AppTerminationDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: AppWindowPresenter.mainWindowSceneID) {
             RootView()
                 .environment(model)
                 .task {
@@ -37,5 +37,6 @@ struct TranscrideApp: App {
         }
         .defaultSize(width: 560, height: 620)
         .windowResizability(.contentSize)
+
     }
 }

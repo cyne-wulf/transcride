@@ -4,11 +4,15 @@ import AppKit
 final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
     private var indicatorController: GlobalRecordingIndicatorController?
+    private var menuBarItemController: MenuBarItemController?
 
     func configure(model: AppModel) {
         Self.model = model
         if indicatorController == nil {
             indicatorController = GlobalRecordingIndicatorController(model: model)
+        }
+        if menuBarItemController == nil {
+            menuBarItemController = MenuBarItemController(model: model)
         }
     }
 
@@ -20,13 +24,16 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication, hasVisibleWindows flag: Bool
     ) -> Bool {
         if !flag {
-            sender.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+            if !AppWindowPresenter.showExistingMainWindow() {
+                sender.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+            }
         }
         return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         indicatorController?.shutdown()
+        menuBarItemController?.shutdown()
         Self.model?.shutdownGlobalRecordingControls()
     }
 

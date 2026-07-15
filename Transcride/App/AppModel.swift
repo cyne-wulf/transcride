@@ -64,8 +64,11 @@ final class AppModel {
 
     private(set) var globalShortcutPreferences = GlobalShortcutPreferencesStore.load()
     private(set) var globalRecordingTransientState: GlobalRecordingPresentationState?
+    private(set) var isGlobalIndicatorRetentionActive = false
     private var recordingCommandGate = RecordingCommandGate()
     private var globalRecordingStateTask: Task<Void, Never>?
+    private var globalIndicatorRetentionTask: Task<Void, Never>?
+    private var lastCompletedRecordingAt: Date?
 
     private(set) var transcriptionQueue: TranscriptionQueue?
     /// Bumped whenever a transcription lands so the detail view re-reads
@@ -309,6 +312,11 @@ final class AppModel {
             if selectedTrashItemID != oldValue { player.unload() }
         }
     }
+    private(set) var middleColumnIsCollapsed = false
+
+    func setMiddleColumnCollapsed(_ collapsed: Bool) {
+        middleColumnIsCollapsed = collapsed
+    }
     var errorMessage: String?
     var isCancelRecordingConfirmationPresented = false
     /// Informational notice kept separate from errors so a protected edited
@@ -417,9 +425,14 @@ final class AppModel {
     }
 
     func updateGlobalShortcutPreferences(_ preferences: GlobalShortcutPreferences) {
+        let retentionChanged = preferences.backgroundIndicatorRetention !=
+            globalShortcutPreferences.backgroundIndicatorRetention
         globalShortcutPreferences = preferences
         GlobalShortcutPreferencesStore.save(preferences)
         globalShortcutService.apply(preferences)
+        if retentionChanged, recorder.state == .idle, let lastCompletedRecordingAt {
+            beginGlobalIndicatorRetention(after: lastCompletedRecordingAt)
+        }
     }
 
     func resetGlobalShortcutPreferences() {
@@ -428,6 +441,7 @@ final class AppModel {
 
     func shutdownGlobalRecordingControls() {
         globalRecordingStateTask?.cancel()
+        globalIndicatorRetentionTask?.cancel()
         globalShortcutService.shutdown()
     }
 
@@ -1137,11 +1151,19 @@ final class AppModel {
 
         if keyCode == upArrowKeyCode || keyCode == downArrowKeyCode {
             // Option-Up/Down navigates the far-left folder/sidebar pane while
-            // leaving keyboard focus in the clip list. Plain Up/Down falls
-            // through to the List's native adjacent-clip selection.
+            // leaving keyboard focus in the clip list. Plain Up/Down normally
+            // falls through to the List, but its responder disappears when
+            // the responsive layout collapses the middle split item.
             let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard explicitModifiers == .option, editingTextView == nil else { return false }
-            return moveSidebarSelection(by: keyCode == downArrowKeyCode ? 1 : -1)
+            guard editingTextView == nil else { return false }
+            let offset = keyCode == downArrowKeyCode ? 1 : -1
+            if explicitModifiers == .option {
+                return moveSidebarSelection(by: offset)
+            }
+            if explicitModifiers.isEmpty, middleColumnIsCollapsed {
+                return moveMiddleSelection(by: offset)
+            }
+            return false
         }
 
         if keyCode == deleteKeyCode {
@@ -1229,6 +1251,33 @@ final class AppModel {
         return true
     }
 
+    private func moveMiddleSelection(by offset: Int) -> Bool {
+        switch sidebarSelection {
+        case .recentlyDeleted:
+            let ids = trashItems.map(\.id)
+            guard let nextID = ListSelectionNavigator.adjacentID(
+                in: ids,
+                selectedID: selectedTrashItemID,
+                offset: offset
+            ) else { return false }
+            selectedTrashItemID = nextID
+            return true
+
+        case .folder, .favorites:
+            let ids = displayedEntries.map(\.id)
+            guard let nextID = ListSelectionNavigator.adjacentID(
+                in: ids,
+                selectedID: selectedEntryID,
+                offset: offset
+            ) else { return false }
+            selectedEntryID = nextID
+            return true
+
+        case .none:
+            return false
+        }
+    }
+
     // MARK: - Intents (recording)
 
     /// Folder new recordings/imports land in: the selected folder, or the
@@ -1250,6 +1299,19 @@ final class AppModel {
         await performRecordingCommand(.stopAndSave)
     }
 
+    /// The floating indicator is a compact state-dependent toggle. It reuses
+    /// the same serialized commands as the global shortcuts and recorder UI.
+    func toggleRecordingFromIndicator() async {
+        switch recorder.state {
+        case .idle:
+            await performRecordingCommand(.startNew)
+        case .recording, .paused:
+            await performRecordingCommand(.stopAndSave)
+        case .finalizing:
+            break
+        }
+    }
+
     func performRecordingCommand(_ command: RecordingCommand) async {
         let state = recordingCommandAvailabilityState(for: command)
         switch recordingCommandGate.begin(command, state: state) {
@@ -1269,6 +1331,9 @@ final class AppModel {
         switch command {
         case .startNew:
             await startNewRecordingImpl()
+            if recorder.state == .recording {
+                clearGlobalIndicatorRetention()
+            }
         case .pauseResume:
             if case .replacementTake? = recorder.sessionTarget {
                 showGlobalRecordingTransient(.unavailable(
@@ -1292,6 +1357,9 @@ final class AppModel {
                     recorder.alertMessage ?? "The recording remains recoverable in Transcride."
                 )
             } else {
+                let completedAt = Date()
+                lastCompletedRecordingAt = completedAt
+                beginGlobalIndicatorRetention(after: completedAt)
                 showGlobalRecordingTransient(.saved(
                     duration: finalDuration,
                     until: .now.addingTimeInterval(2.5)
@@ -1330,7 +1398,46 @@ final class AppModel {
         }
     }
 
+    private func beginGlobalIndicatorRetention(after completedAt: Date) {
+        globalIndicatorRetentionTask?.cancel()
+        guard let interval = globalShortcutPreferences.backgroundIndicatorRetention.interval else {
+            isGlobalIndicatorRetentionActive = true
+            return
+        }
+        let remaining = max(0, completedAt.addingTimeInterval(interval).timeIntervalSinceNow)
+        guard remaining > 0 else {
+            isGlobalIndicatorRetentionActive = false
+            return
+        }
+        isGlobalIndicatorRetentionActive = true
+        globalIndicatorRetentionTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(remaining))
+            guard !Task.isCancelled else { return }
+            self?.isGlobalIndicatorRetentionActive = false
+        }
+    }
+
+    private func clearGlobalIndicatorRetention() {
+        globalIndicatorRetentionTask?.cancel()
+        globalIndicatorRetentionTask = nil
+        isGlobalIndicatorRetentionActive = false
+    }
+
     var globalRecordingPresentationState: GlobalRecordingPresentationState {
+        recordingPresentationState(requiresRegisteredShortcut: true)
+    }
+
+    /// The menu bar remains a working direct-control surface when global
+    /// hotkeys are disabled. Its readiness state therefore shares all recorder,
+    /// vault, permission, device, and disk checks with the floating indicator,
+    /// but does not require the Start shortcut itself to be registered.
+    var menuBarRecordingPresentationState: GlobalRecordingPresentationState {
+        recordingPresentationState(requiresRegisteredShortcut: false)
+    }
+
+    private func recordingPresentationState(
+        requiresRegisteredShortcut: Bool
+    ) -> GlobalRecordingPresentationState {
         if let globalRecordingTransientState { return globalRecordingTransientState }
         let toggle = (globalShortcutPreferences.bindings[.toggleRecording] ?? nil)?.glyphDescription ?? ""
         let pause = (globalShortcutPreferences.bindings[.pauseResumeRecording] ?? nil)?.glyphDescription ?? ""
@@ -1362,7 +1469,8 @@ final class AppModel {
                capacity < 32 * 1_024 * 1_024 {
                 return .needsAttention("The vault volume is too low on free disk space to record safely.")
             }
-            if globalShortcutService.statuses[.toggleRecording]?.isRegistered != true {
+            if requiresRegisteredShortcut,
+               globalShortcutService.statuses[.toggleRecording]?.isRegistered != true {
                 return .needsAttention("The Start / Stop shortcut is unavailable. Open Keybinds settings.")
             }
             return .ready(startShortcut: toggle)
@@ -2449,7 +2557,10 @@ final class AppModel {
     }
 
     func readTranscriptContent(for entry: Entry) async -> EntryTranscriptContent? {
-        await service?.readTranscriptContent(atEntryPath: entry.relativePath)
+        await service?.readTranscriptContent(
+            atEntryPath: entry.relativePath,
+            duration: entry.duration
+        )
     }
 
     /// Saves the editable markdown body without triggering a full vault scan

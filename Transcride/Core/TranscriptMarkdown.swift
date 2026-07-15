@@ -53,6 +53,7 @@ enum TranscriptMarkdown {
         var currentSpeaker: String?
         var started = false
         var wordIndex = -1
+        var utf16Count = 0
 
         for segment in transcript.segments {
             for word in segment.words {
@@ -65,20 +66,26 @@ enum TranscriptMarkdown {
                     let pauseBreak = previousEnd.map {
                         word.start - $0 >= paragraphPauseThreshold
                     } ?? false
-                    text += (speakerChanged || pauseBreak) ? "\n\n" : " "
+                    let separator = (speakerChanged || pauseBreak) ? "\n\n" : " "
+                    text += separator
+                    utf16Count += separator.utf16.count
                 }
                 if includeLabels, let speaker = segment.speaker, !started || speakerChanged {
                     let name = SpeakerNames.displayName(forID: speaker, names: speakerNames)
-                    let lowerBound = text.utf16.count
-                    text += "**\(name):**"
-                    labels.append(.init(speakerID: speaker, range: lowerBound..<text.utf16.count))
+                    let label = "**\(name):**"
+                    let lowerBound = utf16Count
+                    text += label
+                    utf16Count += label.utf16.count
+                    labels.append(.init(speakerID: speaker, range: lowerBound..<utf16Count))
                     text += " "
+                    utf16Count += 1
                 }
-                let lowerBound = text.utf16.count
+                let lowerBound = utf16Count
                 text += wordText
+                utf16Count += wordText.utf16.count
                 words.append(.init(
                     wordIndex: wordIndex,
-                    range: lowerBound..<text.utf16.count,
+                    range: lowerBound..<utf16Count,
                     startTime: word.start,
                     endTime: word.end
                 ))

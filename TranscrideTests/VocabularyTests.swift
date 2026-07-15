@@ -13,6 +13,50 @@ struct VocabularyFileTests {
         #expect(VocabularyFile.parse(VocabularyFile.serialize(terms)) == terms)
         #expect(VocabularyFile.serialize([]) == "")
     }
+
+    @Test func importedListsAcceptMarkdownPlainTextAndNumbering() {
+        let text = """
+        - Transcride
+        * FluidAudio
+        + Parakeet
+        1. WhisperKit
+        2) Apple Speech
+        Plain term
+        # ignored note
+        """
+        #expect(VocabularyFile.parseImportedTerms(text) == [
+            "Transcride", "FluidAudio", "Parakeet", "WhisperKit", "Apple Speech", "Plain term",
+        ])
+    }
+
+    @Test func markdownDictionaryRoundTripsThroughImport() {
+        let terms = ["Transcride", "FluidAudio", "Apple Speech"]
+        #expect(VocabularyFile.markdownList(terms) == """
+        - Transcride
+        - FluidAudio
+        - Apple Speech
+
+        """)
+        #expect(VocabularyFile.parseImportedTerms(VocabularyFile.markdownList(terms)) == terms)
+    }
+}
+
+@Suite("Vocabulary bias prompt")
+struct VocabularyBiasPromptTests {
+    @Test func wrapsTermsAsContextInsteadOfRawTranscriptText() {
+        #expect(VocabularyBiasPrompt.text(for: ["Transcride"]) ==
+            "Important vocabulary for the following recording includes Transcride.")
+        #expect(VocabularyBiasPrompt.text(for: ["Ashan Devine", "Mitesh Parikh"]) ==
+            "Important vocabulary for the following recording includes Ashan Devine and Mitesh Parikh.")
+        #expect(VocabularyBiasPrompt.text(for: ["Transcride", "Mitesh Parikh", "Ashan Devine"]) ==
+            "Important vocabulary for the following recording includes Transcride, Mitesh Parikh, and Ashan Devine.")
+    }
+
+    @Test func ignoresEmptyAndDuplicateTerms() {
+        #expect(VocabularyBiasPrompt.text(for: [" ", "Transcride", "Transcride", " Ashan "]) ==
+            "Important vocabulary for the following recording includes Transcride and Ashan.")
+        #expect(VocabularyBiasPrompt.text(for: []) == nil)
+    }
 }
 
 @Suite("Vocabulary correction backstop")

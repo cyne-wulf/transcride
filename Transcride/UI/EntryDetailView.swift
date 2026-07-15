@@ -4,9 +4,13 @@ import SwiftUI
 /// with entry metadata tucked behind Show Info.
 struct EntryDetailView: View {
     @Environment(AppModel.self) private var model
+    var onPlaybackWidthRequirementChange: (PlaybackWidthRequirement) -> Void = { _ in }
 
     @State private var document: FrontmatterDocument?
     @State private var original: TranscriptOriginal?
+    @State private var transcriptWordMap: TranscriptWordMap?
+    @State private var transcriptIsForked = false
+    @State private var transcriptContentRevision = 0
     @State private var extensionTranscriptState: ExtensionTranscriptState?
     @State private var loadedEntryPath: RelativePath?
     @State private var showingInfo = false
@@ -37,6 +41,8 @@ struct EntryDetailView: View {
                             } else {
                                 document = nil
                                 original = nil
+                                transcriptWordMap = nil
+                                transcriptIsForked = false
                                 extensionTranscriptState = nil
                                 loadedEntryPath = nil
                                 isTrimming = false
@@ -53,6 +59,9 @@ struct EntryDetailView: View {
                               model.selectedEntryID == entry.relativePath else { return }
                         document = content.edited
                         original = content.original
+                        transcriptWordMap = content.wordMap
+                        transcriptIsForked = content.isForked
+                        transcriptContentRevision &+= 1
                         extensionTranscriptState = content.extensionState
                         loadedEntryPath = entry.relativePath
                         model.player.setTranscriptForSilenceSkipping(
@@ -157,6 +166,9 @@ struct EntryDetailView: View {
                     TranscriptWorkbenchView(
                         entry: entry,
                         original: original,
+                        wordMap: transcriptWordMap,
+                        loadedIsForked: transcriptIsForked,
+                        loadedContentRevision: transcriptContentRevision,
                         extensionState: extensionTranscriptState,
                         document: $document
                     )
@@ -195,7 +207,7 @@ struct EntryDetailView: View {
             // the title and playback controls and cannot push either bar away.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if entry.hasAudio {
-                    playbackShelf(entry, availableHeight: proxy.size.height)
+                    playbackShelf(entry, availableSize: proxy.size)
                 }
             }
         }
@@ -529,9 +541,15 @@ struct EntryDetailView: View {
             + "can be restored from Recently Deleted for \(model.trashRetentionDays) days."
     }
 
-    private func playbackShelf(_ entry: Entry, availableHeight: CGFloat) -> some View {
-        let compact = availableHeight < 620
-        return PlaybackSection(entry: entry, availableHeight: availableHeight, isTrimming: $isTrimming)
+    private func playbackShelf(_ entry: Entry, availableSize: CGSize) -> some View {
+        let compact = availableSize.height < 620
+        return PlaybackSection(
+            entry: entry,
+            availableHeight: availableSize.height,
+            availablePlayerWidth: min(900, max(0, availableSize.width - 72)),
+            isTrimming: $isTrimming,
+            onWidthRequirementChange: onPlaybackWidthRequirementChange
+        )
             .frame(maxWidth: 900)
             .padding(.horizontal, 36)
             .padding(.top, compact ? 6 : 10)
@@ -590,11 +608,14 @@ private struct PlaybackSection: View {
     @Environment(AppModel.self) private var model
     let entry: Entry
     let availableHeight: CGFloat
+    let availablePlayerWidth: CGFloat
     @Binding var isTrimming: Bool
+    let onWidthRequirementChange: (PlaybackWidthRequirement) -> Void
 
     @State private var waveform: WaveformData?
     @State private var waveformError: String?
     @State private var sectionWidth: CGFloat = 420
+    @State private var transportWidth: CGFloat = 0
     @State private var trimStart: Double = 0
     @State private var trimEnd: Double = 0
     @State private var showingTrimConfirm = false
@@ -653,6 +674,14 @@ private struct PlaybackSection: View {
         return 1
     }
 
+    private var widthRequirement: PlaybackWidthRequirement {
+        PlaybackWidthRequirement(
+            availableWidth: availablePlayerWidth,
+            requiredWidth: isActiveExtension || isReplacing ? 0 : transportWidth,
+            detailHorizontalInsets: 72
+        )
+    }
+
     var body: some View {
         VStack(spacing: 8 * controlScale) {
             if isActiveExtension {
@@ -668,7 +697,18 @@ private struct PlaybackSection: View {
                     .contentTransition(.numericText())
 
                 transport
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.width
+                    } action: { width in
+                        transportWidth = width
+                    }
             }
+        }
+        .onChange(of: widthRequirement, initial: true) { _, requirement in
+            onWidthRequirementChange(requirement)
+        }
+        .onDisappear {
+            onWidthRequirementChange(PlaybackWidthRequirement())
         }
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width

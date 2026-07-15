@@ -5,6 +5,8 @@ struct EntryTranscriptContent: Sendable {
     var edited: FrontmatterDocument?
     var original: TranscriptOriginal?
     var extensionState: ExtensionTranscriptState?
+    var wordMap: TranscriptWordMap?
+    var isForked: Bool
 }
 
 struct AudioExtensionOutcome: Sendable {
@@ -188,7 +190,10 @@ actor VaultService {
         return FrontmatterDocument.parse(text)
     }
 
-    func readTranscriptContent(atEntryPath relPath: RelativePath) -> EntryTranscriptContent {
+    func readTranscriptContent(
+        atEntryPath relPath: RelativePath,
+        duration: TimeInterval?
+    ) -> EntryTranscriptContent {
         let entryURL = rootURL.appendingRelativePath(relPath)
         let edited: FrontmatterDocument?
         if let url = TranscriptFile.url(inEntry: entryURL),
@@ -197,10 +202,23 @@ actor VaultService {
         } else {
             edited = nil
         }
+        let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
+        let extensionState = ExtensionTranscriptState.load(from: entryURL)
+        let wordMap = original.map {
+            TranscriptWordMap(
+                transcript: $0,
+                duration: extensionState?.knownTranscriptDuration ?? duration,
+                speakerNames: edited.map { SpeakerNames.names(in: $0) } ?? [:]
+            )
+        }
         return EntryTranscriptContent(
             edited: edited,
-            original: TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL)),
-            extensionState: ExtensionTranscriptState.load(from: entryURL)
+            original: original,
+            extensionState: extensionState,
+            wordMap: wordMap,
+            isForked: edited.map {
+                TranscriptEditDocument.isForked($0, comparedTo: original)
+            } ?? false
         )
     }
 

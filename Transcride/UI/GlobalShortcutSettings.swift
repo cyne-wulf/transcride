@@ -21,11 +21,24 @@ struct GlobalShortcutSettingsPane: View {
             }
             .disabled(!model.globalShortcutPreferences.isEnabled)
 
-            Section("Background Indicator") {
+            Section("Background Access") {
+                Toggle(
+                    "Show Transcride in menu bar",
+                    isOn: menuBarItemBinding
+                )
                 Toggle(
                     "Show indicator while Transcride is in the background",
                     isOn: indicatorBinding
                 )
+                Picker("Keep visible after recording", selection: retentionBinding) {
+                    ForEach(BackgroundIndicatorRetention.allCases) { retention in
+                        Text(retention.title).tag(retention)
+                    }
+                }
+                .disabled(!model.globalShortcutPreferences.showsBackgroundIndicator)
+                Text("The indicator stays available for follow-up recordings, or until you hide it from its hover control.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Button("Reset Indicator Position") {
                     NotificationCenter.default.post(name: .resetGlobalIndicatorPosition, object: nil)
                 }
@@ -105,6 +118,28 @@ struct GlobalShortcutSettingsPane: View {
             set: { value in
                 var preferences = model.globalShortcutPreferences
                 preferences.showsBackgroundIndicator = value
+                model.updateGlobalShortcutPreferences(preferences)
+            }
+        )
+    }
+
+    private var menuBarItemBinding: Binding<Bool> {
+        Binding(
+            get: { model.globalShortcutPreferences.showsMenuBarItem },
+            set: { value in
+                var preferences = model.globalShortcutPreferences
+                preferences.showsMenuBarItem = value
+                model.updateGlobalShortcutPreferences(preferences)
+            }
+        )
+    }
+
+    private var retentionBinding: Binding<BackgroundIndicatorRetention> {
+        Binding(
+            get: { model.globalShortcutPreferences.backgroundIndicatorRetention },
+            set: { value in
+                var preferences = model.globalShortcutPreferences
+                preferences.backgroundIndicatorRetention = value
                 model.updateGlobalShortcutPreferences(preferences)
             }
         )

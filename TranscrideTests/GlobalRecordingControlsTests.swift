@@ -3,6 +3,27 @@ import Testing
 
 @Suite("Global recording controls")
 struct GlobalRecordingControlsTests {
+    @Test func backgroundIndicatorOnlyBelongsToRecordingSessions() {
+        let now = Date()
+        #expect(!GlobalRecordingPresentationState.hidden.belongsToRecordingSession)
+        #expect(!GlobalRecordingPresentationState.ready(startShortcut: "⌥R").belongsToRecordingSession)
+        #expect(!GlobalRecordingPresentationState.needsAttention("Open a vault").belongsToRecordingSession)
+        #expect(!GlobalRecordingPresentationState.unavailable("Idle", until: now).belongsToRecordingSession)
+        #expect(GlobalRecordingPresentationState.recording(
+            elapsed: 1, pauseShortcut: "⌥P", stopShortcut: "⌥R"
+        ).belongsToRecordingSession)
+        #expect(GlobalRecordingPresentationState.paused(
+            elapsed: 1, pauseShortcut: "⌥P", stopShortcut: "⌥R"
+        ).belongsToRecordingSession)
+        #expect(GlobalRecordingPresentationState.saving(elapsed: 1).belongsToRecordingSession)
+        #expect(GlobalRecordingPresentationState.saved(duration: 1, until: now).belongsToRecordingSession)
+        #expect(GlobalRecordingPresentationState.saveFailed("Recoverable").belongsToRecordingSession)
+        #expect(!GlobalRecordingPresentationState.ready(startShortcut: "⌥R").isCaptureActive)
+        #expect(GlobalRecordingPresentationState.recording(
+            elapsed: 1, pauseShortcut: "⌥P", stopShortcut: "⌥R"
+        ).isCaptureActive)
+    }
+
     @Test func defaultsMatchProductChords() {
         let preferences = GlobalShortcutPreferences.defaults
         #expect(preferences.bindings[.toggleRecording] == .defaultToggleRecording)
@@ -10,6 +31,11 @@ struct GlobalRecordingControlsTests {
         #expect(GlobalShortcutAction.allCases.count == 2)
         #expect(GlobalShortcutChord.defaultToggleRecording.glyphDescription == "⌥R")
         #expect(GlobalShortcutChord.defaultPauseResume.glyphDescription == "⌥P")
+        #expect(preferences.showsMenuBarItem)
+        #expect(preferences.backgroundIndicatorRetention == .tenMinutes)
+        #expect(BackgroundIndicatorRetention.quick.interval == 2.6)
+        #expect(BackgroundIndicatorRetention.tenMinutes.interval == 600)
+        #expect(BackgroundIndicatorRetention.never.interval == nil)
     }
 
     @Test func validationRejectsPlainShiftAndDuplicates() {
@@ -29,6 +55,73 @@ struct GlobalRecordingControlsTests {
         preferences.bindings[.pauseResumeRecording] = nil
         let data = try JSONEncoder().encode(preferences)
         #expect(try JSONDecoder().decode(GlobalShortcutPreferences.self, from: data) == preferences)
+    }
+
+    @Test func versionTwoPreferencesMigrateWithoutLosingKeybinds() throws {
+        struct VersionTwoPreferences: Codable {
+            var version: Int
+            var isEnabled: Bool
+            var showsBackgroundIndicator: Bool
+            var bindings: [GlobalShortcutAction: GlobalShortcutChord?]
+        }
+        let legacy = VersionTwoPreferences(
+            version: 2,
+            isEnabled: true,
+            showsBackgroundIndicator: false,
+            bindings: [
+                .toggleRecording: GlobalShortcutChord(keyCode: 12, modifiers: .option),
+                .pauseResumeRecording: nil,
+            ]
+        )
+        let preferences = try JSONDecoder().decode(
+            GlobalShortcutPreferences.self, from: JSONEncoder().encode(legacy)
+        )
+        #expect(preferences.version == 2)
+        #expect(preferences.showsMenuBarItem)
+        #expect(!preferences.showsBackgroundIndicator)
+        #expect(preferences.backgroundIndicatorRetention == .tenMinutes)
+        #expect((preferences.bindings[.toggleRecording] ?? nil)?.keyCode == 12)
+        #expect((preferences.bindings[.pauseResumeRecording] ?? nil) == nil)
+    }
+
+    @Test func versionThreePreferencesMigrateWithMenuBarVisible() throws {
+        struct VersionThreePreferences: Codable {
+            var version: Int
+            var isEnabled: Bool
+            var showsBackgroundIndicator: Bool
+            var backgroundIndicatorRetention: BackgroundIndicatorRetention
+            var bindings: [GlobalShortcutAction: GlobalShortcutChord?]
+        }
+        let legacy = VersionThreePreferences(
+            version: 3,
+            isEnabled: false,
+            showsBackgroundIndicator: false,
+            backgroundIndicatorRetention: .never,
+            bindings: [
+                .toggleRecording: .defaultToggleRecording,
+                .pauseResumeRecording: .defaultPauseResume,
+            ]
+        )
+        let preferences = try JSONDecoder().decode(
+            GlobalShortcutPreferences.self, from: JSONEncoder().encode(legacy)
+        )
+        #expect(preferences.version == 3)
+        #expect(preferences.showsMenuBarItem)
+        #expect(!preferences.isEnabled)
+        #expect(!preferences.showsBackgroundIndicator)
+        #expect(preferences.backgroundIndicatorRetention == .never)
+        #expect(preferences.bindings == legacy.bindings)
+    }
+
+    @Test func menuBarVisibilityPersistsAndResetDefaultsRestoreIt() throws {
+        var preferences = GlobalShortcutPreferences.defaults
+        preferences.showsMenuBarItem = false
+        let restored = try JSONDecoder().decode(
+            GlobalShortcutPreferences.self,
+            from: JSONEncoder().encode(preferences)
+        )
+        #expect(!restored.showsMenuBarItem)
+        #expect(GlobalShortcutPreferences.defaults.showsMenuBarItem)
     }
 
     @Test func commandGateSerializesAndSuppressesInvalidTransitions() {

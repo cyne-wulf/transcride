@@ -199,6 +199,7 @@ struct TranscriptWordMap: Equatable, Sendable {
     /// Labels are separator text: they never resolve to a word and never
     /// highlight, but the view styles them and routes clicks to rename.
     let speakerLabels: [TranscriptRendering.SpeakerLabel]
+    private let hasMonotonicTimings: Bool
 
     init(
         transcript: TranscriptOriginal,
@@ -214,7 +215,7 @@ struct TranscriptWordMap: Equatable, Sendable {
             TranscriptTimingRepair.repair(segments: transcript.segments, duration: $0)
                 .segments.flatMap(\.words)
         }
-        spans = rendering.words.map {
+        let builtSpans = rendering.words.map {
             let timing = repairedWords?[$0.wordIndex]
             return Span(
                 wordIndex: $0.wordIndex,
@@ -223,36 +224,81 @@ struct TranscriptWordMap: Equatable, Sendable {
                 endTime: timing?.end ?? $0.endTime
             )
         }
+        spans = builtSpans
         speakerLabels = rendering.labels
+        hasMonotonicTimings = zip(builtSpans, builtSpans.dropFirst()).allSatisfy {
+            $0.startTime <= $1.startTime && $0.endTime <= $1.endTime
+        }
     }
 
     func range(forWordAt wordIndex: Int) -> Range<Int>? {
-        spans.first(where: { $0.wordIndex == wordIndex })?.range
+        var lower = 0
+        var upper = spans.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if spans[middle].wordIndex < wordIndex {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower < spans.count, spans[lower].wordIndex == wordIndex else { return nil }
+        return spans[lower].range
     }
 
     /// Returns a word only when the character is inside its rendered run.
     /// Separating spaces, paragraph breaks and speaker labels deliberately
     /// return nil.
     func wordIndex(containingUTF16Offset offset: Int) -> Int? {
-        spans.first(where: { $0.range.contains(offset) })?.wordIndex
+        guard offset >= 0 else { return nil }
+        var lower = 0
+        var upper = spans.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if spans[middle].range.upperBound <= offset {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower < spans.count, spans[lower].range.contains(offset) else { return nil }
+        return spans[lower].wordIndex
     }
 
     /// The speaker label under a character, for click-to-rename (TRN-6).
     func speakerLabel(containingUTF16Offset offset: Int) -> TranscriptRendering.SpeakerLabel? {
-        speakerLabels.first(where: { $0.range.contains(offset) })
+        guard offset >= 0 else { return nil }
+        var lower = 0
+        var upper = speakerLabels.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if speakerLabels[middle].range.upperBound <= offset {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower < speakerLabels.count,
+              speakerLabels[lower].range.contains(offset) else { return nil }
+        return speakerLabels[lower]
     }
 
     /// Best-effort lookup for clicks or search offsets that land on separator
     /// text: the containing word wins, otherwise the nearest previous word.
     func wordIndex(atOrBeforeUTF16Offset offset: Int) -> Int? {
         guard offset >= 0 else { return nil }
-        var previous: Span?
-        for span in spans {
-            if span.range.contains(offset) { return span.wordIndex }
-            if span.range.lowerBound > offset { break }
-            previous = span
+        var lower = 0
+        var upper = spans.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if spans[middle].range.lowerBound <= offset {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
         }
-        return previous?.wordIndex
+        guard lower > 0 else { return nil }
+        return spans[lower - 1].wordIndex
     }
 
     /// Word active at an audio time. Inter-word gaps and time after the final
@@ -260,17 +306,55 @@ struct TranscriptWordMap: Equatable, Sendable {
     /// has no mapping. Ranges are `[start, end)`.
     func wordIndex(atTime time: TimeInterval) -> Int? {
         guard time.isFinite else { return nil }
-        var previous: Span?
-        for span in spans {
-            if time < span.startTime { return previous?.wordIndex }
-            if time < span.endTime { return span.wordIndex }
-            previous = span
+        guard hasMonotonicTimings else {
+            var previous: Span?
+            for span in spans {
+                if time < span.startTime { return previous?.wordIndex }
+                if time < span.endTime { return span.wordIndex }
+                previous = span
+            }
+            return previous?.wordIndex
         }
-        return previous?.wordIndex
+
+        var startLower = 0
+        var startUpper = spans.count
+        while startLower < startUpper {
+            let middle = startLower + (startUpper - startLower) / 2
+            if spans[middle].startTime <= time {
+                startLower = middle + 1
+            } else {
+                startUpper = middle
+            }
+        }
+        guard startLower > 0 else { return nil }
+
+        var endLower = 0
+        var endUpper = startLower
+        while endLower < endUpper {
+            let middle = endLower + (endUpper - endLower) / 2
+            if spans[middle].endTime <= time {
+                endLower = middle + 1
+            } else {
+                endUpper = middle
+            }
+        }
+        let index = endLower < startLower ? endLower : startLower - 1
+        return spans[index].wordIndex
     }
 
     func startTime(forWordAt wordIndex: Int) -> TimeInterval? {
-        spans.first(where: { $0.wordIndex == wordIndex })?.startTime
+        var lower = 0
+        var upper = spans.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if spans[middle].wordIndex < wordIndex {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower < spans.count, spans[lower].wordIndex == wordIndex else { return nil }
+        return spans[lower].startTime
     }
 
     func startTime(atOrBeforeUTF16Offset offset: Int) -> TimeInterval? {

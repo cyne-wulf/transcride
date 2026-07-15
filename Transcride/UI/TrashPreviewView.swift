@@ -4,6 +4,7 @@ import SwiftUI
 /// live `Entry`, so editing and entry mutation controls cannot target `.trash`.
 struct TrashPreviewView: View {
     @Environment(AppModel.self) private var model
+    var onPlaybackWidthRequirementChange: (PlaybackWidthRequirement) -> Void = { _ in }
 
     @State private var preview: TrashPreview?
     @State private var loadingItemID: String?
@@ -89,7 +90,9 @@ struct TrashPreviewView: View {
                 if preview.audioURL != nil {
                     TrashAudioPreview(
                         preview: preview,
-                        availableHeight: proxy.size.height
+                        availableHeight: proxy.size.height,
+                        availablePlayerWidth: max(0, proxy.size.width - 56),
+                        onWidthRequirementChange: onPlaybackWidthRequirementChange
                     )
                 }
             }
@@ -200,12 +203,22 @@ private struct TrashAudioPreview: View {
     @Environment(AppModel.self) private var model
     let preview: TrashPreview
     let availableHeight: CGFloat
+    let availablePlayerWidth: CGFloat
+    let onWidthRequirementChange: (PlaybackWidthRequirement) -> Void
 
     @State private var width: CGFloat = 420
+    @State private var transportWidth: CGFloat = 0
 
     private var player: PlayerService { model.player }
     private var scale: CGFloat {
         min(max(width / 620, 0.9), 1.15) * (availableHeight < 520 ? 0.84 : 1)
+    }
+    private var widthRequirement: PlaybackWidthRequirement {
+        PlaybackWidthRequirement(
+            availableWidth: availablePlayerWidth,
+            requiredWidth: transportWidth,
+            detailHorizontalInsets: 56
+        )
     }
 
     var body: some View {
@@ -230,6 +243,17 @@ private struct TrashAudioPreview: View {
                 .contentTransition(.numericText())
 
             transport
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.width
+                } action: { width in
+                    transportWidth = width
+                }
+        }
+        .onChange(of: widthRequirement, initial: true) { _, requirement in
+            onWidthRequirementChange(requirement)
+        }
+        .onDisappear {
+            onWidthRequirementChange(PlaybackWidthRequirement())
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 14)

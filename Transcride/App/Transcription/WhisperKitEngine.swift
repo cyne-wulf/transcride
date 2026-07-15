@@ -139,9 +139,10 @@ actor WhisperKitEngine: TranscriptionEngine {
         // Native vocabulary biasing (VOC-2): terms go in as the decoder
         // prompt, nudging Whisper toward those spellings. Only for variants
         // whose decoder tolerates prompt conditioning (see ModelCatalog).
-        if info.supportsVocabularyBiasing, !options.vocabulary.isEmpty, let tokenizer = pipe.tokenizer {
-            let promptText = " " + options.vocabulary.joined(separator: ", ") + "."
-            let tokens = tokenizer.encode(text: promptText)
+        if info.supportsVocabularyBiasing,
+           let promptText = VocabularyBiasPrompt.text(for: options.vocabulary),
+           let tokenizer = pipe.tokenizer {
+            let tokens = tokenizer.encode(text: " " + promptText)
                 .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
             if !tokens.isEmpty {
                 decodeOptions.promptTokens = tokens

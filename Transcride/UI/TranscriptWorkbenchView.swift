@@ -69,6 +69,9 @@ struct TranscriptWorkbenchView: View {
 
     let entry: Entry
     let original: TranscriptOriginal?
+    let wordMap: TranscriptWordMap?
+    let loadedIsForked: Bool
+    let loadedContentRevision: Int
     let extensionState: ExtensionTranscriptState?
     @Binding var document: FrontmatterDocument?
 
@@ -90,6 +93,7 @@ struct TranscriptWorkbenchView: View {
     @State private var searchNavigationRange: NSRange?
     @State private var handledNavigationRequestID: UUID?
     @State private var showingSpeakerRename = false
+    @State private var forkOverride: Bool?
     @FocusState private var findFieldFocused: Bool
 
     /// User-chosen display names for machine speaker ids (TRN-6), from the
@@ -98,30 +102,12 @@ struct TranscriptWorkbenchView: View {
         document.map { SpeakerNames.names(in: $0) } ?? [:]
     }
 
-    private var wordMap: TranscriptWordMap? {
-        original.map {
-            TranscriptWordMap(
-                transcript: $0,
-                duration: extensionState?.knownTranscriptDuration
-                    ?? entry.duration ?? positivePlayerDuration,
-                speakerNames: speakerNames
-            )
-        }
-    }
-
-    /// Frontmatter normally carries duration. Fall back to the loaded asset
-    /// so legacy entries missing that field still receive timing repair.
-    private var positivePlayerDuration: TimeInterval? {
-        model.player.duration > 0 ? model.player.duration : nil
-    }
-
     private var hasSpeakers: Bool {
         original?.segments.contains { $0.speaker != nil } == true
     }
 
     private var isForked: Bool {
-        guard let document else { return false }
-        return TranscriptEditDocument.isForked(document, comparedTo: original)
+        forkOverride ?? loadedIsForked
     }
 
     /// The menu-bar Edit Note command remains available even though editing a
@@ -241,6 +227,9 @@ struct TranscriptWorkbenchView: View {
         }
         .onChange(of: isForked) { wasForked, nowForked in
             if !wasForked, nowForked { activeLayer = .edited }
+        }
+        .onChange(of: loadedContentRevision) { _, _ in
+            forkOverride = nil
         }
         .onChange(of: viewedLayer) { _, _ in updateFindMatches() }
         .onChange(of: findQuery) { _, _ in updateFindMatches(resetSelection: true) }
@@ -488,7 +477,7 @@ struct TranscriptWorkbenchView: View {
 
         let hasActualChange = document.body != editStartBody
         let restoreUnforkedState = !editingStartedForked && !hasActualChange
-        var savedDocument = document
+        let savedIsForked = !restoreUnforkedState && (document.handEdited || editingStartedForked)
 
         if editingDidChange || needsSave {
             guard let saved = await model.saveTranscriptBody(
@@ -500,7 +489,6 @@ struct TranscriptWorkbenchView: View {
                 isSaving = false
                 return
             }
-            savedDocument = saved
             self.document = saved
         }
 
@@ -512,10 +500,12 @@ struct TranscriptWorkbenchView: View {
         editingDidChange = false
         editingStartedForked = false
 
-        if original != nil, !TranscriptEditDocument.isForked(savedDocument, comparedTo: original) {
+        if original != nil, !savedIsForked {
             activeLayer = .original
+            forkOverride = false
         } else {
             activeLayer = .edited
+            forkOverride = true
         }
     }
 
@@ -526,6 +516,7 @@ struct TranscriptWorkbenchView: View {
         editable.replaceBody(newBody)
         document = editable.document
         self.document = document
+        forkOverride = true
         activeLayer = .edited
         needsSave = true
         editingDidChange = true
@@ -778,6 +769,10 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
         }
         context.coordinator.installBoundsObserver()
         context.coordinator.renderBaseText()
+        context.coordinator.updateHighlights(
+            playbackWordIndex: currentWordIndex,
+            navigationRange: navigationHighlightRange
+        )
         return scrollView
     }
 
@@ -811,6 +806,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         var renderedText = ""
         var highlightedWordIndex: Int?
+        var highlightedRange: NSRange?
         var navigationRange: NSRange?
         var boundsObserver: NSObjectProtocol?
         var isProgrammaticScroll = false
@@ -846,6 +842,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
             guard let textView else { return }
             renderedText = parent.map.renderedText
             highlightedWordIndex = nil
+            highlightedRange = nil
             navigationRange = nil
             let paragraph = NSMutableParagraphStyle()
             paragraph.alignment = .center
@@ -868,6 +865,7 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
                     range: NSRange(label.range)
                 )
             }
+            styleSpeakerLabels()
         }
 
         /// The rendered text keeps the markdown `**` so it stays byte-aligned
@@ -891,34 +889,38 @@ private struct SyncedOriginalTextView: NSViewRepresentable {
 
         func updateHighlights(playbackWordIndex: Int?, navigationRange: NSRange?) {
             guard let textView else { return }
-            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-            TranscriptPlaybackWordStyle.clearPlaybackAttributes(
-                from: textView.layoutManager,
-                in: fullRange
-            )
-            textView.layoutManager?.removeTemporaryAttribute(
-                .backgroundColor, forCharacterRange: fullRange
-            )
-            TranscriptPlaybackWordStyle.subdueTranscript(
-                in: textView.layoutManager,
-                range: fullRange
-            )
-            styleSpeakerLabels()
-
             let wordChanged = highlightedWordIndex != playbackWordIndex
-            highlightedWordIndex = playbackWordIndex
-            if let playbackWordIndex,
-               let range = parent.map.range(forWordAt: playbackWordIndex) {
+            let nextHighlightRange = playbackWordIndex
+                .flatMap(parent.map.range(forWordAt:))
+                .map(NSRange.init)
+            let highlightChanged = wordChanged || highlightedRange != nextHighlightRange
+            if highlightChanged {
+                if let highlightedRange {
+                    TranscriptPlaybackWordStyle.clearPlaybackAttributes(
+                        from: textView.layoutManager,
+                        in: highlightedRange
+                    )
+                }
+                highlightedWordIndex = playbackWordIndex
+                highlightedRange = nextHighlightRange
+            }
+            if let playbackWordIndex, let nextHighlightRange,
+               highlightChanged {
                 TranscriptPlaybackWordStyle.illuminateWord(
                     in: textView.layoutManager,
-                    range: NSRange(range)
+                    range: nextHighlightRange
                 )
                 if wordChanged, !parent.followingPaused { scrollToWord(playbackWordIndex) }
             }
 
             let navigationChanged = self.navigationRange != navigationRange
+            if navigationChanged, let oldRange = self.navigationRange {
+                textView.layoutManager?.removeTemporaryAttribute(
+                    .backgroundColor, forCharacterRange: oldRange
+                )
+            }
             self.navigationRange = navigationRange
-            if let navigationRange,
+            if navigationChanged, let navigationRange,
                NSMaxRange(navigationRange) <= (textView.string as NSString).length {
                 textView.layoutManager?.addTemporaryAttribute(
                     .backgroundColor,

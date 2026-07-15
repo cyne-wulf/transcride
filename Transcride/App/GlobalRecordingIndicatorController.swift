@@ -5,12 +5,14 @@ import SwiftUI
 @MainActor
 final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
     private static let anchorDefaultsKey = "globalIndicatorScreenAnchorV1"
-    private static let panelSize = CGSize(width: 270, height: 104)
+    private static let panelSize = CGSize(width: 72, height: 72)
 
     private let model: AppModel
     private let panel: GlobalRecordingPanel
     private var observers: [NSObjectProtocol] = []
     private var isRestoringPosition = false
+    private var isDismissed = false
+    private var wasCaptureActive = false
     private var lastAnnouncedState: String?
 
     init(model: AppModel) {
@@ -32,7 +34,13 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.animationBehavior = .utilityWindow
-        panel.contentView = NSHostingView(rootView: GlobalRecordingIndicatorView(model: model))
+        panel.contentView = NSHostingView(rootView: GlobalRecordingIndicatorView(
+            model: model,
+            onDismiss: { [weak self] in
+                self?.isDismissed = true
+                self?.panel.orderOut(nil)
+            }
+        ))
         panel.setContentSize(Self.panelSize)
         panel.setAccessibilityTitle("Transcride global recording status")
 
@@ -90,6 +98,7 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
         withObservationTracking {
             _ = model.globalShortcutPreferences
             _ = model.globalRecordingPresentationState
+            _ = model.isGlobalIndicatorRetentionActive
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.updateVisibility()
@@ -101,12 +110,25 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
 
     private func updateVisibility() {
         let preferences = model.globalShortcutPreferences
+        let presentationState = model.globalRecordingPresentationState
+        let isCaptureActive = presentationState.isCaptureActive
+        if isCaptureActive && !wasCaptureActive {
+            isDismissed = false
+        }
+        wasCaptureActive = isCaptureActive
+        let belongsToVisibleSession = presentationState.belongsToRecordingSession ||
+            model.isGlobalIndicatorRetentionActive
         let shouldShow = preferences.isEnabled &&
-            preferences.showsBackgroundIndicator && !NSApp.isActive
+            preferences.showsBackgroundIndicator &&
+            belongsToVisibleSession &&
+            !NSApp.isActive &&
+            !isDismissed
         if shouldShow {
-            restorePosition()
-            panel.orderFrontRegardless()
-            announceStateChangeIfNeeded(model.globalRecordingPresentationState)
+            if !panel.isVisible {
+                restorePosition()
+                panel.orderFrontRegardless()
+            }
+            announceStateChangeIfNeeded(presentationState)
         } else {
             panel.orderOut(nil)
         }
@@ -205,41 +227,55 @@ private final class GlobalRecordingPanel: NSPanel {
 
 private struct GlobalRecordingIndicatorView: View {
     @Bindable var model: AppModel
+    let onDismiss: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
-    @Environment(\.colorSchemeContrast) private var contrast
+    @State private var isHovering = false
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { context in
-            let state = model.globalRecordingPresentationState
-            HStack(spacing: 14) {
+        // Resolve recorder/vault readiness only when observed model state
+        // changes. The animation clock below must not repeat permission,
+        // device, and free-disk checks 24 times per second.
+        let state = model.globalRecordingPresentationState
+        TimelineView(.periodic(from: .now, by: 1.0 / 24.0)) { context in
+            ZStack(alignment: .topTrailing) {
                 stateIcon(state, date: context.date)
-                    .frame(width: 34, height: 34)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title(for: state))
-                        .font(.headline)
-                    Text(detail(for: state))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                    .frame(width: 64, height: 64)
+                    .contentShape(Circle())
+                    .gesture(
+                        // Fail the hold before macOS can interpret even a slow,
+                        // deliberate movement as both a panel drag and a long press.
+                        LongPressGesture(minimumDuration: 0.55, maximumDistance: 1)
+                            .exclusively(before: TapGesture())
+                            .onEnded { gesture in
+                                switch gesture {
+                                case .first:
+                                    bringTranscrideForward()
+                                case .second:
+                                    Task { await model.toggleRecordingFromIndicator() }
+                                }
+                            }
+                    )
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(accessibilityDescription(for: state))
+                    .accessibilityHint("Click to start or stop recording. Hold to bring Transcride forward. Drag to move the indicator.")
+
+                if isHovering {
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 18, height: 18)
+                            .background(.black.opacity(0.78), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide recording indicator")
+                    .accessibilityLabel("Hide recording indicator")
                 }
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 18)
-            .frame(width: 270, height: 104)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(contrast == .increased ? Color.primary : Color.primary.opacity(0.15), lineWidth: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 16))
-            .onTapGesture {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(accessibilityDescription(for: state))
-            .accessibilityHint("Click to bring Transcride forward. Drag to move the indicator.")
+            .frame(width: 72, height: 72)
+            .contentShape(Circle())
+            .onHover { isHovering = $0 }
         }
     }
 
@@ -252,32 +288,45 @@ private struct GlobalRecordingIndicatorView: View {
             let wave = (sin(phase * .pi * 2 - .pi / 2) + 1) / 2
             ZStack {
                 if !reduceMotion {
-                    Circle().stroke(.red.opacity(0.2 + wave * 0.35), lineWidth: 2)
-                        .scaleEffect(1.0 + wave * 0.18)
+                    Circle().fill(.red.opacity(0.16 + wave * 0.18))
+                        .scaleEffect(0.86 + wave * 0.14)
                 }
-                Circle().fill(.red).frame(width: 22, height: 22)
+                Circle().fill(.red).frame(width: 48, height: 48)
                 if differentiateWithoutColor {
-                    Circle().stroke(.primary, lineWidth: 2).frame(width: 22, height: 22)
+                    Circle().stroke(.primary, lineWidth: 2).frame(width: 48, height: 48)
                 }
             }
         case .paused:
             ZStack {
-                Circle().stroke(.red, lineWidth: 3)
-                Image(systemName: "pause.fill").foregroundStyle(.red)
+                Circle().fill(.red).frame(width: 48, height: 48)
+                Image(systemName: "pause.fill").foregroundStyle(.white)
             }
         case .saved:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                .font(.system(size: 30))
+            ZStack {
+                Circle().fill(.red).frame(width: 48, height: 48)
+                Image(systemName: "checkmark").foregroundStyle(.white)
+                    .font(.system(size: 22, weight: .bold))
+            }
         case .saving:
-            ProgressView().controlSize(.small)
+            ZStack {
+                Circle().fill(.red).frame(width: 48, height: 48)
+                ProgressView().controlSize(.small).tint(.white)
+            }
         case .ready:
-            Circle().stroke(.red, lineWidth: 3).padding(4)
+            Circle().fill(.red).frame(width: 48, height: 48)
         case .needsAttention, .saveFailed, .unavailable:
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                .font(.system(size: 28))
+            ZStack {
+                Circle().fill(.red).frame(width: 48, height: 48)
+                Image(systemName: "exclamationmark").foregroundStyle(.white)
+                    .font(.system(size: 22, weight: .bold))
+            }
         case .hidden:
             EmptyView()
         }
+    }
+
+    private func bringTranscrideForward() {
+        _ = AppWindowPresenter.showExistingMainWindow()
     }
 
     private func title(for state: GlobalRecordingPresentationState) -> String {
