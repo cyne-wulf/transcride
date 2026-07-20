@@ -1,22 +1,17 @@
 import SwiftUI
 
-/// The full menu bar (master PRD §7: "a menu bar with everything reachable").
-/// Every item routes through the same AppModel intents as the in-window
-/// controls; sheets and prompts owned by views are reached via the request
-/// pattern (`requestEntryAction` & friends).
-///
-/// Monitor-owned shortcuts (Space, ⇧Space, E, R, T, S, Z, 0–9, ⌘Z, ⌘⇧Z, `[`, `]`, `\`, ⇧⌫, ⌘⌫) stay in AppModel's key
-/// monitor — giving menu items those key equivalents would fire them while
-/// the monitor deliberately defers to text editing. Their menu items carry no
-/// equivalent; the Help → Keyboard Shortcuts window documents the keys.
+/// The complete Transcride-owned menu catalog. Menu clicks and key events both
+/// enter AppModel's shared dispatcher and use the same availability decision.
+/// Native App/Edit/Window items and Debug testing commands remain outside the
+/// remappable catalog by design.
 struct AppCommands: Commands {
     let model: AppModel
 
-    private var entry: Entry? { model.selectedEntry }
     private var ready: Bool { model.phase == .ready }
 
     var body: some Commands {
         fileCommands
+        undoRedoCommands
         editCommands
         entryCommands
         playbackCommands
@@ -24,6 +19,49 @@ struct AppCommands: Commands {
 #if DEBUG
         testingCommands
 #endif
+    }
+
+    // MARK: - Shared menu presentation
+
+    private func commandButton(
+        _ action: AppShortcutAction,
+        title: String? = nil
+    ) -> some View {
+        let resolvedTitle = title ?? action.title
+        return Button(
+            AppShortcutMenu.title(resolvedTitle, action: action, model: model)
+        ) {
+            model.performAppCommand(action)
+        }
+        .appShortcutMenu(action, model: model)
+        .disabled(!model.isAppCommandEnabled(action))
+    }
+
+    private func commandToggle(
+        _ action: AppShortcutAction,
+        title: String,
+        isOn: Bool
+    ) -> some View {
+        Toggle(
+            AppShortcutMenu.title(title, action: action, model: model),
+            isOn: Binding(
+                get: { isOn },
+                set: { _ in model.performAppCommand(action) }
+            )
+        )
+        .appShortcutMenu(action, model: model)
+        .disabled(!model.isAppCommandEnabled(action))
+    }
+
+    private func editorCommandButton(
+        _ title: String,
+        action: AppModel.EditorCommandAction,
+        enabled: Bool
+    ) -> some View {
+        Button(title) {
+            model.requestWorkbenchAction(.editorCommand(action))
+        }
+        .disabled(!enabled)
     }
 
 #if DEBUG
@@ -61,86 +99,79 @@ struct AppCommands: Commands {
 
     // MARK: - File
 
-    /// Replacing `.newItem` also drops SwiftUI's default "New Window ⌘N":
-    /// Transcride is a one-window app and ⌘N belongs to New Recording (§7).
+    /// Replacing `.newItem` also removes SwiftUI's default New Window item:
+    /// Transcride is a one-window app and New Recording owns this command.
     private var fileCommands: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Recording") {
-                Task { await model.startRecording() }
-            }
-            .keyboardShortcut("n", modifiers: .command)
-            .disabled(!ready || model.recorder.isActive || model.recorder.state == .finalizing)
-
-            Button(model.recorder.isActive ? "Stop Recording" : "Start Recording") {
-                Task {
-                    if model.recorder.isActive {
-                        await model.stopRecording()
-                    } else {
-                        await model.startRecording()
-                    }
-                }
-            }
-            .keyboardShortcut(.space, modifiers: [.shift])
-            .disabled(!ready || model.recorder.state == .finalizing)
-
-            Button(model.recorder.state == .paused ? "Resume Recording" : "Pause Recording") {
-                Task { await model.toggleRecordingPause() }
-            }
-            .disabled(model.recorder.state != .recording && model.recorder.state != .paused)
+            commandButton(.newRecording)
+            commandButton(
+                .toggleRecording,
+                title: model.recorder.isActive ? "Stop Recording" : "Start Recording"
+            )
 
             Divider()
 
-            Button("Import Audio…") {
-                model.importViaPanel()
-            }
-            .keyboardShortcut("i", modifiers: [.command, .shift])
-            .disabled(!ready)
-
-            Button("New Folder…") {
-                model.requestNewFolder()
-            }
-            .keyboardShortcut("n", modifiers: [.command, .shift])
-            .disabled(!ready)
+            commandButton(.importAudio)
+            commandButton(.newFolder)
 
             Divider()
 
-            Button("Export Markdown…") {
-                model.requestEntryAction(.exportMarkdown)
-            }
-            .keyboardShortcut("e", modifiers: [.command, .shift])
-            .disabled(entry?.hasTranscript != true)
-
-            Button("Share Audio…") {
-                if let entry { model.shareAudioFromMenu(for: entry) }
-            }
-            .disabled(entry?.hasAudio != true)
-
+            commandButton(.exportMarkdown)
+            commandButton(.shareAudio)
             if model.vaultHasObsidianConfig {
-                Button("Open in Obsidian") {
-                    if let entry { model.openInObsidian(entry: entry) }
-                }
-                .disabled(entry?.hasTranscript != true)
+                commandButton(.openInObsidian)
             }
         }
     }
 
     // MARK: - Edit → Find
 
+    private var undoRedoCommands: some Commands {
+        CommandGroup(replacing: .undoRedo) {
+            commandButton(
+                .undoClipEdit,
+                title: model.editorInputOwnsInput ? "Undo Editor Change" : "Undo Clip Edit"
+            )
+            commandButton(
+                .redoClipEdit,
+                title: model.editorInputOwnsInput ? "Redo Editor Change" : "Redo Clip Edit"
+            )
+        }
+    }
+
     private var editCommands: some Commands {
         CommandGroup(after: .pasteboard) {
             Divider()
             Menu("Find") {
-                Button("Find in Note…") {
-                    model.requestInNoteFind()
-                }
-                .keyboardShortcut("f", modifiers: [.command])
-                .disabled(!ready || entry == nil || model.isVaultSearchPresented)
+                commandButton(.findInNote)
+                editorCommandButton(
+                    "Replace…",
+                    action: .replace,
+                    enabled: model.workbenchUIState.editorCanReplace
+                )
+                .keyboardShortcut("f", modifiers: [.command, .option])
+                commandButton(.searchVault)
+            }
 
-                Button("Search Vault…") {
-                    model.presentVaultSearch()
-                }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-                .disabled(!ready)
+            Menu("Markdown Formatting") {
+                editorCommandButton(
+                    "Bold",
+                    action: .bold,
+                    enabled: model.workbenchUIState.editorCanReplace
+                )
+                .keyboardShortcut("b", modifiers: .command)
+                editorCommandButton(
+                    "Italic",
+                    action: .italic,
+                    enabled: model.workbenchUIState.editorCanReplace
+                )
+                .keyboardShortcut("i", modifiers: .command)
+                editorCommandButton(
+                    "Link",
+                    action: .link,
+                    enabled: model.workbenchUIState.editorCanReplace
+                )
+                .keyboardShortcut("k", modifiers: .command)
             }
         }
     }
@@ -149,105 +180,58 @@ struct AppCommands: Commands {
 
     private var entryCommands: some Commands {
         CommandMenu("Entry") {
-            Button(entry?.favorite == true ? "Unfavorite" : "Favorite") {
-                if let entry { Task { await model.toggleFavorite(for: entry) } }
-            }
-            .keyboardShortcut("d", modifiers: .command)
-            .disabled(entry == nil)
-
-            Button("Rename…") {
-                model.requestRenameEntry()
-            }
-            .disabled(entry == nil)
-
-            Button("Duplicate Entry") {
-                if let entry { Task { await model.duplicateEntry(entry) } }
-            }
-            .disabled(entry == nil)
-
-            // ⇧⌫ and ⌘⌫ live in the key monitor (they must defer to text editing).
-            Button("Move to Recently Deleted") {
-                if let entry {
-                    Task { await model.deleteItem(atRelativePath: entry.relativePath) }
-                }
-            }
-            .disabled(entry == nil || model.recorder.currentEntryPath == entry?.relativePath)
+            commandButton(
+                .toggleFavorite,
+                title: model.selectedEntry?.favorite == true ? "Unfavorite" : "Favorite"
+            )
+            commandButton(.renameEntry)
+            commandButton(.duplicateEntry)
+            commandButton(.moveNote)
+            commandButton(.moveToRecentlyDeleted)
 
             Divider()
 
-            Button("Extend Recording") {
-                model.requestEntryAction(.extendRecording)
-            }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
-            .disabled(entry.map { model.extensionBlockReason(for: $0) != nil } ?? true)
-
-            Button(model.workbenchUIState.isEditing ? "Save Note" : "Edit Note") {
-                model.requestWorkbenchAction(.editOrSave)
-            }
-            .keyboardShortcut("e", modifiers: .command)
-            .disabled(!model.workbenchUIState.canEditNote && !model.workbenchUIState.isEditing)
-
-            Button("Copy as Markdown") {
-                model.requestWorkbenchAction(.copyAsMarkdown)
-            }
-            .keyboardShortcut("c", modifiers: [.command, .shift])
-            .disabled(!model.workbenchUIState.hasContent)
-
-            Button(model.workbenchUIState.viewedLayerIsOriginal
-                   ? "Show Edited Layer" : "Show Original Layer") {
-                model.requestWorkbenchAction(.toggleLayer)
-            }
-            .disabled(!model.workbenchUIState.isForked || model.workbenchUIState.isEditing)
+            commandButton(
+                .extendRecording,
+                title: model.recorder.extensionSession == nil
+                    ? "Extend Recording" : "Finish Extension"
+            )
+            commandButton(
+                .editOrSaveNote,
+                title: model.workbenchUIState.isEditing ? "Save Note" : "Edit Note"
+            )
+            commandButton(.copyMarkdown)
+            commandButton(
+                .toggleTranscriptLayer,
+                title: model.workbenchUIState.viewedLayerIsOriginal
+                    ? "Show Edited Layer" : "Show Original Layer"
+            )
 
             Divider()
 
-            Button("Retranscribe…") {
-                model.requestEntryAction(.retranscribe)
-            }
-            .disabled(entry?.hasAudio != true)
+            commandButton(.retranscribe)
+            commandButton(
+                .trimAudio,
+                title: model.trimModeActive ? "Cancel Trim" : "Trim Audio…"
+            )
+            commandButton(.replaceAudio)
+            commandButton(.compressAudio)
+            commandButton(.restoreOriginalAudio)
 
-            Button("Trim Audio…") {
-                model.requestEntryAction(.trim)
+            if model.workbenchUIState.hasDetectedSpeakers {
+                commandToggle(
+                    .toggleSpeakerDetection,
+                    title: "Detect Speakers",
+                    isOn: model.workbenchUIState.speakerDetectionEnabled
+                )
             }
-            .disabled(entry.map {
-                model.trimBlockedReason(for: $0, duration: $0.duration) != nil
-            } ?? true)
-
-            Button("Compress Audio…") {
-                model.requestEntryAction(.compress)
-            }
-            .disabled(entry?.hasAudio != true
-                      || entry.map { model.compressingEntryPaths.contains($0.relativePath) } == true)
-
-            Button("Restore Original Audio…") {
-                model.requestEntryAction(.restoreOriginalAudio)
-            }
-            .disabled(entry.map { model.originalAudioTrashItem(for: $0) == nil } ?? true)
-
-            Button("Rename Speakers…") {
-                model.requestWorkbenchAction(.renameSpeakers)
-            }
-            .disabled(!model.workbenchUIState.hasSpeakers || model.workbenchUIState.isEditing)
-
-            Button("Delete Audio…") {
-                model.requestEntryAction(.deleteAudio)
-            }
-            .disabled(entry?.hasAudio != true
-                      || model.recorder.currentEntryPath == entry?.relativePath
-                      || entry.map { model.compressingEntryPaths.contains($0.relativePath) } == true)
+            commandButton(.renameSpeakers)
+            commandButton(.deleteAudio)
 
             Divider()
 
-            Button("Show Info") {
-                model.requestEntryAction(.showInfo)
-            }
-            .keyboardShortcut("i", modifiers: .command)
-            .disabled(entry == nil)
-
-            Button("Reveal in Finder") {
-                if let entry { model.revealInFinder(relativePath: entry.relativePath) }
-            }
-            .disabled(entry == nil)
+            commandButton(.showInfo)
+            commandButton(.revealInFinder)
         }
     }
 
@@ -255,53 +239,55 @@ struct AppCommands: Commands {
 
     private var playbackCommands: some Commands {
         CommandMenu("Playback") {
-            // Space, R, T, S, 0–9, Left/Right Arrow, [, ], and \ are key-monitor shortcuts
-            // (see header note).
-            Button(model.player.isPlaying ? "Pause" : "Play") {
-                model.player.togglePlayPause()
-            }
-            .disabled(model.player.url == nil)
+            commandButton(
+                .togglePausePlayback,
+                title: pausePlaybackTitle
+            )
+            commandButton(
+                .skipBackward,
+                title: "Back \(model.player.skipIntervalMenuLabel)"
+            )
+            commandButton(
+                .skipForward,
+                title: "Forward \(model.player.skipIntervalMenuLabel)"
+            )
 
-            Button("Back \(model.player.skipIntervalMenuLabel)") {
-                model.player.skipBackward()
+            Menu("Jump To") {
+                commandButton(.jump0)
+                commandButton(.jump1)
+                commandButton(.jump2)
+                commandButton(.jump3)
+                commandButton(.jump4)
+                commandButton(.jump5)
+                commandButton(.jump6)
+                commandButton(.jump7)
+                commandButton(.jump8)
+                commandButton(.jump9)
             }
-            .disabled(model.player.url == nil)
-
-            Button("Forward \(model.player.skipIntervalMenuLabel)") {
-                model.player.skipForward()
-            }
-            .disabled(model.player.url == nil)
 
             Divider()
 
-            Button("Slower") {
-                model.player.stepSpeed(-1)
-            }
-            .disabled(model.player.url == nil)
-
-            Button("Faster") {
-                model.player.stepSpeed(1)
-            }
-            .disabled(model.player.url == nil)
-
-            Button("Normal Speed") {
-                model.player.speed = 1.0
-            }
-            .disabled(model.player.url == nil)
+            commandButton(.decreasePlaybackSpeed)
+            commandButton(.increasePlaybackSpeed)
+            commandButton(.resetPlaybackSpeed)
 
             Divider()
 
-            Toggle("Skip Silence", isOn: Binding(
-                get: { model.player.skipSilence },
-                set: { model.player.skipSilence = $0 }
-            ))
+            commandToggle(
+                .toggleSkipSilence,
+                title: "Skip Silence",
+                isOn: model.player.skipSilence
+            )
+            commandButton(.enterZenMode)
+        }
+    }
 
-            Divider()
-
-            Button("Enter Zen Mode") {
-                model.recorder.isZenMode = true
-            }
-            .disabled(!ready || model.recorder.isZenMode)
+    private var pausePlaybackTitle: String {
+        switch model.recorder.state {
+        case .recording: "Pause Recording"
+        case .paused: "Resume Recording"
+        case .idle: model.player.isPlaying ? "Pause Playback" : "Play"
+        case .finalizing: "Pause / Resume"
         }
     }
 
@@ -309,40 +295,87 @@ struct AppCommands: Commands {
 
     private var viewCommands: some Commands {
         CommandGroup(before: .sidebar) {
-            Picker("Sort Entries By", selection: Binding(
-                get: { model.entrySortOrder },
-                set: { model.selectEntrySortOrder($0) }
-            )) {
-                ForEach(EntrySortOrder.allCases, id: \.self) { order in
-                    Text(order.displayName).tag(order)
+            Menu("Editor") {
+                Button("Increase Font Size") {
+                    var preferences = model.editorPreferences
+                    preferences.stepFontSize(by: 1)
+                    model.updateEditorPreferences(preferences)
                 }
+                .keyboardShortcut("+", modifiers: .command)
+                .disabled(model.editorPreferences.fontSize >= EditorPreferences.maximumFontSize)
+
+                Button("Decrease Font Size") {
+                    var preferences = model.editorPreferences
+                    preferences.stepFontSize(by: -1)
+                    model.updateEditorPreferences(preferences)
+                }
+                .keyboardShortcut("-", modifiers: .command)
+                .disabled(model.editorPreferences.fontSize <= EditorPreferences.minimumFontSize)
+
+                Button("Actual Font Size") {
+                    var preferences = model.editorPreferences
+                    preferences.fontSize = EditorPreferences.defaultFontSize
+                    model.updateEditorPreferences(preferences)
+                }
+                .keyboardShortcut("0", modifiers: .command)
+
+                Divider()
+
+                Menu("Editor Width") {
+                    ForEach(EditorWidthPreset.allCases) { width in
+                        Toggle(width.title, isOn: Binding(
+                            get: { model.editorPreferences.width == width },
+                            set: { enabled in
+                                guard enabled else { return }
+                                var preferences = model.editorPreferences
+                                preferences.width = width
+                                model.updateEditorPreferences(preferences)
+                            }
+                        ))
+                    }
+                }
+
+                Toggle("Center Edited Prose", isOn: Binding(
+                    get: { model.editorPreferences.editedAlignment == .center },
+                    set: { centered in
+                        var preferences = model.editorPreferences
+                        preferences.editedAlignment = centered ? .center : .left
+                        model.updateEditorPreferences(preferences)
+                    }
+                ))
+                Toggle("Focus Mode", isOn: Binding(
+                    get: { model.editorPreferences.focusMode },
+                    set: { enabled in
+                        var preferences = model.editorPreferences
+                        preferences.focusMode = enabled
+                        model.updateEditorPreferences(preferences)
+                    }
+                ))
             }
-            .pickerStyle(.menu)
-            .disabled(!ready)
 
             Divider()
 
-            Button("Go to Vault Root") {
-                model.sidebarSelection = .folder("")
-            }
-            .disabled(!ready)
-
-            Button("Go to Favorites") {
-                model.sidebarSelection = .favorites
-            }
-            .disabled(!ready)
-
-            Button("Go to Recently Deleted") {
-                model.sidebarSelection = .recentlyDeleted
-            }
-            .disabled(!ready)
+            commandButton(.previousFolder)
+            commandButton(.nextFolder)
 
             Divider()
 
-            Button("Transcription Queue") {
-                model.requestQueuePopover()
+            Menu("Sort Entries By") {
+                commandButton(.sortByDate)
+                commandButton(.sortByDuration)
+                commandButton(.sortByTitle)
+                commandButton(.sortByRecentlyEdited)
             }
-            .disabled(!ready)
+
+            Divider()
+
+            commandButton(.goToVaultRoot)
+            commandButton(.goToFavorites)
+            commandButton(.goToRecentlyDeleted)
+
+            Divider()
+
+            commandButton(.showTranscriptionQueue)
         }
     }
 }

@@ -204,12 +204,17 @@ struct TranscriptWordMap: Equatable, Sendable {
     init(
         transcript: TranscriptOriginal,
         duration: TimeInterval? = nil,
-        speakerNames: [String: String] = [:]
+        speakerNames: [String: String] = [:],
+        speakerDetectionEnabled: Bool = true
     ) {
         // The map shares TranscriptMarkdown's rendering walk, so renderedText
         // stays byte-identical to the generated body — search offsets, word
         // runs, and markdown all live in one coordinate space.
-        let rendering = TranscriptMarkdown.rendering(from: transcript, speakerNames: speakerNames)
+        let rendering = TranscriptMarkdown.rendering(
+            from: transcript,
+            speakerNames: speakerNames,
+            speakerDetectionEnabled: speakerDetectionEnabled
+        )
         renderedText = rendering.text
         let repairedWords: [TranscriptOriginal.Word]? = duration.map {
             TranscriptTimingRepair.repair(segments: transcript.segments, duration: $0)

@@ -185,6 +185,7 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
     private let statusHeaderItem = NSMenuItem()
     private let primaryActionItem = NSMenuItem()
     private let pauseActionItem = NSMenuItem()
+    private let showFloatingWidgetItem = NSMenuItem()
     private let registrationItem = NSMenuItem()
     private let openItem = NSMenuItem()
     private let settingsItem = NSMenuItem()
@@ -231,8 +232,19 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
         menu.items.map(ObjectIdentifier.init)
     }
 
+    var menuItemTitlesForTesting: [String] {
+        menu.items.map(\.title)
+    }
+
     func refreshForTesting() {
         refresh(allowLayoutChanges: !isMenuOpen)
+    }
+
+    func showFloatingWidgetForTesting() {
+        _ = showFloatingWidgetItem.target?.perform(
+            showFloatingWidgetItem.action,
+            with: showFloatingWidgetItem
+        )
     }
 
     private func configureMenu() {
@@ -246,6 +258,10 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
         primaryActionItem.action = #selector(performPrimaryAction)
         pauseActionItem.target = self
         pauseActionItem.action = #selector(performPauseAction)
+
+        showFloatingWidgetItem.title = "Show Floating Widget"
+        showFloatingWidgetItem.target = self
+        showFloatingWidgetItem.action = #selector(showFloatingWidget)
 
         openItem.title = "Open Transcride"
         openItem.target = self
@@ -268,6 +284,7 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
             .separator(),
             primaryActionItem,
             pauseActionItem,
+            showFloatingWidgetItem,
             registrationItem,
             .separator(),
             openItem,
@@ -317,6 +334,9 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
         primaryActionItem.isEnabled = snapshot.primaryActionEnabled
         pauseActionItem.title = snapshot.pauseActionTitle
         pauseActionItem.isEnabled = snapshot.pauseActionEnabled
+        // The override only ends at the widget's own dismiss control, so the
+        // menu item reports the active override instead of toggling it.
+        showFloatingWidgetItem.state = model.isGlobalIndicatorManuallyPresented ? .on : .off
 
         if allowLayoutChanges {
             registrationItem.isHidden = snapshot.registrationSummary == nil
@@ -407,6 +427,10 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
         Task { @MainActor [weak self] in
             await self?.model.performRecordingCommand(.pauseResume)
         }
+    }
+
+    @objc private func showFloatingWidget() {
+        model.showGlobalIndicatorManually()
     }
 
     @objc private func openTranscride() {

@@ -10,9 +10,11 @@ struct EntryDetailView: View {
     @State private var original: TranscriptOriginal?
     @State private var transcriptWordMap: TranscriptWordMap?
     @State private var transcriptIsForked = false
+    @State private var transcriptBodyRevision: EditorBodyRevision?
     @State private var transcriptContentRevision = 0
     @State private var extensionTranscriptState: ExtensionTranscriptState?
     @State private var loadedEntryPath: RelativePath?
+    @State private var loadedDocumentID: String?
     @State private var showingInfo = false
     @State private var showingRetranscribe = false
     // Payload separate from isPresented — SwiftUI clears the presentation
@@ -30,13 +32,17 @@ struct EntryDetailView: View {
             if let entry = model.selectedEntry {
                 entryDetail(entry)
                     .task(id: taskKey(for: entry)) {
+                        if loadedEntryPath == entry.relativePath,
+                           document != nil || original != nil {
+                            guard await model.editorLifecycleCoordinator.prepare(
+                                for: .externalReload
+                            ) else { return }
+                        }
                         if loadedEntryPath != entry.relativePath {
-                            // A loaded path that vanished from the snapshot is
-                            // the same entry renamed (auto-title, retitle), not
-                            // a switch: keep the content up and swap in place
-                            // instead of dropping to the loading placeholder.
-                            if let loadedEntryPath, document != nil || original != nil,
-                               model.snapshot?.entry(withID: loadedEntryPath) == nil {
+                            // Path remaps stay mounted only when the canonical
+                            // timestamp identity proves this is the same note.
+                            if loadedDocumentID == entry.folderName.timestamp,
+                               document != nil || original != nil {
                                 self.loadedEntryPath = entry.relativePath
                             } else {
                                 document = nil
@@ -45,6 +51,7 @@ struct EntryDetailView: View {
                                 transcriptIsForked = false
                                 extensionTranscriptState = nil
                                 loadedEntryPath = nil
+                                loadedDocumentID = nil
                                 isTrimming = false
                                 model.player.unload()
                             }
@@ -57,13 +64,22 @@ struct EntryDetailView: View {
                         guard let content = await model.readTranscriptContent(for: entry),
                               !Task.isCancelled,
                               model.selectedEntryID == entry.relativePath else { return }
+                        let sameDocument = loadedDocumentID == entry.folderName.timestamp
+                        let bodyChanged = document?.body != content.edited?.body
+                            || original != content.original
                         document = content.edited
                         original = content.original
                         transcriptWordMap = content.wordMap
                         transcriptIsForked = content.isForked
-                        transcriptContentRevision &+= 1
+                        transcriptBodyRevision = content.bodyRevision
+                        // Frontmatter-only external writes update metadata but
+                        // leave the CodeMirror document/history untouched.
+                        if !sameDocument || bodyChanged {
+                            transcriptContentRevision &+= 1
+                        }
                         extensionTranscriptState = content.extensionState
                         loadedEntryPath = entry.relativePath
+                        loadedDocumentID = entry.folderName.timestamp
                         model.player.setTranscriptForSilenceSkipping(
                             content.original,
                             duration: content.extensionState?.knownTranscriptDuration
@@ -102,7 +118,7 @@ struct EntryDetailView: View {
     /// that list preview, and reloading the editor from an earlier debounced
     /// save could otherwise overwrite newer unsaved keystrokes.
     private func taskKey(for entry: Entry) -> String {
-        "\(entry.relativePath)|\(entry.title ?? "")|silence:\(entry.silenceDetectionMode.rawValue)|speech:\(entry.speechTranscriptAvailability)|external:\(model.externalVaultRevision)|transcription:\(model.transcriptRevision)"
+        "\(entry.relativePath)|\(entry.title ?? "")|silence:\(entry.silenceDetectionMode.rawValue)|speech:\(entry.speechTranscriptAvailability)|selectedExternal:\(model.selectedEntryExternalRevision)|transcription:\(model.transcriptRevision)"
     }
 
     private func infoPopover(_ entry: Entry) -> some View {
@@ -168,6 +184,7 @@ struct EntryDetailView: View {
                         original: original,
                         wordMap: transcriptWordMap,
                         loadedIsForked: transcriptIsForked,
+                        loadedBodyRevision: transcriptBodyRevision,
                         loadedContentRevision: transcriptContentRevision,
                         extensionState: extensionTranscriptState,
                         document: $document
@@ -483,17 +500,11 @@ struct EntryDetailView: View {
     }
 
     private func canCompress(_ entry: Entry) -> Bool {
-        compressBlockedReason(entry) == nil
+        model.compressionBlockedReason(for: entry) == nil
     }
 
     private func compressBlockedReason(_ entry: Entry) -> String? {
-        guard canTrim(entry), !model.compressingEntryPaths.contains(entry.relativePath) else {
-            return "Wait until audio processing is idle."
-        }
-        if entry.silenceDetectionMode == .speech {
-            return model.speechTranscriptAvailability(for: entry).explanation
-        }
-        return nil
+        model.compressionBlockedReason(for: entry)
     }
 
     private func silenceDetectionHelp(_ entry: Entry) -> String {

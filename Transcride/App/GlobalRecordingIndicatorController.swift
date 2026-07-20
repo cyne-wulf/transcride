@@ -37,8 +37,10 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
         panel.contentView = NSHostingView(rootView: GlobalRecordingIndicatorView(
             model: model,
             onDismiss: { [weak self] in
-                self?.isDismissed = true
-                self?.panel.orderOut(nil)
+                guard let self else { return }
+                self.isDismissed = true
+                self.model.dismissGlobalIndicatorManually()
+                self.panel.orderOut(nil)
             }
         ))
         panel.setContentSize(Self.panelSize)
@@ -97,8 +99,9 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
     private func observeModel() {
         withObservationTracking {
             _ = model.globalShortcutPreferences
-            _ = model.globalRecordingPresentationState
+            _ = model.globalIndicatorPresentationState
             _ = model.isGlobalIndicatorRetentionActive
+            _ = model.isGlobalIndicatorManuallyPresented
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.updateVisibility()
@@ -110,25 +113,32 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
 
     private func updateVisibility() {
         let preferences = model.globalShortcutPreferences
-        let presentationState = model.globalRecordingPresentationState
+        let presentationState = model.globalIndicatorPresentationState
         let isCaptureActive = presentationState.isCaptureActive
         if isCaptureActive && !wasCaptureActive {
             isDismissed = false
         }
         wasCaptureActive = isCaptureActive
-        let belongsToVisibleSession = presentationState.belongsToRecordingSession ||
-            model.isGlobalIndicatorRetentionActive
-        let shouldShow = preferences.isEnabled &&
-            preferences.showsBackgroundIndicator &&
-            belongsToVisibleSession &&
-            !NSApp.isActive &&
-            !isDismissed
+        let shouldShow = GlobalIndicatorVisibilityPolicy.shouldShow(
+            isManuallyPresented: model.isGlobalIndicatorManuallyPresented,
+            globalControlsEnabled: preferences.isEnabled,
+            automaticIndicatorEnabled: preferences.showsBackgroundIndicator,
+            belongsToRecordingSession: presentationState.belongsToRecordingSession,
+            retentionActive: model.isGlobalIndicatorRetentionActive,
+            appIsActive: NSApp.isActive,
+            isDismissed: isDismissed
+        )
         if shouldShow {
             if !panel.isVisible {
                 restorePosition()
                 panel.orderFrontRegardless()
             }
-            announceStateChangeIfNeeded(presentationState)
+            // A manually presented panel can be visible while Transcride is
+            // frontmost, where the main recorder UI already reports state to
+            // accessibility; only announce from the background.
+            if !NSApp.isActive {
+                announceStateChangeIfNeeded(presentationState)
+            }
         } else {
             panel.orderOut(nil)
         }
@@ -236,7 +246,7 @@ private struct GlobalRecordingIndicatorView: View {
         // Resolve recorder/vault readiness only when observed model state
         // changes. The animation clock below must not repeat permission,
         // device, and free-disk checks 24 times per second.
-        let state = model.globalRecordingPresentationState
+        let state = model.globalIndicatorPresentationState
         TimelineView(.periodic(from: .now, by: 1.0 / 24.0)) { context in
             ZStack(alignment: .topTrailing) {
                 stateIcon(state, date: context.date)

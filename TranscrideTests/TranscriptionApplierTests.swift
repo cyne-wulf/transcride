@@ -241,6 +241,38 @@ struct TranscriptionApplierTests {
         #expect(try String(contentsOf: transcriptURL, encoding: .utf8) == flaggedText)
     }
 
+    @Test func retranscriptionClearsDisabledSpeakerPreferenceWithoutChangingHandEditedBody() throws {
+        let vault = try makeVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let relPath = try makeEntry(in: vault, title: "Interview", body: "My edited note.\n")
+        let entryURL = vault.appendingRelativePath(relPath)
+        let transcriptURL = try #require(TranscriptFile.url(inEntry: entryURL))
+        var doc = FrontmatterDocument.parse(
+            try String(contentsOf: transcriptURL, encoding: .utf8)
+        )
+        doc.handEdited = true
+        doc.speakerDetectionEnabled = false
+        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+
+        let outcome = try TranscriptionApplier(vaultRoot: vault).apply(
+            segments: [segment(["Fresh", "engine", "words"])],
+            toEntryAt: relPath,
+            engine: engineMeta(),
+            engineFrontmatterID: "parakeet-tdt-v3",
+            vocabularyTerms: [],
+            date: Date(timeIntervalSince1970: 1_800_000_200)
+        )
+
+        let updated = FrontmatterDocument.parse(
+            try String(contentsOf: transcriptURL, encoding: .utf8)
+        )
+        #expect(outcome.markdownLeftAlone)
+        #expect(updated.body == "My edited note.\n")
+        #expect(updated.handEdited)
+        #expect(updated.speakerDetectionEnabled)
+        #expect(updated.rawValue(for: "speaker_detection") == nil)
+    }
+
     @Test func vocabularyBackstopRunsBeforeWriting() throws {
         let vault = try makeVault()
         defer { try? FileManager.default.removeItem(at: vault) }

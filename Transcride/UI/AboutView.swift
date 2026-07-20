@@ -6,13 +6,18 @@ import SwiftUI
 struct AboutCommands: Commands {
     static let windowID = "about"
 
-    @Environment(\.openWindow) private var openWindow
+    let model: AppModel
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
-            Button("About Transcride") {
-                openWindow(id: Self.windowID)
+            Button(AppShortcutMenu.title(
+                "About Transcride",
+                action: .showAbout,
+                model: model
+            )) {
+                model.performAppCommand(.showAbout)
             }
+            .appShortcutMenu(.showAbout, model: model)
         }
     }
 }

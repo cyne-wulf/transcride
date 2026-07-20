@@ -11,7 +11,7 @@ struct VaultScannerTests {
         let entry1 = root.appending(path: "transcride-2026-07-01T10-00-00")
         try fm.createDirectory(at: entry1, withIntermediateDirectories: true)
         try AtomicFile.write(
-            "---\ntitle: \"Root Entry\"\nduration: 12.5\nsilence_detection: speech\n---\n# Heading\n\nHello from the root entry body.\n",
+            "---\ntitle: \"Root Entry\"\nduration: 12.5\nsilence_detection: speech\ntags: [Work/Voice, Swift]\n---\n# Heading\n\nHello from the root entry body. #Journal/Today\n",
             to: entry1.appending(path: "transcript.md")
         )
 
@@ -40,11 +40,21 @@ struct VaultScannerTests {
         #expect(snapshot.root.entries[0].silenceDetectionMode == .speech)
         #expect(snapshot.root.entries[0].snippet.contains("Hello from the root entry body."))
         #expect(!snapshot.root.entries[0].hasAudio)
+        #expect(snapshot.root.entries[0].tags.map(\.canonical) == [
+            "journal/today", "work/voice", "swift",
+        ])
 
         let ideas = try #require(snapshot.folder(at: "Journal/Ideas"))
         #expect(ideas.entries.count == 1)
         #expect(ideas.entries[0].title == "Big Idea")
         #expect(ideas.entries[0].hasAudio)
+
+        // Parent-folder browsing can opt into the same recursive entry view
+        // without asking the scanner to flatten or duplicate the tree.
+        let journal = try #require(snapshot.folder(at: "Journal"))
+        #expect(journal.entries.isEmpty)
+        #expect(journal.allEntries.map(\.title) == ["Big Idea"])
+        #expect(snapshot.root.allEntries.count == 2)
 
         // .trash is not part of the tree.
         #expect(snapshot.folder(at: ".trash") == nil)

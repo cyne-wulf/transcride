@@ -124,6 +124,27 @@ struct TrashStoreTests {
         return try String(contentsOf: url, encoding: .utf8)
     }
 
+    @Test func movingFolderRepointsAudioSidecarsButPreservesPlainItemRestorePaths() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let audioVersion = try store.trashPreTrimAudio(atEntryPath: entryRelPath)
+
+        let plainPath = "Journal/plain-folder"
+        try FileManager.default.createDirectory(
+            at: root.appendingRelativePath(plainPath), withIntermediateDirectories: true
+        )
+        let plainItem = try store.trashItem(atRelativePath: plainPath)
+
+        try store.repointEntryReferences(under: "Journal", to: "Archive/Journal")
+
+        let audioInfo = try #require(store.readInfo(forTrashedName: audioVersion))
+        #expect(audioInfo.originalPath == "Archive/" + entryRelPath)
+        let plainInfo = try #require(store.readInfo(forTrashedName: plainItem))
+        #expect(plainInfo.originalPath == plainPath)
+    }
+
     @Test func deleteAudioMovesFilesWritesSidecarAndSetsFlag() throws {
         let (root, entryRelPath) = try makeVault()
         defer { try? FileManager.default.removeItem(at: root) }

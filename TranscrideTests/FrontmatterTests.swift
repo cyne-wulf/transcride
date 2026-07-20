@@ -3,6 +3,39 @@ import Testing
 
 @Suite("Frontmatter round-trip")
 struct FrontmatterTests {
+    @Test func crlfFrontmatterExcludesYAMLAndRoundTripsExactBytes() {
+        let source = "---\r\ntitle: \"Windows Note\"\r\ncustom: keep me\r\n---\r\nBody line.\r\n"
+        var document = FrontmatterDocument.parse(source)
+        #expect(document.body == "Body line.\r\n")
+        #expect(document.serialized() == source)
+
+        document.handEdited = true
+        let updated = document.serialized()
+        #expect(updated.contains("custom: keep me\r\n"))
+        #expect(updated.contains("hand_edited: true\r\n"))
+        #expect(!FrontmatterDocument.parse(updated).body.contains("title:"))
+        #expect(FrontmatterDocument.parse(updated).body == "Body line.\r\n")
+    }
+
+    @Test func crOnlyAndMixedFrontmatterRoundTripWithoutExposingYAML() {
+        let cr = "---\rtitle: CR Note\runknown: keep\r---\rBody\rnext\r"
+        var crDocument = FrontmatterDocument.parse(cr)
+        #expect(crDocument.body == "Body\rnext\r")
+        #expect(crDocument.serialized() == cr)
+        crDocument.handEdited = true
+        #expect(crDocument.serialized().contains("hand_edited: true\r"))
+        #expect(FrontmatterDocument.parse(crDocument.serialized()).body == "Body\rnext\r")
+
+        let mixed = "---\r\ntitle: Mixed\nunknown: exact\r---\nBody\r\nnext\r"
+        var mixedDocument = FrontmatterDocument.parse(mixed)
+        #expect(mixedDocument.body == "Body\r\nnext\r")
+        #expect(mixedDocument.serialized() == mixed)
+        mixedDocument.title = "Changed"
+        let changed = mixedDocument.serialized()
+        #expect(changed.hasPrefix("---\r\ntitle: \"Changed\"\nunknown: exact\r---\n"))
+        #expect(changed.hasSuffix("Body\r\nnext\r"))
+    }
+
     let sample = """
     ---
     title: "Morning Thoughts"
@@ -61,6 +94,26 @@ struct FrontmatterTests {
         #expect(updated.contains("unknown:   keep # exact"))
         #expect(FrontmatterDocument.parse(updated).body == "Hand edited body.\n")
         #expect(FrontmatterDocument.parse(updated).silenceDetectionMode == .speech)
+    }
+
+    @Test func speakerDetectionDefaultsEnabledAndPersistsOnlyTheOffOverride() {
+        var missing = FrontmatterDocument.parse("---\ncustom: keep\n---\nBody\n")
+        #expect(missing.speakerDetectionEnabled)
+
+        missing.speakerDetectionEnabled = false
+        #expect(!missing.speakerDetectionEnabled)
+        #expect(missing.rawValue(for: "speaker_detection") == "false")
+        #expect(missing.body == "Body\n")
+
+        missing.speakerDetectionEnabled = true
+        #expect(missing.speakerDetectionEnabled)
+        #expect(missing.rawValue(for: "speaker_detection") == nil)
+        #expect(missing.rawValue(for: "custom") == "keep")
+
+        let unknown = FrontmatterDocument.parse(
+            "---\nspeaker_detection: future-mode\n---\nBody\n"
+        )
+        #expect(unknown.speakerDetectionEnabled)
     }
 
     @Test func untouchedDocumentSerializesByteExact() {

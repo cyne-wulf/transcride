@@ -9,10 +9,16 @@ enum MarkdownExport {
     struct Options: Equatable, Sendable {
         var includeSpeakerLabels = true
         var includeParagraphTimestamps = false
+        var speakerDetectionEnabled = true
 
-        init(includeSpeakerLabels: Bool = true, includeParagraphTimestamps: Bool = false) {
+        init(
+            includeSpeakerLabels: Bool = true,
+            includeParagraphTimestamps: Bool = false,
+            speakerDetectionEnabled: Bool = true
+        ) {
             self.includeSpeakerLabels = includeSpeakerLabels
             self.includeParagraphTimestamps = includeParagraphTimestamps
+            self.speakerDetectionEnabled = speakerDetectionEnabled
         }
     }
 
@@ -27,6 +33,7 @@ enum MarkdownExport {
         let rendering = TranscriptMarkdown.rendering(
             from: transcript,
             speakerNames: speakerNames,
+            speakerDetectionEnabled: options.speakerDetectionEnabled,
             speakerLabels: options.includeSpeakerLabels
         )
         guard options.includeParagraphTimestamps else { return rendering.text }

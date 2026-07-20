@@ -25,10 +25,16 @@ targets:
     platform: macOS
     sources:
       - Transcride
+      - path: EditorWeb/dist
+        type: folder
+        buildPhase: resources
+      - path: EditorWeb/THIRD_PARTY_NOTICES.md
+        buildPhase: resources
     dependencies:
       - package: FluidAudio
       - package: WhisperKit
       - sdk: libsqlite3.tbd
+      - sdk: WebKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ashandevine.transcride

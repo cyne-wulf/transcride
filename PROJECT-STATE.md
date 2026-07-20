@@ -1,13 +1,15 @@
 # Transcride project state
 
-Last updated: 2026-07-12
+Last updated: 2026-07-17
 Release line: 1.2.0 (build 3)
 Verified gate: Milestone 7, 17/17 human checks
+Current implementation: Milestone 9, authorized by a one-time human waiver dated 2026-07-17
+Milestone 8: implementation complete in the current worktree; human checklist skipped and unverified; no `milestone-8` verified tag
 Platform: macOS 15+, Apple silicon, Swift 6, SwiftUI
 
 ## Product state
 
-Milestones 1–7 are complete. Version 1.2 delivers the complete local workflow:
+Milestones 1–7 are human-verified. Version 1.2 delivers the complete local workflow:
 record or import audio, transcribe it on-device, review it against synchronized
 playback, edit a Markdown layer, search the vault, export or copy the knowledge,
 optionally delete the audio while retaining the note, and safely extend an existing
@@ -15,14 +17,23 @@ recording with full retranscription and version recovery. Milestone 7 adds
 duration-preserving replacement of a selected audio region with multiple takes,
 contextual audition, recoverable versions, and non-destructive retained sources.
 
+Milestone 8 implementation is complete in the current combined worktree: global
+recording hotkeys, a native menu-bar controller, the floating recording widget,
+app-wide two-slot shortcut remapping, Quick Move, recursive folder aggregation, and
+reversible cached-speaker presentation are present with automated coverage. The
+human explicitly skipped its 23-item checklist on 2026-07-17 and authorized the
+Milestone 8 → 9 transition as a one-time exception. This is not a verification pass;
+all Milestone 8 boxes remain unchecked and no `milestone-8` tag may be claimed.
+
 The vault is the product's source of truth. It remains useful without Transcride:
 notes are Markdown, audio uses ordinary media formats, timed transcripts are JSON,
 and entry/folder names are human-readable. The SQLite search index and waveform
 files are derived caches.
 
-The next gated milestone is `PRD-8.md`. Read `PRD-8-start-here.md` first and do not
-begin it merely because the handoff exists; follow the milestone gate in
-`CLAUDE.md`/`AGENTS.md`.
+The current implementation milestone is `PRD-9.md` under that dated waiver. Read
+`PRD-9-start-here.md` first: it records the exact dirty/committed baseline,
+interfaces, evidence, risks, and scope boundary. The normal Milestone 9 human
+verification and Milestone 9 → 10 gate remain fully in force.
 
 ## Architecture
 
@@ -39,6 +50,49 @@ begin it merely because the handoff exists; follow the milestone gate in
   must explicitly refresh the snapshot and synchronize the search index.
 - `TranscriptionQueue` is serial and persistent per vault. Queue records survive
   relaunch; a completed run is applied atomically through `TranscriptionApplier`.
+
+### Global controls and app command routing
+
+- `GlobalShortcutService` owns only the two registered Carbon chords
+  (`toggleRecording` and `pauseResumeRecording`). Registration applies atomically,
+  is re-established after wake, and is removed on shutdown; there is no general
+  keystroke event tap.
+- `AppModel.performRecordingCommand(_:)` is the serialized path shared by global
+  hotkeys, the native status menu, the floating indicator, and in-app recording
+  controls. `RecordingCommandGate` suppresses overlapping start/pause/stop work.
+- `ShortcutChord` is the shared physical-key representation. Global preferences
+  retain their existing JSON wire format; the app catalog adds 60 stable action ids
+  with ordered primary/alternate slots under `appShortcutPreferencesV1`.
+- `AppModel.isAppCommandEnabled(_:)` and `performAppCommand(_:)` are authoritative
+  for keyboard and menu dispatch. `AppShortcutMenu` displays live primary glyphs
+  but installs no native key equivalents; the local monitor is the sole keyboard
+  dispatcher and defers to editable text/capture ownership.
+- `AppWindowPresenter` retains scene actions and distinguishes the main workbench
+  from Settings/About/Help so any surface can reopen exactly one intended window.
+- `GlobalRecordingIndicatorController` owns the nonactivating all-Spaces panel,
+  session-only manual visibility, accessible state changes, and normalized
+  per-display position in `globalIndicatorScreenAnchorV1`.
+
+### Quick Move, path coherence, and browsing
+
+- `QuickMoveDestinationCatalog` enumerates existing folders plus Vault Root,
+  excludes the current parent, and deterministically ranks leaf/full-path exact,
+  prefix, substring, and fuzzy matches. `QuickMoveResult` exposes typed success and
+  retryable source/destination/collision/filesystem failures.
+- Quick Move asks an active workbench to finish its exact pending save before the
+  picker opens. The move is blocked by recording, transcription, or audio mutations
+  and never overwrites an existing entry.
+- One move intent updates the vault, old/new search paths, transcription queue,
+  selected/Quick Move paths, audio-version trash sidecars, and clip-edit history.
+  Snapshot, queue, and selection publication happen in one main-actor refresh.
+- `FolderNode.allEntries` and `VaultSnapshot.allEntries` provide recursive browsing.
+  `includeEntriesFromSubfolders` defaults on; disabling it clears a descendant
+  selection that is no longer visible without changing the selected recording
+  destination.
+- Frontmatter stores only `speaker_detection: false` as an override. Toggling
+  cached speaker presentation regenerates an unforked body and all derived views,
+  never rewrites Original JSON or queues transcription, and leaves hand-edited
+  Markdown byte-identical.
 
 ### Vault and entry contract
 
@@ -227,6 +281,22 @@ by occurrence ordinal; user-authored text absent from the original has no time c
 - Replacement capture starts directly without the optional countdown. Debug builds
   include explicit one-shot render and safe-swap failure commands.
 
+### Milestone 8 (implemented, human checklist skipped under waiver)
+
+- The accepted global-controls milestone also includes four explicit, user-approved
+  additions: the app-wide two-slot shortcut remapper, Obsidian-style Quick Move,
+  recursive subfolder aggregation, and reversible cached-speaker presentation.
+- Menu clicks, the app-local physical-key monitor, Help, global hotkeys, the native
+  status item, and floating widget converge on `AppModel` command/availability
+  seams rather than creating parallel workflows.
+- Quick Move preserves editor-save, queue, search, selection, trash-sidecar, and
+  clip-history invariants across path changes. The speaker toggle preserves a
+  hand-edited body and cached speaker data. Both are starting contracts for
+  Milestone 9.
+- The 2026-07-17 transition waiver allowed `PRD-9-start-here.md` and Milestone 9 to
+  proceed with all 23 boxes unchecked. It did not verify Milestone 8, authorize a
+  `milestone-8` tag, or weaken any later milestone gate.
+
 ## Known issues and technical debt
 
 ### P1 — release/distribution blockers
@@ -235,8 +305,9 @@ by occurrence ordinal; user-authored text absent from the original has no time c
    `project.yml` intentionally produces ad-hoc signed local builds. A downloadable
    app must be Developer-ID signed, notarized, and stapled before strangers can run
    it without Gatekeeper warnings.
-2. **No repeatable distribution script exists.** Add the notarized DMG pipeline
-   described by `PRD-9.md` once credentials and the intended distribution URL exist.
+2. **No repeatable distribution script exists.** A future release-engineering task
+   must add a notarized DMG pipeline once credentials and the intended distribution
+   URL exist; the scoped editor milestone does not own distribution work.
 
 ### P2 — product/runtime debt
 
@@ -262,6 +333,12 @@ by occurrence ordinal; user-authored text absent from the original has no time c
    verified scale.
 3. A late editor blink has not reproduced. If it returns, inspect self-generated
    FSEvents leaking into `externalVaultRevision`.
+4. App-hosted tests have a transient local LaunchServices/loader failure mode: one
+   launch failed before assertions and a later second launch wedged before test
+   code. A separate retry passed all 17 app-hosted tests; run Core and hosted targets
+   sequentially and distinguish launcher failures from assertion failures.
+5. `GlobalShortcutSettings.swift` is a now-unused legacy pane; current Settings uses
+   the combined keybind pane and `ShortcutCaptureField`.
 
 Production builds no longer append the development debug log; `DebugLog` is compiled
 to write only under `DEBUG`.
@@ -274,9 +351,18 @@ The detailed post-v1 sequence is already written:
   replacement uses the shared trim selector, explicit replacement recording target,
   retained-source recipe, safe swap, and full retranscription without shifting later
   timeline positions.
-- `PRD-8.md`: next gated milestone; global recording controls from the menu bar and system-wide shortcut,
-  reusing the single-recorder and crash-recovery contracts.
-- `PRD-9.md`: an editor workbench for note structure and presentation.
+- `PRD-8.md`: implementation complete in the current worktree but human-unverified.
+  Its 23 checks were skipped under the explicit 2026-07-17 one-time transition
+  waiver; no `milestone-8` verified tag exists or may be claimed.
+- `PRD-9.md`: a focused, locally bundled CodeMirror 6 decorated-source workbench for
+  Original, Edited view, and Edited editing. It adds Markdown/GFM/selected Obsidian
+  styling, smart editing, find/replace, typography and focus controls, existing-link
+  navigation, tag-aware vault search, and safe external-edit merging. Outline,
+  backlinks/Linked Mentions, wikilink autocomplete or note creation, inbound rename
+  rewriting, tag panes/counts/writing, and layer diff are removed rather than
+  deferred. It is the current implementation milestone under the one-time waiver;
+  `PRD-9-start-here.md` is its exact starting-state handoff. Normal Milestone 9
+  verification remains mandatory.
 - `PRD-10.md`: a third Original / Edited / Summary layer backed by a basic,
   local-only summarization model. The implementation must benchmark below 8 GB peak
   resident memory, store Summary as a separate derived Markdown artifact, preserve

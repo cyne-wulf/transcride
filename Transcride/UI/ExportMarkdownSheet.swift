@@ -24,9 +24,15 @@ struct ExportMarkdownSheet: View {
         return TranscriptEditDocument.isForked(document, comparedTo: original)
     }
 
-    private var hasSpeakers: Bool {
+    private var hasDetectedSpeakers: Bool {
         original?.segments.contains { $0.speaker != nil } == true
     }
+
+    private var speakerDetectionEnabled: Bool {
+        hasDetectedSpeakers && (document?.speakerDetectionEnabled ?? true)
+    }
+
+    private var hasSpeakers: Bool { hasDetectedSpeakers && speakerDetectionEnabled }
 
     /// The options only shape regenerated original-layer content; an edited
     /// body is the user's text and exports verbatim.
@@ -45,6 +51,7 @@ struct ExportMarkdownSheet: View {
         .onAppear {
             layer = isForked ? .edited : .original
             if original == nil { layer = .edited }
+            includeSpeakerLabels = speakerDetectionEnabled
         }
     }
 
@@ -66,7 +73,9 @@ struct ExportMarkdownSheet: View {
             .disabled(!optionsApply || !hasSpeakers)
             .help(hasSpeakers
                 ? "Label paragraphs with **Speaker:** using your chosen names"
-                : "This transcript has no speaker detection")
+                : (hasDetectedSpeakers
+                    ? "Speaker detection is turned off for this entry"
+                    : "This transcript has no speaker detection"))
 
         Toggle("Include paragraph timestamps", isOn: $includeTimestamps)
             .disabled(!optionsApply)
@@ -135,7 +144,8 @@ struct ExportMarkdownSheet: View {
                 speakerNames: names,
                 options: .init(
                     includeSpeakerLabels: includeSpeakerLabels,
-                    includeParagraphTimestamps: includeTimestamps
+                    includeParagraphTimestamps: includeTimestamps,
+                    speakerDetectionEnabled: speakerDetectionEnabled
                 )
             )
         case .edited:

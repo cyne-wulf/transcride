@@ -150,11 +150,30 @@ struct VaultOperations: Sendable {
     func moveItem(at relPath: RelativePath, toFolder destFolder: RelativePath) throws -> RelativePath {
         let name = relPath.lastComponent
         let newRelPath = destFolder.appendingComponent(name)
+        let sourceURL = vaultRoot.appendingRelativePath(relPath)
+        let destinationFolderURL = vaultRoot.appendingRelativePath(destFolder)
+        let destURL = vaultRoot.appendingRelativePath(newRelPath)
+        var sourceIsDirectory: ObjCBool = false
+        guard fm.fileExists(
+            atPath: sourceURL.path,
+            isDirectory: &sourceIsDirectory
+        ), sourceIsDirectory.boolValue else {
+            throw VaultError.notFound(relPath)
+        }
+
+        var destinationIsDirectory: ObjCBool = false
+        guard fm.fileExists(
+            atPath: destinationFolderURL.path,
+            isDirectory: &destinationIsDirectory
+        ), destinationIsDirectory.boolValue else {
+            throw VaultError.notFound(destFolder)
+        }
+
+        // A no-op is valid only after both sides have been revalidated. This
+        // prevents a stale UI path from reporting success after its source or
+        // parent folder disappeared.
         guard newRelPath != relPath else { return relPath }
 
-        let sourceURL = vaultRoot.appendingRelativePath(relPath)
-        let destURL = vaultRoot.appendingRelativePath(newRelPath)
-        guard fm.fileExists(atPath: sourceURL.path) else { throw VaultError.notFound(relPath) }
         guard !fm.fileExists(atPath: destURL.path) else { throw VaultError.alreadyExists(name) }
         // Refuse to move a folder into itself or a descendant.
         if newRelPath == relPath || newRelPath.hasPrefix(relPath + "/") {

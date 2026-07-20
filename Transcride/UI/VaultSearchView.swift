@@ -148,6 +148,30 @@ struct VaultSearchView: View {
                     .toggleStyle(.checkbox)
                     .help("Only favorited entries")
 
+                Menu {
+                    ForEach(availableTags, id: \.canonical) { tag in
+                        Button {
+                            toggleTag(tag.canonical)
+                        } label: {
+                            Label(
+                                "#\(tag.display)",
+                                systemImage: model.vaultSearchFilters.selectedTags
+                                    .contains(tag.canonical)
+                                    ? "checkmark" : "tag"
+                            )
+                        }
+                    }
+                } label: {
+                    Label(
+                        model.vaultSearchFilters.selectedTags.isEmpty
+                            ? "Tags"
+                            : "Tags (\(model.vaultSearchFilters.selectedTags.count))",
+                        systemImage: "tag"
+                    )
+                }
+                .disabled(availableTags.isEmpty)
+                .help("Match any selected tag; parent tags include descendants")
+
                 Spacer()
 
                 if model.vaultSearchFilters.isActive {
@@ -181,6 +205,28 @@ struct VaultSearchView: View {
     private var filterableFolders: [FolderNode] {
         guard let root = model.snapshot?.root else { return [] }
         return Array(root.allFolders.dropFirst())
+    }
+
+    private var availableTags: [EditorTag] {
+        var displayByCanonical: [String: String] = [:]
+        for tag in model.snapshot?.allEntries.flatMap(\.tags) ?? [] {
+            if displayByCanonical[tag.canonical] == nil {
+                displayByCanonical[tag.canonical] = tag.display
+            }
+        }
+        return displayByCanonical.map {
+            EditorTag(canonical: $0.key, display: $0.value)
+        }.sorted {
+            $0.display.localizedStandardCompare($1.display) == .orderedAscending
+        }
+    }
+
+    private func toggleTag(_ canonical: String) {
+        var filters = model.vaultSearchFilters
+        if filters.selectedTags.remove(canonical) == nil {
+            filters.selectedTags.insert(canonical)
+        }
+        model.vaultSearchFilters = filters
     }
 
     /// Choosing "Custom Range…" seeds the pickers with a sane recent window
@@ -225,7 +271,8 @@ struct VaultSearchView: View {
             }
 
         case .ready:
-            if model.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if model.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               model.vaultSearchFilters.selectedTags.isEmpty {
                 ContentUnavailableView(
                     "Search the Vault",
                     systemImage: "text.magnifyingglass",
@@ -244,10 +291,7 @@ struct VaultSearchView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if groups.isEmpty {
                 ContentUnavailableView {
-                    Label(
-                        "No Matches for “\(model.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines))”",
-                        systemImage: "magnifyingglass"
-                    )
+                    Label(noMatchesTitle, systemImage: "magnifyingglass")
                 } description: {
                     Text(model.vaultSearchFilters.isActive
                          ? "No filtered entries match. Try clearing the filters."
@@ -305,11 +349,9 @@ struct VaultSearchView: View {
 
     private func resultRow(_ hit: SearchHit) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Text(hit.matchKind == .title
-                 ? "Title"
-                 : (hit.layer == .edited ? "Edited" : "Original"))
+            Text(resultKindLabel(hit))
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(hit.matchKind == .title
+                .foregroundStyle(hit.matchKind == .title || hit.matchKind == .metadata
                                  ? AnyShapeStyle(.secondary)
                                  : hit.layer == .edited
                                  ? AnyShapeStyle(.tint)
@@ -334,6 +376,7 @@ struct VaultSearchView: View {
     }
 
     private func highlightedSnippet(_ hit: SearchHit) -> Text {
+        if hit.matchKind == .metadata { return Text(hit.snippet) }
         let source = hit.snippet as NSString
         let lower = min(max(0, hit.snippetMatchRange.lowerBound), source.length)
         let upper = min(max(lower, hit.snippetMatchRange.upperBound), source.length)
@@ -343,5 +386,18 @@ struct VaultSearchView: View {
         return Text(before)
             + Text(match).bold().foregroundColor(.accentColor)
             + Text(after)
+    }
+
+    private var noMatchesTitle: String {
+        let query = model.vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? "No Entries Match the Selected Tags" : "No Matches for “\(query)”"
+    }
+
+    private func resultKindLabel(_ hit: SearchHit) -> String {
+        switch hit.matchKind {
+        case .title: "Title"
+        case .metadata: "Tags"
+        case .content: hit.layer == .edited ? "Edited" : "Original"
+        }
     }
 }

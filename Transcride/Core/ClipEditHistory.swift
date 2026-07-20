@@ -145,6 +145,36 @@ struct ClipEditHistoryStore: Sendable {
         try save(file)
     }
 
+    /// Re-keys histories belonging to an entry or folder after it moves.
+    /// Destination keys are replaced because a successful filesystem move
+    /// guarantees that no live item occupied the destination path.
+    func repointEntries(under oldPath: RelativePath, to newPath: RelativePath) throws {
+        guard oldPath != newPath, !oldPath.isEmpty else { return }
+        var file = load()
+        let movedEntries = file.entries.compactMap { path, history -> (RelativePath, ClipEditEntryHistory)? in
+            guard let repointed = Self.repointed(path, from: oldPath, to: newPath) else {
+                return nil
+            }
+            return (repointed, history)
+        }
+
+        let sourceKeys = file.entries.keys.filter {
+            Self.repointed($0, from: oldPath, to: newPath) != nil
+        }
+        let destinationKeys = file.entries.keys.filter {
+            Self.contains($0, under: newPath)
+        }
+        guard !sourceKeys.isEmpty || !destinationKeys.isEmpty else { return }
+
+        for key in sourceKeys + destinationKeys {
+            file.entries.removeValue(forKey: key)
+        }
+        for (path, history) in movedEntries {
+            file.entries[path] = history
+        }
+        try save(file)
+    }
+
     private func reconciled(
         _ history: ClipEditEntryHistory,
         existingTrashNames: Set<String>
@@ -178,5 +208,22 @@ struct ClipEditHistoryStore: Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
+    }
+
+    private static func contains(_ path: RelativePath, under parent: RelativePath) -> Bool {
+        path == parent || path.hasPrefix(parent + "/")
+    }
+
+    private static func repointed(
+        _ path: RelativePath,
+        from oldPath: RelativePath,
+        to newPath: RelativePath
+    ) -> RelativePath? {
+        guard contains(path, under: oldPath) else { return nil }
+        let suffix = path.dropFirst(oldPath.count)
+        if newPath.isEmpty {
+            return suffix.first == "/" ? String(suffix.dropFirst()) : String(suffix)
+        }
+        return newPath + suffix
     }
 }

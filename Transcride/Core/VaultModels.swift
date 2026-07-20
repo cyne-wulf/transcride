@@ -38,6 +38,9 @@ struct Entry: Identifiable, Hashable, Sendable {
     var snippet: String
     var favorite: Bool
     var audioDeleted: Bool
+    /// Canonical/display tag metadata extracted from the persisted Markdown
+    /// body and YAML frontmatter. This remains rebuildable scan metadata.
+    var tags: [EditorTag] = []
     var silenceDetectionMode: SilenceDetectionMode = .waveform
     var speechTranscriptAvailability: SpeechTranscriptAvailability = .missing
     /// Name of the entry's audio file (prefers `audio.*`, else first by name);
@@ -98,6 +101,21 @@ struct FolderNode: Identifiable, Hashable, Sendable {
         [self] + subfolders.flatMap(\.allFolders)
     }
 
+    /// Entries stored directly in this folder or anywhere below it,
+    /// depth-first by folder.
+    var allEntries: [Entry] {
+        var result: [Entry] = []
+        collectEntries(into: &result)
+        return result
+    }
+
+    private func collectEntries(into result: inout [Entry]) {
+        result.append(contentsOf: entries)
+        for subfolder in subfolders {
+            subfolder.collectEntries(into: &result)
+        }
+    }
+
     var totalEntryCount: Int {
         entries.count + subfolders.reduce(0) { $0 + $1.totalEntryCount }
     }
@@ -117,7 +135,7 @@ struct VaultSnapshot: Sendable {
 
     /// Every entry in the vault, depth-first by folder.
     var allEntries: [Entry] {
-        root.allFolders.flatMap(\.entries)
+        root.allEntries
     }
 }
 

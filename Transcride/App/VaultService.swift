@@ -7,6 +7,12 @@ struct EntryTranscriptContent: Sendable {
     var extensionState: ExtensionTranscriptState?
     var wordMap: TranscriptWordMap?
     var isForked: Bool
+    var bodyRevision: EditorBodyRevision?
+}
+
+enum TranscriptBodySaveResult: Sendable {
+    case saved(document: FrontmatterDocument, revision: EditorBodyRevision)
+    case conflict(external: FrontmatterDocument, revision: EditorBodyRevision)
 }
 
 struct AudioExtensionOutcome: Sendable {
@@ -32,6 +38,9 @@ actor VaultService {
     private let clipEditHistory: ClipEditHistoryStore
     private let settings: VaultSettingsStore
     private var searchIndex: VaultSearchIndex?
+#if DEBUG
+    private var compareSavePrecommitHook: (@Sendable (URL) throws -> Void)?
+#endif
 
     init(rootURL: URL) {
         self.rootURL = rootURL
@@ -208,7 +217,8 @@ actor VaultService {
             TranscriptWordMap(
                 transcript: $0,
                 duration: extensionState?.knownTranscriptDuration ?? duration,
-                speakerNames: edited.map { SpeakerNames.names(in: $0) } ?? [:]
+                speakerNames: edited.map { SpeakerNames.names(in: $0) } ?? [:],
+                speakerDetectionEnabled: edited?.speakerDetectionEnabled ?? true
             )
         }
         return EntryTranscriptContent(
@@ -218,7 +228,8 @@ actor VaultService {
             wordMap: wordMap,
             isForked: edited.map {
                 TranscriptEditDocument.isForked($0, comparedTo: original)
-            } ?? false
+            } ?? false,
+            bodyRevision: edited.map { EditorBodyRevision(body: $0.body) }
         )
     }
 
@@ -299,12 +310,73 @@ actor VaultService {
         }
         var editable = try TranscriptEditDocument.load(from: transcriptURL)
         editable.replaceBody(body, markHandEdited: markHandEdited)
-        if markHandEdited { editable.markHandEdited() }
         if clearHandEdited { editable.clearHandEdited() }
         try editable.save(to: transcriptURL)
         synchronizeSearchIndex(relativePaths: [relPath])
         return editable.document
     }
+
+    /// Exact-body compare-and-save. A frontmatter-only external change keeps
+    /// the expected body revision and is preserved because the freshly read
+    /// document supplies every field line for the eventual write.
+    func compareAndSaveTranscriptBody(
+        _ body: String,
+        expectedRevision: EditorBodyRevision,
+        markHandEdited: Bool,
+        clearHandEdited: Bool = false,
+        atEntryPath relPath: RelativePath
+    ) throws -> TranscriptBodySaveResult {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        guard let transcriptURL = TranscriptFile.url(inEntry: entryURL) else {
+            throw VaultError.notFound("Transcript for \(relPath)")
+        }
+        let initialBytes = try Data(contentsOf: transcriptURL)
+        guard let initialText = String(data: initialBytes, encoding: .utf8) else {
+            throw CocoaError(.fileReadInapplicableStringEncoding)
+        }
+        var editable = TranscriptEditDocument(
+            document: FrontmatterDocument.parse(initialText)
+        )
+        let diskRevision = EditorBodyRevision(body: editable.document.body)
+        guard diskRevision == expectedRevision else {
+            return .conflict(external: editable.document, revision: diskRevision)
+        }
+        editable.replaceBody(body, markHandEdited: markHandEdited)
+        if clearHandEdited { editable.clearHandEdited() }
+#if DEBUG
+        try compareSavePrecommitHook?(transcriptURL)
+        compareSavePrecommitHook = nil
+#endif
+        // Revalidate the complete file, not only its body revision, directly
+        // before the atomic rename. This preserves a frontmatter-only write
+        // that landed during this operation and converts the race into a
+        // retryable compare conflict instead of overwriting it.
+        let currentBytes = try Data(contentsOf: transcriptURL)
+        guard currentBytes == initialBytes else {
+            guard let currentText = String(data: currentBytes, encoding: .utf8) else {
+                throw CocoaError(.fileReadInapplicableStringEncoding)
+            }
+            let current = FrontmatterDocument.parse(currentText)
+            return .conflict(
+                external: current,
+                revision: EditorBodyRevision(body: current.body)
+            )
+        }
+        try editable.save(to: transcriptURL)
+        synchronizeSearchIndex(relativePaths: [relPath])
+        return .saved(
+            document: editable.document,
+            revision: EditorBodyRevision(body: editable.document.body)
+        )
+    }
+
+#if DEBUG
+    func setCompareSavePrecommitHookForTesting(
+        _ hook: (@Sendable (URL) throws -> Void)?
+    ) {
+        compareSavePrecommitHook = hook
+    }
+#endif
 
     /// Loads the entry's `waveform.json`, generating (and caching) it from the
     /// audio file when missing or unreadable — so deleting the file in Finder
@@ -384,6 +456,18 @@ actor VaultService {
 
     func moveItem(at relPath: RelativePath, toFolder destFolder: RelativePath) throws -> RelativePath {
         let newPath = try operations.moveItem(at: relPath, toFolder: destFolder)
+        if newPath != relPath {
+            do {
+                try trash.repointEntryReferences(under: relPath, to: newPath)
+            } catch {
+                DebugLog.append("trash entry-path repoint deferred: \(error)")
+            }
+            do {
+                try clipEditHistory.repointEntries(under: relPath, to: newPath)
+            } catch {
+                DebugLog.append("clip edit history repoint deferred: \(error)")
+            }
+        }
         synchronizeSearchIndex(relativePaths: [relPath, newPath])
         return newPath
     }
@@ -918,7 +1002,41 @@ actor VaultService {
         }
         if regenerable, let original {
             doc.body = "\n" + TranscriptMarkdown.body(
-                from: original, speakerNames: SpeakerNames.names(in: doc)
+                from: original,
+                speakerNames: SpeakerNames.names(in: doc),
+                speakerDetectionEnabled: doc.speakerDetectionEnabled
+            ) + "\n"
+        }
+        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+        synchronizeSearchIndex(relativePaths: [relPath])
+    }
+
+    /// Enables or disables the presentation of already-cached diarization.
+    /// Speaker ids remain untouched in the Original JSON, so this is instant
+    /// and fully reversible without either ASR or diarizer work.
+    func setSpeakerDetectionEnabled(
+        _ enabled: Bool, atEntryPath relPath: RelativePath
+    ) throws {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        guard let transcriptURL = TranscriptFile.url(inEntry: entryURL),
+              let text = try? String(contentsOf: transcriptURL, encoding: .utf8) else {
+            throw VaultError.notFound("Transcript for \(relPath)")
+        }
+        guard let original = TranscriptOriginal.load(
+            from: TranscriptOriginal.url(inEntry: entryURL)
+        ), original.segments.contains(where: { $0.speaker != nil }) else {
+            throw VaultError.notFound("Cached speaker detection for \(relPath)")
+        }
+
+        var doc = FrontmatterDocument.parse(text)
+        guard doc.speakerDetectionEnabled != enabled else { return }
+        let regenerable = !TranscriptEditDocument.isForked(doc, comparedTo: original)
+        doc.speakerDetectionEnabled = enabled
+        if regenerable {
+            doc.body = "\n" + TranscriptMarkdown.body(
+                from: original,
+                speakerNames: SpeakerNames.names(in: doc),
+                speakerDetectionEnabled: enabled
             ) + "\n"
         }
         try AtomicFile.write(doc.serialized(), to: transcriptURL)

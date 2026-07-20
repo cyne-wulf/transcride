@@ -466,6 +466,26 @@ struct TrashStore: Sendable {
         return try? Self.makeDecoder().decode(TrashInfo.self, from: data)
     }
 
+    /// Updates audio-version sidecars that point at an entry (or entries
+    /// beneath a moved folder). Plain trashed items intentionally retain the
+    /// location they occupied when deleted so their Restore behavior does not
+    /// change when an unrelated live item moves.
+    func repointEntryReferences(under oldPath: RelativePath, to newPath: RelativePath) throws {
+        guard oldPath != newPath, !oldPath.isEmpty,
+              fm.fileExists(atPath: trashDirectory.path) else { return }
+        let names = try fm.contentsOfDirectory(atPath: trashDirectory.path)
+        for name in names where name.hasSuffix(Self.sidecarSuffix) {
+            let url = trashDirectory.appending(path: name)
+            guard let data = try? Data(contentsOf: url),
+                  var info = try? Self.makeDecoder().decode(TrashInfo.self, from: data),
+                  info.kind?.isAudio == true,
+                  let repointed = Self.repointed(info.originalPath, from: oldPath, to: newPath)
+            else { continue }
+            info.originalPath = repointed
+            try AtomicFile.write(try Self.makeEncoder().encode(info), to: url)
+        }
+    }
+
     /// First non-colliding name inside the trash for an incoming item.
     func availableName(for name: String) -> String {
         var candidate = name
@@ -495,6 +515,19 @@ struct TrashStore: Sendable {
         let names = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
             .filter { !$0.hasPrefix(".") }
         return VaultScanner.audioFile(in: names)
+    }
+
+    private static func repointed(
+        _ path: RelativePath,
+        from oldPath: RelativePath,
+        to newPath: RelativePath
+    ) -> RelativePath? {
+        guard path == oldPath || path.hasPrefix(oldPath + "/") else { return nil }
+        let suffix = path.dropFirst(oldPath.count)
+        if newPath.isEmpty {
+            return suffix.first == "/" ? String(suffix.dropFirst()) : String(suffix)
+        }
+        return newPath + suffix
     }
 
     private func entryAudioIsMarkedDeleted(_ entryURL: URL) -> Bool {

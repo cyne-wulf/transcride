@@ -44,6 +44,7 @@ enum TranscriptMarkdown {
     static func rendering(
         from transcript: TranscriptOriginal,
         speakerNames: [String: String] = [:],
+        speakerDetectionEnabled: Bool = true,
         speakerLabels includeLabels: Bool = true
     ) -> TranscriptRendering {
         var text = ""
@@ -56,12 +57,13 @@ enum TranscriptMarkdown {
         var utf16Count = 0
 
         for segment in transcript.segments {
+            let segmentSpeaker = speakerDetectionEnabled ? segment.speaker : nil
             for word in segment.words {
                 wordIndex += 1
                 let wordText = word.text.trimmingCharacters(in: .whitespaces)
                 guard !wordText.isEmpty else { continue }
 
-                let speakerChanged = started && segment.speaker != currentSpeaker
+                let speakerChanged = started && segmentSpeaker != currentSpeaker
                 if started {
                     let pauseBreak = previousEnd.map {
                         word.start - $0 >= paragraphPauseThreshold
@@ -70,7 +72,7 @@ enum TranscriptMarkdown {
                     text += separator
                     utf16Count += separator.utf16.count
                 }
-                if includeLabels, let speaker = segment.speaker, !started || speakerChanged {
+                if includeLabels, let speaker = segmentSpeaker, !started || speakerChanged {
                     let name = SpeakerNames.displayName(forID: speaker, names: speakerNames)
                     let label = "**\(name):**"
                     let lowerBound = utf16Count
@@ -90,7 +92,7 @@ enum TranscriptMarkdown {
                     endTime: word.end
                 ))
                 previousEnd = word.end
-                currentSpeaker = segment.speaker
+                currentSpeaker = segmentSpeaker
                 started = true
             }
         }
@@ -102,9 +104,15 @@ enum TranscriptMarkdown {
     static func body(
         from transcript: TranscriptOriginal,
         speakerNames: [String: String] = [:],
+        speakerDetectionEnabled: Bool = true,
         speakerLabels: Bool = true
     ) -> String {
-        rendering(from: transcript, speakerNames: speakerNames, speakerLabels: speakerLabels).text
+        rendering(
+            from: transcript,
+            speakerNames: speakerNames,
+            speakerDetectionEnabled: speakerDetectionEnabled,
+            speakerLabels: speakerLabels
+        ).text
     }
 
     /// True when `existingBody` is what we would generate from `transcript` —
@@ -115,9 +123,14 @@ enum TranscriptMarkdown {
     static func isGeneratedBody(
         _ existingBody: String,
         from transcript: TranscriptOriginal,
-        speakerNames: [String: String] = [:]
+        speakerNames: [String: String] = [:],
+        speakerDetectionEnabled: Bool = true
     ) -> Bool {
-        normalize(existingBody) == normalize(body(from: transcript, speakerNames: speakerNames))
+        normalize(existingBody) == normalize(body(
+            from: transcript,
+            speakerNames: speakerNames,
+            speakerDetectionEnabled: speakerDetectionEnabled
+        ))
     }
 
     /// An empty body (the M2 stub) is always safe to fill in.

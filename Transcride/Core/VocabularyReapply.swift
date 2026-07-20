@@ -139,7 +139,9 @@ struct VocabularyReapplyApplier: Sendable {
                 summary.handEditedKeptCount += 1
             } else {
                 doc.body = "\n" + TranscriptMarkdown.body(
-                    from: corrected, speakerNames: SpeakerNames.names(in: doc)
+                    from: corrected,
+                    speakerNames: SpeakerNames.names(in: doc),
+                    speakerDetectionEnabled: doc.speakerDetectionEnabled
                 ) + "\n"
                 try AtomicFile.write(doc.serialized(), to: transcriptURL)
             }

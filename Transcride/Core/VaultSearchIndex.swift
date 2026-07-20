@@ -18,6 +18,7 @@ struct SearchRecord: Equatable, Sendable {
 enum SearchMatchKind: Hashable, Sendable {
     case content
     case title
+    case metadata
 }
 
 struct SearchHit: Hashable, Sendable {
@@ -27,7 +28,7 @@ struct SearchHit: Hashable, Sendable {
     var snippet: String
     /// Whether the match belongs to the transcript layer or entry title.
     var matchKind: SearchMatchKind
-    /// UTF-16 range in the complete layer content, or in `title` for a title hit.
+    /// UTF-16 range in the complete layer content/title; empty for metadata hits.
     var matchRange: Range<Int>
     /// UTF-16 range in `snippet` for direct highlighting.
     var snippetMatchRange: Range<Int>
@@ -367,12 +368,14 @@ final class VaultSearchIndex: @unchecked Sendable {
         // Rendered with the entry's speaker renames so original-layer match
         // offsets index straight into the synced view's word map.
         var speakerNames: [String: String] = [:]
+        var speakerDetectionEnabled = true
         let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: entryURL))
         if let markdownURL = TranscriptFile.url(inEntry: entryURL),
            let text = try? String(contentsOf: markdownURL, encoding: .utf8) {
             let document = FrontmatterDocument.parse(text)
             title = document.title ?? title
             speakerNames = SpeakerNames.names(in: document)
+            speakerDetectionEnabled = document.speakerDetectionEnabled
             // Before the first edit, transcript.md is merely the generated
             // projection of Original. Indexing it twice produces two visually
             // identical results. A real fork (including an external edit
@@ -388,7 +391,11 @@ final class VaultSearchIndex: @unchecked Sendable {
                 entryPath: relativePath,
                 layer: .original,
                 title: title,
-                content: TranscriptMarkdown.body(from: original, speakerNames: speakerNames)
+                content: TranscriptMarkdown.body(
+                    from: original,
+                    speakerNames: speakerNames,
+                    speakerDetectionEnabled: speakerDetectionEnabled
+                )
             ))
         }
         return records

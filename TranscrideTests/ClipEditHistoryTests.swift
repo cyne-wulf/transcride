@@ -96,4 +96,52 @@ struct ClipEditHistoryTests {
         #expect(history.undo.isEmpty)
         #expect(history.redo.isEmpty)
     }
+
+    @Test func movingFolderRekeysDescendantHistoriesWithoutTouchingPrefixSibling() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["inbox-version", "nested-version", "sibling-version", "stale-destination"] {
+            try addTrashName(name, to: root)
+        }
+        let store = ClipEditHistoryStore(vaultRoot: root)
+        let entry = "Inbox/transcride-2026-07-12T12-00-00-entry"
+        let nestedEntry = "Inbox/Nested/transcride-2026-07-12T13-00-00-nested"
+        let prefixSibling = "Inboxish/transcride-2026-07-12T14-00-00-sibling"
+        let destination = "Archive/Inbox/transcride-2026-07-12T12-00-00-entry"
+        try store.record(
+            operation: .trim, entryPath: entry, versionTrashedName: "inbox-version",
+            existingTrashNames: ["inbox-version"]
+        )
+        try store.record(
+            operation: .extend, entryPath: nestedEntry, versionTrashedName: "nested-version",
+            existingTrashNames: ["nested-version"]
+        )
+        try store.record(
+            operation: .replace, entryPath: prefixSibling, versionTrashedName: "sibling-version",
+            existingTrashNames: ["sibling-version"]
+        )
+        try store.record(
+            operation: .compress, entryPath: destination,
+            versionTrashedName: "stale-destination",
+            existingTrashNames: ["stale-destination"]
+        )
+
+        try store.repointEntries(under: "Inbox", to: "Archive/Inbox")
+
+        let allNames: Set<String> = [
+            "inbox-version", "nested-version", "sibling-version", "stale-destination",
+        ]
+        #expect(store.history(for: entry, existingTrashNames: allNames).undo.isEmpty)
+        #expect(store.history(
+            for: "Archive/Inbox/transcride-2026-07-12T12-00-00-entry",
+            existingTrashNames: allNames
+        ).undo.map(\.versionTrashedName) == ["inbox-version"])
+        #expect(store.history(
+            for: "Archive/Inbox/Nested/transcride-2026-07-12T13-00-00-nested",
+            existingTrashNames: allNames
+        ).undo.map(\.versionTrashedName) == ["nested-version"])
+        #expect(store.history(
+            for: prefixSibling, existingTrashNames: allNames
+        ).undo.map(\.versionTrashedName) == ["sibling-version"])
+    }
 }

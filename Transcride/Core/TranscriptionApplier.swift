@@ -58,17 +58,30 @@ struct TranscriptionApplier: Sendable {
         }
 
         let regenerable = !TranscriptEditDocument.isForked(doc, comparedTo: previousOriginal)
+        // A new transcription is authoritative. Choosing Detect Speakers in
+        // Retranscribe therefore returns with speakers visible, while a new
+        // undiarized Original simply has no cached speakers and no toggle.
+        let clearedDisabledSpeakerPreference = !doc.speakerDetectionEnabled
+        doc.speakerDetectionEnabled = true
         var markdownLeftAlone = false
         if regenerable {
             // Speaker renames stored in the frontmatter carry over into the
             // regenerated labels; the JSON keeps the machine ids.
             doc.body = "\n" + TranscriptMarkdown.body(
-                from: transcript, speakerNames: SpeakerNames.names(in: doc)
+                from: transcript,
+                speakerNames: SpeakerNames.names(in: doc),
+                speakerDetectionEnabled: true
             ) + "\n"
             doc.engine = engineFrontmatterID
             try AtomicFile.write(doc.serialized(), to: transcriptURL)
         } else {
             markdownLeftAlone = true
+            // Preserve the hand-edited body byte-for-byte, but remove the
+            // stale presentation override so the newly selected transcription
+            // options remain authoritative.
+            if clearedDisabledSpeakerPreference {
+                try AtomicFile.write(doc.serialized(), to: transcriptURL)
+            }
         }
         // The authoritative transcript now matches the combined audio. This
         // hidden derived marker may be removed without touching hand-edited

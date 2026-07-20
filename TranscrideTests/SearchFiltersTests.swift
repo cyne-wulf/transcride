@@ -20,7 +20,8 @@ struct SearchFiltersTests {
         path: String,
         createdDaysAgo: Double,
         hasAudio: Bool = false,
-        favorite: Bool = false
+        favorite: Bool = false,
+        tags: [EditorTag] = []
     ) -> Entry {
         let created = now.addingTimeInterval(-createdDaysAgo * 86_400)
         return Entry(
@@ -33,6 +34,7 @@ struct SearchFiltersTests {
             snippet: "",
             favorite: favorite,
             audioDeleted: false,
+            tags: tags,
             audioFileName: hasAudio ? "audio.m4a" : nil,
             hasTranscript: true,
             transcriptFileName: "transcript.md"
@@ -171,5 +173,44 @@ struct SearchFiltersTests {
         )
 
         #expect(filtered.map(\.entryPath) == [audioEntry.relativePath])
+    }
+
+    @Test func tagsUseNestedParentAndMultiSelectORSemantics() {
+        let entry = makeEntry(
+            path: "Journal/note",
+            createdDaysAgo: 1,
+            tags: [
+                EditorTag(canonical: "project/alpha", display: "Project/Alpha"),
+                EditorTag(canonical: "people/alice", display: "People/Alice"),
+            ]
+        )
+        var filters = VaultSearchFilters()
+        filters.selectedTags = ["project"]
+        #expect(filters.isActive)
+        #expect(filters.matches(entry, now: now, calendar: calendar))
+
+        filters.selectedTags = ["missing", "people/alice"]
+        #expect(filters.matches(entry, now: now, calendar: calendar))
+        filters.selectedTags = ["alpha", "people/bob"]
+        #expect(!filters.matches(entry, now: now, calendar: calendar))
+    }
+
+    @Test func tagGroupIsANDedWithExistingFilters() {
+        let entry = makeEntry(
+            path: "Journal/note",
+            createdDaysAgo: 1,
+            hasAudio: true,
+            favorite: true,
+            tags: [EditorTag(canonical: "status/open", display: "Status/Open")]
+        )
+        var filters = VaultSearchFilters()
+        filters.folder = "Journal"
+        filters.audio = .hasAudio
+        filters.favoritesOnly = true
+        filters.selectedTags = ["status"]
+        #expect(filters.matches(entry, now: now, calendar: calendar))
+
+        filters.selectedTags = ["status/closed"]
+        #expect(!filters.matches(entry, now: now, calendar: calendar))
     }
 }

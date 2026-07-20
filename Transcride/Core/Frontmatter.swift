@@ -12,43 +12,64 @@ struct FrontmatterDocument: Equatable, Sendable {
         var rawValue: String?
         /// The exact original or regenerated line, without trailing newline.
         var line: String
+        /// Exact separator that followed this parsed line. Newly inserted
+        /// fields inherit `frontmatterNewline` at serialization time.
+        var newline: String? = nil
     }
 
     var fields: [Field]
     /// Everything after the closing `---` line, verbatim.
     var body: String
+    /// Exact line-ending convention used by the YAML delimiters and field
+    /// lines. Parsed CRLF notes retain CRLF; newly created notes use LF.
+    var frontmatterNewline: String = "\n"
+    /// Exact separator after the closing delimiter. It can differ from the
+    /// opening/header convention in an externally edited mixed-ending note.
+    var closingDelimiterNewline: String? = nil
+    private(set) var parsedWithFrontmatter = false
 
     /// True when the document had (or now has) a frontmatter block.
-    var hasFrontmatter: Bool { !fields.isEmpty }
+    var hasFrontmatter: Bool { parsedWithFrontmatter || !fields.isEmpty }
 
     // MARK: - Parse / serialize
 
     static func parse(_ text: String) -> FrontmatterDocument {
-        guard text.hasPrefix("---\n") else {
+        guard text.hasPrefix("---"),
+              let opening = newlineAtom(in: text, atUTF16Offset: 3) else {
             return FrontmatterDocument(fields: [], body: text)
         }
-        let rest = text.dropFirst(4)
-        let header: Substring
-        let body: Substring
-        if let close = rest.range(of: "\n---\n") {
-            header = rest[..<close.lowerBound]
-            body = rest[close.upperBound...]
-        } else if rest.hasSuffix("\n---") {
-            header = rest.dropLast(4)
-            body = ""
-        } else {
-            // Unclosed frontmatter — treat the whole file as body, never rewrite it.
-            return FrontmatterDocument(fields: [], body: text)
-        }
-
+        var cursor = 3 + opening.utf16.count
         var fields: [Field] = []
-        // An empty header is "---\n---\n" → one empty line? Avoid emitting a phantom field.
-        if !header.isEmpty {
-            for line in header.split(separator: "\n", omittingEmptySubsequences: false) {
-                fields.append(Self.parseLine(String(line)))
+        var closingNewline: String?
+        var bodyStart: Int?
+        while cursor <= text.utf16.count {
+            let line = lineToken(in: text, fromUTF16Offset: cursor)
+            if line.content == "---" {
+                closingNewline = line.newline
+                bodyStart = line.nextOffset
+                break
             }
+            guard line.newline != nil else {
+                // Unclosed frontmatter — treat the whole file as body, never rewrite it.
+                return FrontmatterDocument(fields: [], body: text)
+            }
+            var field = Self.parseLine(line.content)
+            field.newline = line.newline
+            fields.append(field)
+            cursor = line.nextOffset
         }
-        return FrontmatterDocument(fields: fields, body: String(body))
+        guard let bodyStart,
+              let bodyIndex = stringIndex(in: text, utf16Offset: bodyStart) else {
+            return FrontmatterDocument(fields: [], body: text)
+        }
+        var document = FrontmatterDocument(
+            fields: fields,
+            body: String(text[bodyIndex...]),
+            frontmatterNewline: opening,
+            closingDelimiterNewline: closingNewline
+        )
+        document.parsedWithFrontmatter = true
+        return document
     }
 
     private static func parseLine(_ line: String) -> Field {
@@ -60,11 +81,11 @@ struct FrontmatterDocument: Equatable, Sendable {
 
     func serialized() -> String {
         guard hasFrontmatter else { return body }
-        var out = "---\n"
+        var out = "---" + frontmatterNewline
         for field in fields {
-            out += field.line + "\n"
+            out += field.line + (field.newline ?? frontmatterNewline)
         }
-        out += "---\n"
+        out += "---" + (closingDelimiterNewline ?? frontmatterNewline)
         out += body
         return out
     }
@@ -92,10 +113,55 @@ struct FrontmatterDocument: Equatable, Sendable {
         let raw = quoted ? Self.quote(value) : value
         let line = "\(key): \(raw)"
         if let index = fields.firstIndex(where: { $0.key == key }) {
-            fields[index] = Field(key: key, rawValue: raw, line: line)
+            fields[index] = Field(
+                key: key,
+                rawValue: raw,
+                line: line,
+                newline: fields[index].newline
+            )
         } else {
             fields.append(Field(key: key, rawValue: raw, line: line))
         }
+    }
+
+    private static func newlineAtom(in text: String, atUTF16Offset offset: Int) -> String? {
+        let source = text as NSString
+        guard offset < source.length else { return nil }
+        let first = source.character(at: offset)
+        if first == 0x0D {
+            return offset + 1 < source.length && source.character(at: offset + 1) == 0x0A
+                ? "\r\n" : "\r"
+        }
+        return first == 0x0A ? "\n" : nil
+    }
+
+    private static func lineToken(
+        in text: String,
+        fromUTF16Offset start: Int
+    ) -> (content: String, newline: String?, nextOffset: Int) {
+        let source = text as NSString
+        var cursor = start
+        while cursor < source.length {
+            if let newline = newlineAtom(in: text, atUTF16Offset: cursor) {
+                return (
+                    source.substring(with: NSRange(location: start, length: cursor - start)),
+                    newline,
+                    cursor + newline.utf16.count
+                )
+            }
+            cursor += 1
+        }
+        return (
+            source.substring(with: NSRange(location: start, length: source.length - start)),
+            nil,
+            source.length
+        )
+    }
+
+    private static func stringIndex(in text: String, utf16Offset: Int) -> String.Index? {
+        guard utf16Offset >= 0, utf16Offset <= text.utf16.count else { return nil }
+        let index = text.utf16.index(text.utf16.startIndex, offsetBy: utf16Offset)
+        return String.Index(index, within: text)
     }
 
     // MARK: - Quoting
@@ -135,6 +201,19 @@ extension FrontmatterDocument {
     var silenceDetectionMode: SilenceDetectionMode {
         get { SilenceDetectionMode(rawValue: value(for: "silence_detection") ?? "") ?? .waveform }
         set { setValue(newValue.rawValue, for: "silence_detection") }
+    }
+
+    /// Entry-level presentation preference for cached diarization. Existing
+    /// entries have no key and remain enabled; only the off override is
+    /// persisted so enabling restores the backward-compatible default.
+    var speakerDetectionEnabled: Bool {
+        get {
+            guard let value = value(for: "speaker_detection")?.lowercased() else {
+                return true
+            }
+            return !["false", "no", "0", "off"].contains(value)
+        }
+        set { setValue(newValue ? nil : "false", for: "speaker_detection") }
     }
 
     var title: String? {

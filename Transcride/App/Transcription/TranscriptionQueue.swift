@@ -17,6 +17,9 @@ final class TranscriptionQueue {
     /// entry path and the applier's outcome (the path may have changed via
     /// auto-title). Set by `AppModel`.
     var onEntryTranscribed: ((RelativePath, TranscriptionApplier.Outcome) -> Void)?
+    /// Gives the mounted editor an acknowledged save/recovery barrier before
+    /// transcription rewrites or auto-renames the selected entry.
+    var beforeEntryMutation: ((RelativePath) async -> Bool)?
 
     private let vaultRoot: URL
     private let service: VaultService
@@ -261,6 +264,12 @@ final class TranscriptionQueue {
             created: ISO8601DateFormatter().string(from: .now),
             appVersion: "\(version) (\(build))"
         )
+        if let beforeEntryMutation,
+           !(await beforeEntryMutation(item.entryRelativePath)) {
+            throw TranscriptionError.engineFailure(
+                "The open editor could not be saved before applying the finished transcription."
+            )
+        }
         let outcome = try await service.applyTranscription(
             segments: segments,
             toEntryAt: item.entryRelativePath,

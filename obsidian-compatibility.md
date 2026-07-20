@@ -1,6 +1,6 @@
 # Obsidian Compatibility
 
-What it means for a Transcride vault to be compatible with Obsidian, in increasing depth. The master PRD's v1 bar is "the vault opens in Obsidian and every note renders correctly" (§11) — that is Tier 1. Tiers 2 and 4 are cheap extensions that mostly land in milestones 4–5. (A further tier — true two-way coexistence: round-tripping unknown frontmatter, external-edit watching, loose audio-less notes, link integrity on rename — is deliberately omitted here as post-v1 architecture work.)
+What it means for a Transcride vault to be compatible with Obsidian, in increasing depth. The master PRD's v1 bar is "the vault opens in Obsidian and every note renders correctly" (§11) — that is Tier 1. Tiers 2 and 4 are cheap extensions that mostly land in milestones 4–5. Two-way coexistence includes round-tripping unknown frontmatter, external-edit watching, and loose audio-less notes; Transcride preserves wikilinks but intentionally does not rewrite inbound links when a target is renamed.
 
 ## Tier 1 — Obsidian can read the vault (v1, already planned)
 
@@ -11,10 +11,10 @@ What it means for a Transcride vault to be compatible with Obsidian, in increasi
 
 ## Tier 2 — the vault feels native in Obsidian
 
-- **Use Obsidian's reserved frontmatter keys** instead of inventing parallel ones: `tags` (a YAML list, so the tag pane picks them up — folds into LIB-5) and `aliases`. Transcride-specific fields (`engine`, `model`, `audio_deleted`, `source`, `duration`) go under plain custom keys, which Obsidian displays as properties for free.
+- **Use Obsidian's reserved frontmatter keys** instead of inventing parallel ones: `tags` (a YAML list, so Obsidian's tag pane picks them up — folds into LIB-5) and `aliases`. Transcride-specific fields (`engine`, `model`, `audio_deleted`, `source`, `duration`) go under plain custom keys, which Obsidian displays as properties for free.
 - **Embed the audio in the note**: Obsidian plays `![[recording.m4a]]` embeds natively. One line at the top of the transcript makes every entry *playable inside Obsidian*, not just readable. Highest value-per-effort item not currently in any PRD.
 - **Folder-note convention**: entry folder `<Title>/` containing `<Title>.md` is exactly the community "folder note" pattern — keep folder and file names in sync on rename so it stays true.
-- **Don't mangle Obsidian syntax on save**: wikilinks `[[...]]`, `==highlights==`, callouts, `%%comments%%` must survive a round-trip through Transcride's editor even if Transcride doesn't render them. Rendering them is optional; preserving them is not. (Constraint on milestone 4's editor/autosave.)
+- **Don't mangle Obsidian syntax on save**: wikilinks `[[...]]`, `==highlights==`, callouts, `%%comments%%` must survive a round-trip through Transcride's editor. Milestone 9 defines which constructs receive visible-source styling; preservation is mandatory whether styled or not. (Constraint on milestone 4's editor/autosave.)
 
 ## Tier 4 — integration niceties
 

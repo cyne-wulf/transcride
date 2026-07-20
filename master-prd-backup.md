@@ -123,7 +123,8 @@ IDs are stable and should be referenced in issues/commits.
 - **EDT-2 (P0)** Two layers per entry: the **immutable original** and the **edited copy**. A toggle badge next to the "Copy as Markdown" button (top right) switches the view between them. Original view is read-only.
 - **EDT-3 (P0)** First edit forks the edited layer from the original; subsequent edits autosave to the edited markdown file.
 - **EDT-4 (P1)** Retranscription with an existing edited layer: the new original replaces the active original (prior originals archived in the entry folder); the edited layer is kept untouched and the user is notified it may now diverge.
-- **EDT-5 (P2)** Diff view between original and edited layers.
+- **EDT-5 (retired)** No dedicated Original-versus-Edited diff surface is planned; the layer toggle and immutable Original remain the comparison boundary.
+- **EDT-6 (P2)** Replace the plain transcript controls with one locally bundled CodeMirror 6 decorated-source workbench for Original, Edited view, and Edited editing. It keeps Markdown syntax visible, preserves the existing fork/autosave/audio-coordinate contracts, adds smart editing, find/replace, typography and focus controls, and safely navigates existing web/wikilinks without adding knowledge-graph panels or a WYSIWYG mode.
 
 ### 5.8 Audio lifecycle (AUD)
 
@@ -148,7 +149,7 @@ IDs are stable and should be referenced in issues/commits.
 - **LIB-2 (P0)** Inline rename of entries. Title lives in entry metadata; §6 covers whether the folder name also carries a slug.
 - **LIB-3 (P1)** Favorites (flag + smart filter) and duplicate entry.
 - **LIB-4 (P1)** Sort options: date, duration, title, recently edited.
-- **LIB-5 (P2)** Tags (Obsidian-style `#tag` parsed from the edited layer).
+- **LIB-5 (P2)** Parse canonical Obsidian-style tags from the persisted Markdown body and YAML `tags` lists, then expose multi-select OR filtering in vault search, including tag-only queries and parent/descendant matching. This is read/filter behavior only: no Transcride tag pane, counts browser, or tag-writing UI.
 
 ### 5.11 Export and interop (EXP)
 
@@ -217,7 +218,7 @@ MyVault/                              ← user-chosen root ("transcride vault")
 |---|---|
 | **v1.0** | All P0s: vault + entry file scheme, record + import, queue, Parakeet/WhisperKit/Apple engines, custom vocabulary (native + backstop), synced playback + waveform + click-to-seek, layered editing + toggle + copy-as-markdown, delete-audio-keep-note, Recently Deleted, exact/fuzzy search, library + rename, settings |
 | **v1.1** | P1s: zen mode, diarization + speaker rename, Skip Silence, trim, favorites/duplicate, export to folder, storage overview, vocabulary re-apply, search filters, auto-title (if not in 1.0) |
-| **v2+** | P2s: cloud engines, replace re-record, Enhance Recording, tags, diff view, bulk export, global hotkey capture, live transcription, sync (vault-in-iCloud-Drive first), AI features |
+| **v2+** | P2s: the scoped CodeMirror decorated-source workbench, navigation of existing links, tag-aware vault search, cloud engines, replace re-record, Enhance Recording, bulk export, global hotkey capture, live transcription, sync (vault-in-iCloud-Drive first), AI features |
 
 ## 10. Open questions
 

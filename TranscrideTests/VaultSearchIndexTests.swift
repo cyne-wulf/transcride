@@ -137,6 +137,56 @@ struct VaultSearchIndexTests {
         #expect(hits.first?.layer == .original)
     }
 
+    @Test func speakerVisibilityControlsOriginalIndexWithoutCreatingAnEditedDuplicate() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let path = "transcride-2026-07-09T10-00-00-speakers"
+        let entryURL = f.vault.appendingRelativePath(path)
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+        let original = TranscriptOriginal(
+            engine: .init(
+                engine: "test", model: "test", options: [:], created: "", appVersion: ""
+            ),
+            segments: [
+                .init(
+                    start: 0, end: 0.5, speaker: "S1",
+                    words: [.init(text: "Opening", start: 0, end: 0.5)]
+                ),
+                .init(
+                    start: 0.6, end: 1.1, speaker: "S2",
+                    words: [.init(text: "response", start: 0.6, end: 1.1)]
+                ),
+            ]
+        )
+        try original.write(to: TranscriptOriginal.url(inEntry: entryURL))
+        var document = FrontmatterDocument(fields: [], body: "")
+        document.title = "Interview"
+        SpeakerNames.set(name: "Alice", forID: "S1", in: &document)
+        document.speakerDetectionEnabled = false
+        document.body = "\n" + TranscriptMarkdown.body(
+            from: original,
+            speakerNames: SpeakerNames.names(in: document),
+            speakerDetectionEnabled: false
+        ) + "\n"
+        let markdownURL = entryURL.appending(path: TranscriptFile.defaultName)
+        try AtomicFile.write(document.serialized(), to: markdownURL)
+
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+        #expect(try index.recordCount() == 1)
+        #expect(try index.search("Alice").isEmpty)
+        #expect(try index.search("Opening response").first?.layer == .original)
+
+        document.speakerDetectionEnabled = true
+        document.body = "\n" + TranscriptMarkdown.body(
+            from: original,
+            speakerNames: SpeakerNames.names(in: document)
+        ) + "\n"
+        try AtomicFile.write(document.serialized(), to: markdownURL)
+        try index.upsertEntry(at: path)
+        #expect(try index.recordCount() == 1)
+        #expect(try index.search("Alice").first?.layer == .original)
+    }
+
     @Test func pathAwareSynchronizationHandlesExternalEditMoveAndDelete() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }

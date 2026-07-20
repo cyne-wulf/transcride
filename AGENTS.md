@@ -4,11 +4,11 @@ Native macOS (Swift + SwiftUI, macOS 15+, Apple Silicon) voice recorder + transc
 
 ## Milestone workflow — hard rules
 
-- **Current milestone: milestone 7 verified 2026-07-12; milestone 8 is not started.** Update this line only when the human confirms a milestone's full checklist.
+- **Verified gate: milestone 7 (17/17 human checks, 2026-07-12). Current implementation milestone: milestone 9 under a one-time human waiver dated 2026-07-17.** Milestone 8 implementation is complete in the current worktree but unverified; its human checklist was skipped, and no `milestone-8` verified tag may be created or claimed. Update the verified-gate portion only after the human confirms a milestone's full checklist.
 - Work follows the milestone docs PRD-1.md … PRD-9.md, in order. Before any work, read the current milestone doc; for milestones 2+, also read its `PRD-<N>-start-here.md` handoff (written at the end of the previous milestone).
-- **Never begin milestone N+1 until the human has confirmed every checklist item of milestone N.**
+- **Normally, never begin milestone N+1 until the human has confirmed every checklist item of milestone N.** The sole exception is the dated Milestone 8 → 9 waiver above; it does not waive Milestone 9 or any later verification gate.
 - Stay inside the current milestone's In/Out scope. Every Out item names the milestone where it belongs — defer it there.
-- **Verification is interactive:** when the milestone's implementation is done, walk the human through the verification checklist as a step-by-step quiz — one item at a time, exact steps to perform, wait for pass/fail, fix and re-verify failures (plus any affected already-passed items). Only after all items pass, write the handoff document specified in the milestone's Handoff section. (The user may also trigger this with `/make-milestones verify`.)
+- **Verification is interactive:** when the milestone's implementation is done, walk the human through the verification checklist as a step-by-step quiz — one item at a time, exact steps to perform, wait for pass/fail, fix and re-verify failures (plus any affected already-passed items). Except for the explicitly documented dated waiver above, only after all items pass write the handoff document specified in the milestone's Handoff section. (The user may also trigger this with `/make-milestones verify`.)
 - Do not relitigate anything under "Decisions already made" in the milestone docs.
 - Commit when checklist items turn green; tag `milestone-<N>` at each verified gate.
 

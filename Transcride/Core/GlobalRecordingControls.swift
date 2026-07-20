@@ -14,49 +14,14 @@ enum GlobalShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable
     }
 }
 
-struct GlobalShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
-    let rawValue: UInt32
-
-    static let command = Self(rawValue: 1 << 0)
-    static let option = Self(rawValue: 1 << 1)
-    static let control = Self(rawValue: 1 << 2)
-    static let shift = Self(rawValue: 1 << 3)
-
-    static let requiredNonShift: Self = [.command, .option, .control]
-}
-
-struct GlobalShortcutChord: Codable, Hashable, Sendable {
-    var keyCode: UInt32
-    var modifiers: GlobalShortcutModifiers
-
+extension ShortcutChord {
     var validation: GlobalShortcutValidation {
-        if keyCode == UInt32.max { return .modifierOnly }
+        if isModifierOnly { return .modifierOnly }
         if modifiers.intersection(.requiredNonShift).isEmpty { return .requiresNonShiftModifier }
+        if let reason = ShortcutReservation.localReason(for: self) {
+            return .reserved(reason)
+        }
         return .valid
-    }
-
-    var glyphDescription: String {
-        var result = ""
-        if modifiers.contains(.control) { result += "⌃" }
-        if modifiers.contains(.option) { result += "⌥" }
-        if modifiers.contains(.shift) { result += "⇧" }
-        if modifiers.contains(.command) { result += "⌘" }
-        result += Self.keyLabel(for: keyCode)
-        return result
-    }
-
-    private static func keyLabel(for keyCode: UInt32) -> String {
-        let labels: [UInt32: String] = [
-            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
-            8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
-            16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",
-            23: "5", 24: "=", 25: "9", 26: "7", 27: "−", 28: "8", 29: "0",
-            30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P", 37: "L",
-            38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/",
-            45: "N", 46: "M", 47: ".", 49: "Space", 50: "`", 51: "⌫",
-            53: "Esc", 76: "↩", 123: "←", 124: "→", 125: "↓", 126: "↑"
-        ]
-        return labels[keyCode] ?? "Key (keyCode)"
     }
 
     static let defaultToggleRecording = Self(
@@ -71,6 +36,7 @@ enum GlobalShortcutValidation: Equatable, Sendable {
     case valid
     case modifierOnly
     case requiresNonShiftModifier
+    case reserved(String)
     case duplicate(GlobalShortcutAction)
 
     var message: String? {
@@ -78,6 +44,7 @@ enum GlobalShortcutValidation: Equatable, Sendable {
         case .valid: nil
         case .modifierOnly: "Press a key together with modifiers."
         case .requiresNonShiftModifier: "Include Command, Option, or Control."
+        case .reserved(let reason): reason
         case .duplicate(let action): "Already assigned to \(action.title)."
         }
     }
@@ -308,6 +275,25 @@ enum GlobalRecordingPresentationState: Equatable, Sendable {
         default:
             self
         }
+    }
+}
+
+enum GlobalIndicatorVisibilityPolicy {
+    static func shouldShow(
+        isManuallyPresented: Bool,
+        globalControlsEnabled: Bool,
+        automaticIndicatorEnabled: Bool,
+        belongsToRecordingSession: Bool,
+        retentionActive: Bool,
+        appIsActive: Bool,
+        isDismissed: Bool
+    ) -> Bool {
+        if isManuallyPresented { return true }
+        return globalControlsEnabled &&
+            automaticIndicatorEnabled &&
+            (belongsToRecordingSession || retentionActive) &&
+            !appIsActive &&
+            !isDismissed
     }
 }
 

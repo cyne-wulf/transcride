@@ -51,6 +51,18 @@ struct MarkdownExportTests {
         #expect(unlabeled == "Hello there.\n\nHi.")
     }
 
+    @Test func disabledDetectionRemovesSpeakerPresentationFromOriginalExport() {
+        let content = MarkdownExport.originalContent(
+            from: diarized,
+            speakerNames: ["S1": "Alice"],
+            options: .init(
+                includeSpeakerLabels: true,
+                speakerDetectionEnabled: false
+            )
+        )
+        #expect(content == "Hello there. Hi.")
+    }
+
     @Test func paragraphTimestampsPrefixEachParagraph() {
         let paused = transcript([
             (nil, [("First", 12.0, 12.4), ("part.", 12.5, 12.9),

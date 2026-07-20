@@ -48,10 +48,14 @@ struct VaultSearchFilters: Equatable, Sendable {
     var customEnd = Date.distantFuture
     var audio: AudioPresence = .any
     var favoritesOnly = false
+    /// Canonical tag ids. Multiple selections are ORed; this group remains
+    /// ANDed with folder/date/audio/favorite filters.
+    var selectedTags: Set<String> = []
 
     /// True when any filter would exclude something.
     var isActive: Bool {
         folder != nil || datePreset != .any || audio != .any || favoritesOnly
+            || !selectedTags.isEmpty
     }
 
     func matches(_ entry: Entry, now: Date = .now, calendar: Calendar = .current) -> Bool {
@@ -59,6 +63,10 @@ struct VaultSearchFilters: Equatable, Sendable {
             guard entry.relativePath.hasPrefix(folder + "/") else { return false }
         }
         if favoritesOnly, !entry.favorite { return false }
+        guard EditorTagExtractor.matchesAny(
+            entryTags: entry.tags,
+            selectedTags: selectedTags
+        ) else { return false }
         switch audio {
         case .any: break
         case .hasAudio:

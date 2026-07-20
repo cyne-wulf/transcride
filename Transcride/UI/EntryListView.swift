@@ -36,7 +36,10 @@ struct EntryListView: View {
                         emptyFolderState
                     }
                 } else {
-                    List(selection: $model.selectedEntryID) {
+                    List(selection: Binding(
+                        get: { model.selectedEntryID },
+                        set: { model.requestEntrySelection($0) }
+                    )) {
                         ForEach(entries) { entry in
                             entryRow(entry)
                                 .tag(entry.id)

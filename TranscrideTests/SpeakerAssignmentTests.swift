@@ -152,6 +152,17 @@ struct SpeakerMarkdownTests {
         #expect(body == "Hello there.\n\nHi!\n\nStill me.")
     }
 
+    @Test func disablingDetectionRemovesLabelsAndSpeakerDrivenParagraphs() {
+        let body = TranscriptMarkdown.body(
+            from: diarized,
+            speakerNames: ["S1": "Alice"],
+            speakerDetectionEnabled: false
+        )
+        #expect(body == "Hello there. Hi!\n\nStill me.")
+        #expect(!body.contains("Alice"))
+        #expect(!body.contains("Speaker"))
+    }
+
     @Test func undiarizedTranscriptsRenderExactlyAsBefore() {
         let plain = transcript([
             (nil, [("Hello", 0, 0.4), ("world.", 0.5, 0.9), ("Next", 2.9, 3.2)]),
@@ -177,6 +188,22 @@ struct SpeakerMarkdownTests {
         doc.body = "\n" + TranscriptMarkdown.body(
             from: diarized, speakerNames: SpeakerNames.names(in: doc)
         ) + "\n"
+        #expect(!TranscriptEditDocument.isForked(doc, comparedTo: diarized))
+        doc.body += "my own words\n"
+        #expect(TranscriptEditDocument.isForked(doc, comparedTo: diarized))
+    }
+
+    @Test func disabledGeneratedBodyIsNotTreatedAsAHandEdit() {
+        var doc = FrontmatterDocument.parse(
+            "---\ntitle: \"Chat\"\nspeaker_s1: \"Alice\"\n---\n"
+        )
+        doc.speakerDetectionEnabled = false
+        doc.body = "\n" + TranscriptMarkdown.body(
+            from: diarized,
+            speakerNames: SpeakerNames.names(in: doc),
+            speakerDetectionEnabled: false
+        ) + "\n"
+
         #expect(!TranscriptEditDocument.isForked(doc, comparedTo: diarized))
         doc.body += "my own words\n"
         #expect(TranscriptEditDocument.isForked(doc, comparedTo: diarized))
@@ -218,6 +245,18 @@ struct SpeakerMarkdownTests {
         let before = text.substring(to: hiRange.location)
         #expect(before.hasSuffix("**Speaker 2:** "))
         #expect(map.wordIndex(containingUTF16Offset: hiRange.location) == 2)
+        #expect(map.startTime(forWordAt: 2) == 1.0)
+    }
+
+    @Test func disabledWordMapKeepsTimingButHasNoSpeakerSeparators() {
+        let map = TranscriptWordMap(
+            transcript: diarized,
+            speakerNames: ["S1": "Alice"],
+            speakerDetectionEnabled: false
+        )
+        #expect(map.renderedText == "Hello there. Hi!\n\nStill me.")
+        #expect(map.speakerLabels.isEmpty)
+        #expect(map.wordIndex(atTime: 1.1) == 2)
         #expect(map.startTime(forWordAt: 2) == 1.0)
     }
 }

@@ -98,6 +98,26 @@ struct MainView: View {
             ExtensionRecoveryView()
                 .environment(model)
         }
+        .sheet(isPresented: $model.isQuickMovePresented) {
+            if let entry = model.quickMoveEntry,
+               let root = model.snapshot?.root {
+                QuickMoveView(entry: entry, root: root)
+                    .environment(model)
+            } else {
+                VStack(spacing: 18) {
+                    ContentUnavailableView(
+                        "Note Unavailable",
+                        systemImage: "doc.badge.ellipsis",
+                        description: Text(
+                            "The note changed or was removed while Move Note was open."
+                        )
+                    )
+                    Button("Cancel") { model.isQuickMovePresented = false }
+                        .keyboardShortcut(.cancelAction)
+                }
+                    .frame(width: 500, height: 430)
+            }
+        }
         // First run with a vault open: offer the default model download once.
         .task { await offerDefaultModelIfNeeded() }
         .alert("Download the Transcription Model?", isPresented: $showingModelOffer) {

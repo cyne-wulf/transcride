@@ -79,6 +79,7 @@ struct VaultScanner {
         var snippet = ""
         var favorite = false
         var audioDeleted = false
+        var tags: [EditorTag] = []
         var silenceDetectionMode = SilenceDetectionMode.waveform
         var hasTranscript = false
 
@@ -91,6 +92,7 @@ struct VaultScanner {
             duration = doc.duration
             favorite = doc.favorite
             audioDeleted = doc.audioDeleted
+            tags = EditorTagExtractor.extract(markdown: text)
             silenceDetectionMode = doc.silenceDetectionMode
             snippet = Self.snippet(fromBody: doc.body)
         }
@@ -112,6 +114,7 @@ struct VaultScanner {
             snippet: snippet,
             favorite: favorite,
             audioDeleted: audioDeleted,
+            tags: tags,
             silenceDetectionMode: silenceDetectionMode,
             speechTranscriptAvailability: speechAvailability,
             audioFileName: audioFileName,

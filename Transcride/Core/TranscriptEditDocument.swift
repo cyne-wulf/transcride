@@ -53,7 +53,10 @@ struct TranscriptEditDocument: Equatable, Sendable {
         if TranscriptMarkdown.isStubBody(document.body) { return false }
         guard let original else { return true }
         return !TranscriptMarkdown.isGeneratedBody(
-            document.body, from: original, speakerNames: SpeakerNames.names(in: document)
+            document.body,
+            from: original,
+            speakerNames: SpeakerNames.names(in: document),
+            speakerDetectionEnabled: document.speakerDetectionEnabled
         )
     }
 }

@@ -2,6 +2,11 @@
 
 > Assume you are a fresh model with zero context beyond PRD-8.md and this document.
 
+> **Historical handoff superseded for one transition — 2026-07-17:** The human
+> explicitly waived the Milestone 8 verification gate for Milestone 9 only.
+> Milestone 8 remains unverified with all 23 boxes unchecked and no verified tag.
+> Use `PRD-9-start-here.md` for the authorized Milestone 9 implementation baseline.
+
 ## State summary
 
 Milestone 7 was human-verified 17/17 on 2026-07-12. It adds focused replacement
@@ -10,8 +15,10 @@ bake one take without moving later timeline positions, retain stable sources for
 future overlapping replacements, recover interrupted sessions, and run one full
 retranscription while preserving a hand-edited Markdown layer.
 
-Do not begin Milestone 9 until every item in PRD-8's verification checklist has
-been human-confirmed. Read PRD-8.md before changing the implementation below.
+The normal rule was not to begin Milestone 9 until every item in PRD-8's
+verification checklist had been human-confirmed. The dated waiver above is the sole
+exception. Read the current `PRD-8.md` transition note before relying on this
+historical implementation handoff.
 
 ## Build, test, install, and run
 

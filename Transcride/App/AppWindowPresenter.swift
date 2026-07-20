@@ -11,6 +11,7 @@ enum AppWindowPresenter {
 
     private static var openWindowAction: OpenWindowAction?
     private static var openSettingsAction: OpenSettingsAction?
+    private static var closeGate: MainWindowCloseGate?
 
     static func configureSceneActions(
         openWindow: OpenWindowAction,
@@ -58,6 +59,75 @@ enum AppWindowPresenter {
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
         }
     }
+
+    /// Opens a named auxiliary SwiftUI scene even after the last workbench
+    /// window has closed. The retained scene action outlives RootView, unlike
+    /// an `onChange` observer embedded in that window's view hierarchy.
+    static func openAuxiliaryWindow(id: String) {
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        openWindowAction?(id: id)
+    }
+
+    static func installCloseGate(on window: NSWindow) {
+        if closeGate?.window === window { return }
+        let gate = MainWindowCloseGate(window: window, forwardingTo: window.delegate)
+        closeGate = gate
+        window.delegate = gate
+    }
+}
+
+/// AppKit asks synchronously whether a window may close, while the editor's
+/// acknowledged snapshot/save boundary is asynchronous. Veto the first close,
+/// drain that exact participant, then replay the close only after durability
+/// succeeds. A failed save/recovery therefore leaves the sole buffer mounted.
+@MainActor
+private final class MainWindowCloseGate: NSObject, NSWindowDelegate {
+    weak var window: NSWindow?
+    nonisolated(unsafe) private weak var forwardedDelegate: (any NSWindowDelegate)?
+    private var preparationInFlight = false
+    private var allowNextClose = false
+
+    init(window: NSWindow, forwardingTo delegate: (any NSWindowDelegate)?) {
+        self.window = window
+        self.forwardedDelegate = delegate
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if allowNextClose {
+            allowNextClose = false
+            return forwardedDelegate?.windowShouldClose?(sender) ?? true
+        }
+        if forwardedDelegate?.windowShouldClose?(sender) == false { return false }
+        guard let model = AppTerminationDelegate.model,
+              model.editorLifecycleCoordinator.hasActiveParticipant else { return true }
+        guard !preparationInFlight else { return false }
+        preparationInFlight = true
+        Task { @MainActor [weak self, weak sender] in
+            guard let self, let sender else { return }
+            let prepared = await model.editorLifecycleCoordinator.prepare(
+                for: .workbenchTeardown
+            )
+            self.preparationInFlight = false
+            guard prepared else {
+                model.errorMessage = "The window stayed open because the current note could not be saved or preserved for recovery."
+                sender.makeKeyAndOrderFront(nil)
+                return
+            }
+            self.allowNextClose = true
+            sender.performClose(nil)
+        }
+        return false
+    }
+
+    override func responds(to selector: Selector!) -> Bool {
+        super.responds(to: selector) || (forwardedDelegate?.responds(to: selector) ?? false)
+    }
+
+    override func forwardingTarget(for selector: Selector!) -> Any? {
+        if forwardedDelegate?.responds(to: selector) == true { return forwardedDelegate }
+        return super.forwardingTarget(for: selector)
+    }
 }
 
 /// Captures scene-level actions for AppKit-owned surfaces such as the status
@@ -94,7 +164,9 @@ struct MainWindowIdentityView: NSViewRepresentable {
 
     private func identifyWindow(for view: NSView) {
         DispatchQueue.main.async {
-            view.window?.identifier = AppWindowPresenter.mainWindowIdentifier
+            guard let window = view.window else { return }
+            window.identifier = AppWindowPresenter.mainWindowIdentifier
+            AppWindowPresenter.installCloseGate(on: window)
         }
     }
 }

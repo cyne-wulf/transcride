@@ -24,6 +24,57 @@ struct GlobalRecordingControlsTests {
         ).isCaptureActive)
     }
 
+    @Test func manualIndicatorPresentationOverridesAutomaticVisibilityRules() {
+        #expect(GlobalIndicatorVisibilityPolicy.shouldShow(
+            isManuallyPresented: true,
+            globalControlsEnabled: false,
+            automaticIndicatorEnabled: false,
+            belongsToRecordingSession: false,
+            retentionActive: false,
+            appIsActive: true,
+            isDismissed: true
+        ))
+    }
+
+    @Test func automaticIndicatorPresentationStillUsesExistingRules() {
+        #expect(GlobalIndicatorVisibilityPolicy.shouldShow(
+            isManuallyPresented: false,
+            globalControlsEnabled: true,
+            automaticIndicatorEnabled: true,
+            belongsToRecordingSession: true,
+            retentionActive: false,
+            appIsActive: false,
+            isDismissed: false
+        ))
+        #expect(GlobalIndicatorVisibilityPolicy.shouldShow(
+            isManuallyPresented: false,
+            globalControlsEnabled: true,
+            automaticIndicatorEnabled: true,
+            belongsToRecordingSession: false,
+            retentionActive: true,
+            appIsActive: false,
+            isDismissed: false
+        ))
+        #expect(!GlobalIndicatorVisibilityPolicy.shouldShow(
+            isManuallyPresented: false,
+            globalControlsEnabled: true,
+            automaticIndicatorEnabled: true,
+            belongsToRecordingSession: true,
+            retentionActive: false,
+            appIsActive: true,
+            isDismissed: false
+        ))
+        #expect(!GlobalIndicatorVisibilityPolicy.shouldShow(
+            isManuallyPresented: false,
+            globalControlsEnabled: true,
+            automaticIndicatorEnabled: true,
+            belongsToRecordingSession: true,
+            retentionActive: false,
+            appIsActive: false,
+            isDismissed: true
+        ))
+    }
+
     @Test func defaultsMatchProductChords() {
         let preferences = GlobalShortcutPreferences.defaults
         #expect(preferences.bindings[.toggleRecording] == .defaultToggleRecording)

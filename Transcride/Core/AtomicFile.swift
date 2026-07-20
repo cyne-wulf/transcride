@@ -10,6 +10,7 @@ enum AtomicFile {
         )
         do {
             try data.write(to: tempURL, options: [])
+            try synchronizeFile(at: tempURL)
             let result = tempURL.withUnsafeFileSystemRepresentation { temp in
                 url.withUnsafeFileSystemRepresentation { dest in
                     rename(temp!, dest!)
@@ -21,6 +22,7 @@ enum AtomicFile {
                     NSFilePathErrorKey: url.path,
                 ])
             }
+            try synchronizeDirectory(at: directory)
         } catch {
             try? FileManager.default.removeItem(at: tempURL)
             throw error
@@ -29,5 +31,30 @@ enum AtomicFile {
 
     static func write(_ string: String, to url: URL) throws {
         try write(Data(string.utf8), to: url)
+    }
+
+    static func synchronizeDirectory(at directory: URL) throws {
+        let descriptor = open(directory.path, O_RDONLY)
+        guard descriptor >= 0 else { throw posixError(path: directory.path) }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else { throw posixError(path: directory.path) }
+    }
+
+    private static func synchronizeFile(at url: URL) throws {
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { throw posixError(path: url.path) }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else { throw posixError(path: url.path) }
+    }
+
+    private static func posixError(path: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(errno),
+            userInfo: [
+                NSLocalizedDescriptionKey: String(cString: strerror(errno)),
+                NSFilePathErrorKey: path,
+            ]
+        )
     }
 }

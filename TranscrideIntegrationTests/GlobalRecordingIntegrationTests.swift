@@ -171,9 +171,18 @@ struct GlobalRecordingIntegrationTests {
         }
 
         let initialItems = controller.menuItemIdentitiesForTesting
+        #expect(controller.menuItemTitlesForTesting.contains("Show Floating Widget"))
         for _ in 0..<20 {
             controller.refreshForTesting()
             #expect(controller.menuItemIdentitiesForTesting == initialItems)
         }
+
+        #expect(!model.isGlobalIndicatorManuallyPresented)
+        controller.showFloatingWidgetForTesting()
+        #expect(model.isGlobalIndicatorManuallyPresented)
+        controller.showFloatingWidgetForTesting()
+        #expect(model.isGlobalIndicatorManuallyPresented)
+        model.dismissGlobalIndicatorManually()
+        #expect(!model.isGlobalIndicatorManuallyPresented)
     }
 }

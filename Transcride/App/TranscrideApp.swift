@@ -16,9 +16,9 @@ struct TranscrideApp: App {
         }
         .windowToolbarStyle(.unified)
         .commands {
-            AboutCommands()
+            AboutCommands(model: model)
             AppCommands(model: model)
-            KeyboardShortcutsCommands()
+            KeyboardShortcutsCommands(model: model)
         }
 
         Settings {

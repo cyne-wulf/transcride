@@ -5,6 +5,7 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
     private var indicatorController: GlobalRecordingIndicatorController?
     private var menuBarItemController: MenuBarItemController?
+    private var editorTerminationInFlight = false
 
     func configure(model: AppModel) {
         Self.model = model
@@ -38,9 +39,25 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model = Self.model,
-              model.recorder.state == .recording || model.recorder.state == .paused
-        else { return .terminateNow }
+        guard let model = Self.model else { return .terminateNow }
+        guard !editorTerminationInFlight else { return .terminateLater }
+
+        let recordingIsActive = model.recorder.state == .recording
+            || model.recorder.state == .paused
+        if !recordingIsActive {
+            guard model.editorLifecycleCoordinator.hasActiveParticipant else {
+                return .terminateNow
+            }
+            editorTerminationInFlight = true
+            Task { @MainActor in
+                let saved = await model.editorLifecycleCoordinator.prepare(
+                    for: .applicationTermination
+                )
+                self.editorTerminationInFlight = false
+                sender.reply(toApplicationShouldTerminate: saved)
+            }
+            return .terminateLater
+        }
 
         let extending = model.recorder.extensionSession != nil
         let replacing: Bool
@@ -67,13 +84,26 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
+            editorTerminationInFlight = true
             Task { @MainActor in
                 await model.stopRecording()
-                sender.reply(toApplicationShouldTerminate: true)
+                let saved = await model.editorLifecycleCoordinator.prepare(
+                    for: .applicationTermination
+                )
+                self.editorTerminationInFlight = false
+                sender.reply(toApplicationShouldTerminate: saved)
             }
             return .terminateLater
         case .alertThirdButtonReturn:
-            return .terminateNow
+            editorTerminationInFlight = true
+            Task { @MainActor in
+                let saved = await model.editorLifecycleCoordinator.prepare(
+                    for: .applicationTermination
+                )
+                self.editorTerminationInFlight = false
+                sender.reply(toApplicationShouldTerminate: saved)
+            }
+            return .terminateLater
         default:
             return .terminateCancel
         }

@@ -40,6 +40,7 @@ final class AppModel {
         static let fuzzyVaultSearch = "fuzzyVaultSearch"
         static let entrySortOrder = "entrySortOrder"
         static let entrySortDirection = "entrySortDirection"
+        static let includeEntriesFromSubfolders = "includeEntriesFromSubfolders"
     }
 
     private(set) var phase: Phase = .launching
@@ -61,10 +62,16 @@ final class AppModel {
     let modelManager = ModelManager()
     let liveTranscriber = LiveTranscriber()
     let globalShortcutService = GlobalShortcutService()
+    let editorLifecycleCoordinator = EditorLifecycleCoordinator()
 
+    private(set) var appShortcutPreferences = AppShortcutPreferencesStore.load()
     private(set) var globalShortcutPreferences = GlobalShortcutPreferencesStore.load()
+    private(set) var editorPreferences = EditorPreferencesStore.load()
+    private(set) var shortcutCaptureOwnsInput = false
+    private(set) var editorInputOwnsInput = false
     private(set) var globalRecordingTransientState: GlobalRecordingPresentationState?
     private(set) var isGlobalIndicatorRetentionActive = false
+    private(set) var isGlobalIndicatorManuallyPresented = false
     private var recordingCommandGate = RecordingCommandGate()
     private var globalRecordingStateTask: Task<Void, Never>?
     private var globalIndicatorRetentionTask: Task<Void, Never>?
@@ -78,6 +85,11 @@ final class AppModel {
     /// in-app autosave must not reload the active editor, because an earlier
     /// debounced save may finish while newer keystrokes are still unsaved.
     private(set) var externalVaultRevision = 0
+    /// Bumped only when FSEvents reports the mounted entry (or one of its
+    /// descendants). EntryDetail keys off this instead of the vault-wide list
+    /// revision so unrelated Obsidian/Finder writes cannot reset editor state.
+    private(set) var selectedEntryExternalRevision = 0
+    private(set) var lastExternalChangedPaths: Set<RelativePath> = []
     /// Bumped when an entry's audio file is replaced in place (trim, restore):
     /// the playback shelf must reload the player and waveform even though the
     /// entry path and audio file name are unchanged.
@@ -106,6 +118,25 @@ final class AppModel {
             scheduleVaultSearch()
         }
     }
+    /// Library browsing preference. Any install without a saved choice —
+    /// including existing installs upgrading to this build — aggregates
+    /// descendants, because selecting a parent folder should expose the
+    /// content organized below it; users who prefer strict one-folder views
+    /// can turn this off in Settings.
+    var includeEntriesFromSubfolders =
+        UserDefaults.standard.object(forKey: PreferenceKey.includeEntriesFromSubfolders) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(
+                includeEntriesFromSubfolders,
+                forKey: PreferenceKey.includeEntriesFromSubfolders
+            )
+            // Turning the aggregation on only grows the visible set, so the
+            // selection can only be orphaned when it turns off.
+            if !includeEntriesFromSubfolders {
+                Task { await clearEntrySelectionIfHidden() }
+            }
+        }
+    }
     private(set) var searchIndexState: SearchIndexState = .unavailable
     private(set) var vaultSearchResults: [SearchHit] = []
     private(set) var vaultSearchIsRunning = false
@@ -125,7 +156,17 @@ final class AppModel {
     }
 
     enum WorkbenchActionRequest {
-        case editOrSave, copyAsMarkdown, toggleLayer, renameSpeakers
+        case editOrSave, copyAsMarkdown, toggleLayer, toggleSpeakerDetection,
+             renameSpeakers, finishEditingForQuickMove
+        case editorCommand(EditorCommandAction)
+    }
+
+    enum EditorCommandAction: String, Sendable {
+        case find, replace, bold, italic, link, undo, redo
+    }
+
+    enum AppWindowRequest {
+        case about, keyboardShortcuts
     }
 
     /// What the note workbench can do right now, mirrored up so menu items
@@ -133,10 +174,18 @@ final class AppModel {
     struct WorkbenchUIState: Equatable {
         var hasContent = false
         var canEditNote = false
+        var canSaveNote = false
         var isEditing = false
         var isForked = false
+        var canToggleLayer = false
         var hasSpeakers = false
+        var hasDetectedSpeakers = false
+        var speakerDetectionEnabled = false
+        var canToggleSpeakerDetection = false
         var viewedLayerIsOriginal = true
+        var editorReady = false
+        var editorInputOwnsInput = false
+        var editorCanReplace = false
     }
 
     private(set) var entryActionRequest: EntryActionRequest?
@@ -146,6 +195,19 @@ final class AppModel {
     private(set) var newFolderRequestRevision = 0
     private(set) var renameEntryRequestRevision = 0
     private(set) var queuePopoverRequestRevision = 0
+    private(set) var appWindowRequest: AppWindowRequest?
+    private(set) var appWindowRequestRevision = 0
+    private(set) var quickMovePreparationEntryPath: RelativePath?
+    private(set) var quickMovePreparationRevision = 0
+    private(set) var quickMoveEntryPath: RelativePath?
+    private(set) var isQuickMoveInFlight = false
+    var isQuickMovePresented = false {
+        didSet {
+            if !isQuickMovePresented, !isQuickMoveInFlight {
+                quickMoveEntryPath = nil
+            }
+        }
+    }
     private(set) var cancelTrimRequestRevision = 0
     private(set) var trimModeActive = false
     var workbenchUIState = WorkbenchUIState()
@@ -175,6 +237,43 @@ final class AppModel {
     func requestQueuePopover() {
         guard phase == .ready else { return }
         queuePopoverRequestRevision &+= 1
+    }
+
+    func setShortcutCaptureOwnsInput(_ ownsInput: Bool) {
+        guard shortcutCaptureOwnsInput != ownsInput else { return }
+        shortcutCaptureOwnsInput = ownsInput
+        applyGlobalShortcutPreferencesForCurrentCaptureState()
+    }
+
+    func setEditorInputOwnsInput(_ ownsInput: Bool) {
+        editorInputOwnsInput = ownsInput
+    }
+
+    func updateEditorPreferences(_ preferences: EditorPreferences) {
+        var normalized = preferences
+        normalized.normalize()
+        guard normalized != editorPreferences else { return }
+        editorPreferences = normalized
+        EditorPreferencesStore.save(normalized)
+    }
+
+    func resetEditorPreferences() {
+        updateEditorPreferences(EditorPreferences())
+    }
+
+    func completeQuickMovePreparation(for entryPath: RelativePath, saved: Bool) {
+        guard quickMovePreparationEntryPath == entryPath else { return }
+        quickMovePreparationEntryPath = nil
+        guard saved,
+              selectedEntryID == entryPath,
+              quickMoveBlockedReason(for: entryPath) == nil else { return }
+        quickMoveEntryPath = entryPath
+        isQuickMovePresented = true
+    }
+
+    var quickMoveEntry: Entry? {
+        guard let quickMoveEntryPath else { return nil }
+        return snapshot?.entry(withID: quickMoveEntryPath)
     }
 
     func setTrimModeActive(_ active: Bool) {
@@ -255,16 +354,24 @@ final class AppModel {
     var sidebarSelection: SidebarSelection? = .folder("") {
         didSet {
             guard sidebarSelection != oldValue else { return }
-            if let selectedEntryID {
-                let selectionStillVisible = displayedEntries.contains { $0.id == selectedEntryID }
-                if !selectionStillVisible {
-                    self.selectedEntryID = nil
-                }
-            }
+            Task { await clearEntrySelectionIfHidden() }
             if sidebarSelection != .recentlyDeleted, selectedTrashItemID != nil {
                 selectedTrashItemID = nil
             }
         }
+    }
+
+    /// Clears the entry selection when the displayed list no longer contains
+    /// it (the sidebar selection or a list-shaping preference changed).
+    private func clearEntrySelectionIfHidden() async {
+        guard let selectedEntryID,
+              !displayedEntries.contains(where: { $0.id == selectedEntryID }) else { return }
+        let intent = beginSelectionIntent()
+        guard await editorLifecycleCoordinator.prepare(for: .entryChange(nil)),
+              selectionIntentIsCurrent(intent),
+              self.selectedEntryID == selectedEntryID,
+              !displayedEntries.contains(where: { $0.id == selectedEntryID }) else { return }
+        self.selectedEntryID = nil
     }
     /// Entry-list sort (LIB-4), persisted across launches.
     var entrySortOrder = EntrySortOrder(
@@ -305,6 +412,60 @@ final class AppModel {
             }
         }
     }
+
+    private var selectionIntentGeneration: UInt64 = 0
+
+    private func beginSelectionIntent() -> UInt64 {
+        selectionIntentGeneration &+= 1
+        return selectionIntentGeneration
+    }
+
+    private func selectionIntentIsCurrent(_ generation: UInt64) -> Bool {
+        generation == selectionIntentGeneration
+    }
+
+    @discardableResult
+    private func refreshSelectingEntry(_ destination: RelativePath?) async -> Bool {
+        let intent = beginSelectionIntent()
+        guard await prepareSelectionIntent(intent, destination: destination) else { return false }
+        await refresh {
+            guard self.selectionIntentIsCurrent(intent) else { return }
+            self.selectedEntryID = destination
+        }
+        return selectionIntentIsCurrent(intent) && selectedEntryID == destination
+    }
+
+    @discardableResult
+    private func prepareSelectionIntent(
+        _ generation: UInt64,
+        destination: RelativePath?
+    ) async -> Bool {
+        guard await editorLifecycleCoordinator.prepare(
+            for: .entryChange(destination)
+        ) else { return false }
+        return selectionIntentIsCurrent(generation)
+    }
+
+    /// User-driven selection changes wait for the mounted web editor's
+    /// acknowledged snapshot. Internal path remapping may still assign the
+    /// property directly because it does not change the logical document.
+    func requestEntrySelection(_ entryID: String?) {
+        guard entryID != selectedEntryID else { return }
+        let intent = beginSelectionIntent()
+        Task {
+            guard await prepareSelectionIntent(intent, destination: entryID) else { return }
+            selectedEntryID = entryID
+        }
+    }
+
+    func requestSidebarSelection(_ selection: SidebarSelection?) {
+        guard selection != sidebarSelection else { return }
+        let intent = beginSelectionIntent()
+        Task {
+            guard await prepareSelectionIntent(intent, destination: nil) else { return }
+            sidebarSelection = selection
+        }
+    }
     var selectedTrashItemID: String? {
         didSet {
             // A preview may be playing directly from `.trash`; every selection
@@ -342,9 +503,17 @@ final class AppModel {
     var isExtensionRecoveryPresented = false
 
     private var service: VaultService?
+#if DEBUG
+    var serviceForTesting: VaultService? { service }
+#endif
     private var watcher: FSEventsWatcher?
     private var searchIndexTask: Task<Void, Never>?
     private var vaultSearchTask: Task<Void, Never>?
+    /// Whole-vault replacement is a destructive context switch. Keep every
+    /// request on one tail so an older B open can never finish after a newer
+    /// C request and republish B's service, watcher, or selection.
+    private var vaultOpenTail: Task<Void, Never>?
+    private var vaultOpenIntentGeneration: UInt64 = 0
     /// URL currently holding security-scoped access (stopAccessing on switch).
     private var scopedURL: URL?
 
@@ -382,8 +551,11 @@ final class AppModel {
     var displayedEntries: [Entry] {
         switch sidebarSelection {
         case .folder:
+            let entries = includeEntriesFromSubfolders
+                ? selectedFolder?.allEntries ?? []
+                : selectedFolder?.entries ?? []
             return entrySortOrder.sorted(
-                selectedFolder?.entries ?? [],
+                entries,
                 direction: entrySortDirection
             )
         case .favorites:
@@ -409,7 +581,7 @@ final class AppModel {
 
     private func configureGlobalRecordingControls() {
         globalShortcutService.onAction = { [weak self] action in
-            guard let self else { return }
+            guard let self, !self.shortcutCaptureOwnsInput else { return }
             Task {
                 switch action {
                 case .toggleRecording:
@@ -421,7 +593,38 @@ final class AppModel {
                 }
             }
         }
-        globalShortcutService.apply(globalShortcutPreferences)
+        applyGlobalShortcutPreferencesForCurrentCaptureState()
+    }
+
+    /// Carbon hotkeys consume their key event before a focused capture view
+    /// can record it. Temporarily unregister them while either app-local or
+    /// global capture owns input, without mutating the persisted preference
+    /// profile. Releasing capture immediately restores that same profile.
+    private func applyGlobalShortcutPreferencesForCurrentCaptureState() {
+        var appliedPreferences = globalShortcutPreferences
+        if shortcutCaptureOwnsInput { appliedPreferences.isEnabled = false }
+        globalShortcutService.apply(appliedPreferences)
+    }
+
+    var assignedGlobalShortcutBindings: [ShortcutChord: String] {
+        var result: [ShortcutChord: String] = [:]
+        for action in GlobalShortcutAction.allCases {
+            guard let chord = globalShortcutPreferences.bindings[action] ?? nil else { continue }
+            // A persisted global/global collision is still global-owned. Keep
+            // the first stable action title and disable every matching local
+            // assignment rather than guessing which command the user meant.
+            if result[chord] == nil { result[chord] = action.title }
+        }
+        return result
+    }
+
+    func updateAppShortcutPreferences(_ preferences: AppShortcutPreferences) {
+        appShortcutPreferences = preferences
+        AppShortcutPreferencesStore.save(preferences)
+    }
+
+    func resetAppShortcutPreferences() {
+        updateAppShortcutPreferences(.defaults)
     }
 
     func updateGlobalShortcutPreferences(_ preferences: GlobalShortcutPreferences) {
@@ -429,7 +632,7 @@ final class AppModel {
             globalShortcutPreferences.backgroundIndicatorRetention
         globalShortcutPreferences = preferences
         GlobalShortcutPreferencesStore.save(preferences)
-        globalShortcutService.apply(preferences)
+        applyGlobalShortcutPreferencesForCurrentCaptureState()
         if retentionChanged, recorder.state == .idle, let lastCompletedRecordingAt {
             beginGlobalIndicatorRetention(after: lastCompletedRecordingAt)
         }
@@ -442,11 +645,37 @@ final class AppModel {
     func shutdownGlobalRecordingControls() {
         globalRecordingStateTask?.cancel()
         globalIndicatorRetentionTask?.cancel()
+        isGlobalIndicatorManuallyPresented = false
         globalShortcutService.shutdown()
     }
 
     /// Opens `url` as the vault, replacing any current vault.
     func openVault(at url: URL, isSecurityScoped: Bool, saveBookmark: Bool) async {
+        vaultOpenIntentGeneration &+= 1
+        let intent = vaultOpenIntentGeneration
+        let predecessor = vaultOpenTail
+        let operation = Task { @MainActor [weak self] in
+            await predecessor?.value
+            guard let self, self.vaultOpenIntentGeneration == intent else { return }
+            await self.performOpenVault(
+                at: url,
+                isSecurityScoped: isSecurityScoped,
+                saveBookmark: saveBookmark
+            )
+        }
+        vaultOpenTail = Task { await operation.value }
+        await operation.value
+    }
+
+    private func performOpenVault(
+        at url: URL,
+        isSecurityScoped: Bool,
+        saveBookmark: Bool
+    ) async {
+        guard await editorLifecycleCoordinator.prepare(for: .vaultChange) else {
+            errorMessage = "The current note could not be saved, so the vault was not changed."
+            return
+        }
         if replacementModeActive {
             // Finish the old vault's temporary transaction against the old
             // VaultService before replacing it below.
@@ -502,6 +731,10 @@ final class AppModel {
 
         transcriptionQueue?.shutdown()
         let queue = TranscriptionQueue(vaultRoot: url, service: service)
+        queue.beforeEntryMutation = { [weak self] entryPath in
+            guard let self, self.selectedEntryID == entryPath else { return true }
+            return await self.editorLifecycleCoordinator.prepare(for: .externalReload)
+        }
         queue.onEntryTranscribed = { [weak self] originalPath, outcome in
             self?.entryTranscribed(originalPath: originalPath, outcome: outcome)
         }
@@ -570,7 +803,7 @@ final class AppModel {
         watcher = FSEventsWatcher(url: url) { [weak self] paths in
             Task {
                 await service.synchronizeSearchIndex(changedAbsolutePaths: paths)
-                await self?.handleExternalVaultChange(for: service)
+                await self?.handleExternalVaultChange(for: service, absolutePaths: paths)
             }
         }
         // Retention purge on launch/open (window configurable per vault,
@@ -613,11 +846,58 @@ final class AppModel {
         }
     }
 
-    private func handleExternalVaultChange(for changedService: VaultService) async {
+    private func handleExternalVaultChange(
+        for changedService: VaultService,
+        absolutePaths: [String]
+    ) async {
         guard service === changedService else { return }
+        let changedPaths = relativeChangedPaths(from: absolutePaths)
+        lastExternalChangedPaths = changedPaths
         externalVaultRevision &+= 1
+        if let selectedEntryID,
+           changedPaths.contains(where: { pathsOverlap($0, selectedEntryID) }) {
+            selectedEntryExternalRevision &+= 1
+        }
         await refresh()
         refreshVaultSearchIfVisible()
+    }
+
+    private func relativeChangedPaths(from absolutePaths: [String]) -> Set<RelativePath> {
+        guard let root = vaultURL?.standardizedFileURL.path else { return [] }
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return Set(absolutePaths.compactMap { raw in
+            let path = URL(fileURLWithPath: raw).standardizedFileURL.path
+            if path == root { return "" }
+            guard path.hasPrefix(prefix) else { return nil }
+            return String(path.dropFirst(prefix.count))
+        })
+    }
+
+#if DEBUG
+    func handleExternalVaultChangeForTesting(
+        service changedService: VaultService,
+        absolutePaths: [String]
+    ) async {
+        await handleExternalVaultChange(
+            for: changedService,
+            absolutePaths: absolutePaths
+        )
+    }
+#endif
+
+    private func pathsOverlap(_ lhs: RelativePath, _ rhs: RelativePath) -> Bool {
+        lhs.isEmpty || rhs.isEmpty || lhs == rhs
+            || lhs.hasPrefix(rhs + "/") || rhs.hasPrefix(lhs + "/")
+    }
+
+    private func remappedDescendant(
+        _ candidate: RelativePath,
+        from oldRoot: RelativePath,
+        to newRoot: RelativePath
+    ) -> RelativePath? {
+        if candidate == oldRoot { return newRoot }
+        guard candidate.hasPrefix(oldRoot + "/") else { return nil }
+        return newRoot + candidate.dropFirst(oldRoot.count)
     }
 
     private func searchIndexDidFinish(for indexedService: VaultService, error: Error?) {
@@ -644,6 +924,12 @@ final class AppModel {
         guard let service else { return }
         let snap = await service.snapshot()
         let trash = (try? await service.trashItems()) ?? []
+        if let selectedEntryID,
+           snap.entry(withID: selectedEntryID) == nil {
+            let intent = beginSelectionIntent()
+            guard await prepareSelectionIntent(intent, destination: nil),
+                  self.selectedEntryID == selectedEntryID else { return }
+        }
         snapshot = snap
         trashItems = trash
         apply?()
@@ -711,13 +997,40 @@ final class AppModel {
     }
 
     func renameFolder(at relPath: RelativePath, to newName: String) async {
-        await perform("renameFolder [\(relPath)] -> \(newName)") { service in
+        guard let service else { return }
+        let selectedBefore = selectedEntryID
+        if let selectedBefore, pathsOverlap(relPath, selectedBefore) {
+            guard await editorLifecycleCoordinator.prepare(for: .externalReload) else { return }
+        }
+        do {
             let newPath = try await service.renameFolder(at: relPath, to: newName)
-            await MainActor.run {
-                if self.sidebarSelection == .folder(relPath) {
-                    self.sidebarSelection = .folder(newPath)
+            let selectedAfter = selectedBefore.flatMap {
+                remappedDescendant($0, from: relPath, to: newPath)
+            }
+            if let selectedBefore, let selectedAfter {
+                guard !editorLifecycleCoordinator.hasActiveParticipant
+                    || editorLifecycleCoordinator.remapActiveDocument(
+                        expectedOldPath: selectedBefore,
+                        to: selectedAfter
+                    ) else {
+                    errorMessage = "The folder was renamed, but the open editor could not be rebound safely. Reopen the note before editing."
+                    return
                 }
             }
+            await refresh {
+                if case .folder(let selectedFolder)? = self.sidebarSelection,
+                   let remapped = self.remappedDescendant(
+                    selectedFolder, from: relPath, to: newPath
+                   ) {
+                    self.sidebarSelection = .folder(remapped)
+                }
+                if let selectedAfter { self.selectedEntryID = selectedAfter }
+            }
+            DebugLog.append("renameFolder [\(relPath)] -> [\(newPath)]: ok")
+        } catch {
+            DebugLog.append("renameFolder [\(relPath)]: FAILED \(error)")
+            errorMessage = error.localizedDescription
+            await refresh()
         }
     }
 
@@ -725,11 +1038,22 @@ final class AppModel {
 
     func renameEntry(_ entry: Entry, toTitle title: String) async {
         guard recorder.currentEntryPath != entry.relativePath else { return }
+        if selectedEntryID == entry.relativePath {
+            guard await editorLifecycleCoordinator.prepare(for: .externalReload) else { return }
+        }
         await perform("renameEntry [\(entry.relativePath)] -> \(title)") { service in
             let newPath = try await service.renameEntry(at: entry.relativePath, toTitle: title)
             await MainActor.run {
                 self.transcriptionQueue?.repointItems(from: entry.relativePath, to: newPath)
                 if self.selectedEntryID == entry.relativePath {
+                    guard !self.editorLifecycleCoordinator.hasActiveParticipant
+                        || self.editorLifecycleCoordinator.remapActiveDocument(
+                            expectedOldPath: entry.relativePath,
+                            to: newPath
+                        ) else {
+                        self.errorMessage = "The note was renamed, but the open editor could not be rebound safely. Reopen it before editing."
+                        return
+                    }
                     self.selectedEntryID = newPath
                 }
             }
@@ -737,26 +1061,114 @@ final class AppModel {
     }
 
     func moveItem(atRelativePath relPath: RelativePath, toFolder destFolder: RelativePath) async {
-        guard recorder.currentEntryPath != relPath else { return }
-        await perform("moveItem [\(relPath)] -> [\(destFolder)]") { service in
+        let result = await moveEntry(
+            atRelativePath: relPath,
+            toFolder: destFolder,
+            enforceQuickMoveAvailability: false
+        )
+        if case .failure(let failure) = result {
+            errorMessage = failure.localizedDescription
+        }
+    }
+
+    /// Shared move intent for Quick Move, context-menu Move To, and drag/drop.
+    /// The refreshed snapshot, queue repoint, and selection update are
+    /// published in one main-actor turn so the selected detail never briefly
+    /// points at a path that is absent from the snapshot.
+    func moveEntry(
+        atRelativePath relPath: RelativePath,
+        toFolder destFolder: RelativePath
+    ) async -> QuickMoveResult {
+        await moveEntry(
+            atRelativePath: relPath,
+            toFolder: destFolder,
+            enforceQuickMoveAvailability: true
+        )
+    }
+
+    private func moveEntry(
+        atRelativePath relPath: RelativePath,
+        toFolder destFolder: RelativePath,
+        enforceQuickMoveAvailability: Bool
+    ) async -> QuickMoveResult {
+        let selectedBefore = selectedEntryID
+        if let selectedBefore, pathsOverlap(relPath, selectedBefore) {
+            guard await editorLifecycleCoordinator.prepare(for: .externalReload) else {
+                return .failure(.unavailable("The current note could not be saved."))
+            }
+        }
+        if isQuickMoveInFlight {
+            return .failure(.unavailable("Wait for the current move to finish."))
+        }
+        if enforceQuickMoveAvailability,
+           let reason = quickMoveBlockedReason(for: relPath) {
+            return .failure(.unavailable(reason))
+        }
+        guard let service else {
+            return .failure(.unavailable("Open a vault before moving a note."))
+        }
+
+        isQuickMoveInFlight = true
+        defer { isQuickMoveInFlight = false }
+
+        do {
             let newPath = try await service.moveItem(at: relPath, toFolder: destFolder)
-            await MainActor.run {
-                self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
-                if self.selectedEntryID == relPath {
-                    self.selectedEntryID = newPath
+            let selectedAfter = selectedBefore.flatMap {
+                remappedDescendant($0, from: relPath, to: newPath)
+            }
+            if let selectedBefore, let selectedAfter,
+               editorLifecycleCoordinator.hasActiveParticipant {
+                guard editorLifecycleCoordinator.remapActiveDocument(
+                    expectedOldPath: selectedBefore,
+                    to: selectedAfter
+                ) else {
+                    throw VaultError.notFound("The open editor could not be rebound after moving the note.")
                 }
             }
+            await refresh {
+                self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
+                if let selectedAfter { self.selectedEntryID = selectedAfter }
+                if self.quickMoveEntryPath == relPath {
+                    self.quickMoveEntryPath = newPath
+                }
+            }
+            refreshVaultSearchIfVisible()
+            DebugLog.append("moveItem [\(relPath)] -> [\(destFolder)]: ok")
+            return .success(
+                QuickMoveSuccess(
+                    sourcePath: relPath,
+                    destinationFolder: destFolder,
+                    movedPath: newPath
+                )
+            )
+        } catch {
+            DebugLog.append("moveItem [\(relPath)] -> [\(destFolder)]: FAILED \(error)")
+            return .failure(
+                .classify(
+                    error,
+                    sourcePath: relPath,
+                    destinationFolder: destFolder
+                )
+            )
         }
     }
 
     func deleteItem(atRelativePath relPath: RelativePath) async {
         guard recorder.currentEntryPath != relPath else { return }
+        let deletingSelectedDocument = selectedEntryID.map {
+            pathsOverlap(relPath, $0)
+        } ?? false
+        let selectionIntent = deletingSelectedDocument ? beginSelectionIntent() : nil
+        if let selectionIntent {
+            guard await prepareSelectionIntent(selectionIntent, destination: nil) else { return }
+        }
         // Standard list semantics: deleting the selected entry selects the
         // one that takes its place (the next below, else the new last).
         // Computed from the displayed order before the row disappears.
         var successorID: String?
         let entries = displayedEntries
-        if selectedEntryID == relPath,
+        if deletingSelectedDocument,
+           selectedEntryID != nil,
            let index = entries.firstIndex(where: { $0.id == relPath }) {
             successorID = index + 1 < entries.count
                 ? entries[index + 1].id
@@ -766,7 +1178,8 @@ final class AppModel {
             try await service.trashItem(atRelativePath: relPath)
             await MainActor.run {
                 self.transcriptionQueue?.evictItems(underPath: relPath)
-                if self.selectedEntryID == relPath { self.selectedEntryID = nil }
+                if let selected = self.selectedEntryID,
+                   self.pathsOverlap(relPath, selected) { self.selectedEntryID = nil }
                 if self.sidebarSelection == .folder(relPath) {
                     self.sidebarSelection = .folder(relPath.parentRelativePath)
                 }
@@ -775,6 +1188,7 @@ final class AppModel {
         // Only after the refresh confirmed the delete (entry gone, successor
         // still present) — a failed trash keeps the original selection.
         if let successorID, selectedEntryID == nil,
+           selectionIntent.map(selectionIntentIsCurrent) ?? true,
            snapshot?.entry(withID: relPath) == nil,
            snapshot?.entry(withID: successorID) != nil {
             selectedEntryID = successorID
@@ -798,6 +1212,21 @@ final class AppModel {
         return entry.speechTranscriptAvailability
     }
 
+    /// Shared by the visible Compress control, its menu item, and remapped
+    /// keyboard dispatch so all three report the same availability.
+    func compressionBlockedReason(for entry: Entry) -> String? {
+        if trimModeActive {
+            return "Finish or cancel trimming before compressing audio."
+        }
+        if let reason = trimBlockedReason(for: entry, duration: entry.duration) {
+            return reason
+        }
+        if entry.silenceDetectionMode == .speech {
+            return speechTranscriptAvailability(for: entry).explanation
+        }
+        return nil
+    }
+
     /// Writes the per-entry picker atomically, refreshes the scanner snapshot,
     /// and changes the loaded player's exact gap source without touching the
     /// app-wide Skip Silence preference.
@@ -819,10 +1248,14 @@ final class AppModel {
     func duplicateEntry(_ entry: Entry) async {
         guard recorder.currentEntryPath != entry.relativePath else { return }
         guard let service else { return }
+        let intent = beginSelectionIntent()
+        guard await prepareSelectionIntent(intent, destination: nil) else { return }
         do {
             let newPath = try await service.duplicateEntry(at: entry.relativePath)
             DebugLog.append("duplicateEntry [\(entry.relativePath)] -> [\(newPath)]")
-            await refresh { self.selectedEntryID = newPath }
+            await refresh {
+                if self.selectionIntentIsCurrent(intent) { self.selectedEntryID = newPath }
+            }
             refreshVaultSearchIfVisible()
         } catch {
             DebugLog.append("duplicateEntry [\(entry.relativePath)]: FAILED \(error)")
@@ -867,15 +1300,19 @@ final class AppModel {
     }
 
     func selectSearchHit(_ hit: SearchHit) {
-        player.pause()
-        sidebarSelection = .folder(hit.entryPath.parentRelativePath)
-        selectedEntryID = hit.entryPath
-        // A title match selects the entry itself; its UTF-16 range does not
-        // belong to either transcript layer and must not drive text/audio cueing.
-        transcriptNavigationRequest = hit.matchKind == .content
-            ? TranscriptNavigationRequest(hit: hit)
-            : nil
-        isVaultSearchPresented = false
+        let intent = beginSelectionIntent()
+        Task {
+            guard await prepareSelectionIntent(intent, destination: hit.entryPath) else { return }
+            player.pause()
+            sidebarSelection = .folder(hit.entryPath.parentRelativePath)
+            selectedEntryID = hit.entryPath
+            // Title/metadata hits select the entry itself; only content
+            // ranges belong to a transcript layer and drive text/audio cueing.
+            transcriptNavigationRequest = hit.matchKind == .content
+                ? TranscriptNavigationRequest(hit: hit)
+                : nil
+            isVaultSearchPresented = false
+        }
     }
 
     func requestInNoteFind() {
@@ -888,7 +1325,13 @@ final class AppModel {
         vaultSearchError = nil
         let query = vaultSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            vaultSearchResults = []
+            if vaultSearchFilters.selectedTags.isEmpty {
+                vaultSearchResults = []
+            } else {
+                vaultSearchResults = metadataSearchHits(
+                    matching: vaultSearchFilters
+                )
+            }
             vaultSearchIsRunning = false
             return
         }
@@ -931,8 +1374,42 @@ final class AppModel {
     }
 
     private func refreshVaultSearchIfVisible() {
-        guard isVaultSearchPresented, !vaultSearchQuery.isEmpty else { return }
+        guard isVaultSearchPresented,
+              !vaultSearchQuery.isEmpty || !vaultSearchFilters.selectedTags.isEmpty
+        else { return }
         scheduleVaultSearch(immediate: true)
+    }
+
+    private func metadataSearchHits(
+        matching filters: VaultSearchFilters
+    ) -> [SearchHit] {
+        guard let snapshot else { return [] }
+        return snapshot.allEntries
+            .filter { filters.matches($0) }
+            .sorted {
+                if $0.modified != $1.modified { return $0.modified > $1.modified }
+                return $0.relativePath.localizedStandardCompare($1.relativePath)
+                    == .orderedAscending
+            }
+            .prefix(VaultSearchFilters.displayedResultLimit)
+            .map { entry in
+                let matchingTags = entry.tags.filter {
+                    EditorTagExtractor.matchesAny(
+                        entryTags: [$0],
+                        selectedTags: filters.selectedTags
+                    )
+                }
+                return SearchHit(
+                    entryPath: entry.relativePath,
+                    layer: .edited,
+                    title: entry.displayTitle,
+                    snippet: matchingTags.map { "#\($0.display)" }.joined(separator: "  "),
+                    matchKind: .metadata,
+                    matchRange: 0..<0,
+                    snippetMatchRange: 0..<0,
+                    score: 0
+                )
+            }
     }
 
     /// SRCH-5: hits are filtered against snapshot metadata after the text
@@ -944,6 +1421,277 @@ final class AppModel {
     ) -> [SearchHit] {
         guard let snapshot else { return hits }
         return filters.apply(to: hits, entries: snapshot.allEntries)
+    }
+
+    // MARK: - App command catalog and dispatch
+
+    func quickMoveBlockedReason(for entryPath: RelativePath) -> String? {
+        guard phase == .ready,
+              let entry = snapshot?.entry(withID: entryPath) else {
+            return "Select a note before moving it."
+        }
+        if isQuickMoveInFlight { return "Wait for the current move to finish." }
+        if recorder.state != .idle || recorder.sessionTarget != nil {
+            return "Finish or cancel the active recording before moving this note."
+        }
+        if trimModeActive { return "Finish or cancel trimming before moving this note." }
+        if replacementModeActive {
+            return "Finish or cancel Replace Audio before moving this note."
+        }
+        if compressingEntryPaths.contains(entryPath)
+            || clipMutationEntryPaths.contains(entryPath) {
+            return "Wait for the current audio operation to finish before moving this note."
+        }
+        if transcriptionQueue?.items.contains(where: {
+            $0.entryRelativePath == entryPath && $0.state != .failed
+        }) == true {
+            return "Wait for this note's transcription to finish before moving it."
+        }
+        let hasDestination = snapshot?.root.allFolders.contains {
+            $0.relativePath != entry.parentRelativePath
+        } == true
+        if !hasDestination { return "Create another vault folder before moving this note." }
+        return nil
+    }
+
+    func requestQuickMove() {
+        guard let entry = selectedEntry else { return }
+        if let reason = quickMoveBlockedReason(for: entry.relativePath) {
+            errorMessage = reason
+            return
+        }
+        quickMovePreparationEntryPath = entry.relativePath
+        quickMovePreparationRevision &+= 1
+        if workbenchUIState.isEditing {
+            requestWorkbenchAction(.finishEditingForQuickMove)
+        } else {
+            completeQuickMovePreparation(for: entry.relativePath, saved: true)
+        }
+    }
+
+    private func requestAppWindow(_ request: AppWindowRequest) {
+        appWindowRequest = request
+        appWindowRequestRevision &+= 1
+        switch request {
+        case .about:
+            AppWindowPresenter.openAuxiliaryWindow(id: AboutCommands.windowID)
+        case .keyboardShortcuts:
+            AppWindowPresenter.openAuxiliaryWindow(
+                id: KeyboardShortcutsCommands.windowID
+            )
+        }
+    }
+
+    func isAppCommandEnabled(_ action: AppShortcutAction) -> Bool {
+        if action == .showAbout || action == .showKeyboardShortcuts { return true }
+        guard phase == .ready else { return false }
+
+        switch action {
+        case .newRecording:
+            return recorder.state == .idle && recorder.sessionTarget == nil
+        case .toggleRecording:
+            return recorder.state != .finalizing
+        case .togglePausePlayback:
+            switch recorder.state {
+            case .recording:
+                if case .replacementTake? = recorder.sessionTarget { return false }
+                return true
+            case .paused: return true
+            case .idle: return player.url != nil
+            case .finalizing: return false
+            }
+        case .importAudio, .newFolder, .searchVault,
+             .sortByDate, .sortByDuration, .sortByTitle, .sortByRecentlyEdited,
+             .goToVaultRoot, .goToFavorites, .goToRecentlyDeleted,
+             .showTranscriptionQueue:
+            return true
+
+        case .toggleFavorite, .renameEntry, .duplicateEntry, .showInfo,
+             .revealInFinder:
+            return selectedEntry != nil
+        case .moveNote:
+            guard let entry = selectedEntry else { return false }
+            return !isQuickMovePresented
+                && quickMovePreparationEntryPath == nil
+                && quickMoveBlockedReason(for: entry.relativePath) == nil
+        case .moveToRecentlyDeleted:
+            guard let entry = selectedEntry else { return false }
+            return recorder.currentEntryPath != entry.relativePath
+                && !trimModeActive && !replacementModeActive
+                && !compressingEntryPaths.contains(entry.relativePath)
+                && !clipMutationEntryPaths.contains(entry.relativePath)
+        case .extendRecording:
+            if recorder.extensionSession != nil {
+                return recorder.state == .recording || recorder.state == .paused
+            }
+            return selectedEntry.map { extensionBlockReason(for: $0) == nil } ?? false
+        case .editOrSaveNote:
+            return workbenchUIState.isEditing
+                ? workbenchUIState.canSaveNote
+                : workbenchUIState.canEditNote
+        case .copyMarkdown:
+            return workbenchUIState.hasContent
+        case .toggleTranscriptLayer:
+            return workbenchUIState.canToggleLayer && !workbenchUIState.isEditing
+        case .retranscribe:
+            return selectedEntry?.hasAudio == true && !replacementModeActive
+        case .trimAudio:
+            if trimModeActive { return true }
+            return selectedEntry.map {
+                trimBlockedReason(for: $0, duration: $0.duration) == nil
+            } ?? false
+        case .replaceAudio:
+            return selectedEntry.map { replacementBlockedReason(for: $0) == nil } ?? false
+        case .compressAudio:
+            return selectedEntry.map { compressionBlockedReason(for: $0) == nil }
+                ?? false
+        case .restoreOriginalAudio:
+            return selectedEntry.map { originalAudioTrashItem(for: $0) != nil } ?? false
+        case .toggleSpeakerDetection:
+            return workbenchUIState.canToggleSpeakerDetection
+        case .renameSpeakers:
+            return workbenchUIState.hasSpeakers && !workbenchUIState.isEditing
+        case .deleteAudio:
+            guard let entry = selectedEntry else { return false }
+            return entry.hasAudio
+                && recorder.currentEntryPath != entry.relativePath
+                && !compressingEntryPaths.contains(entry.relativePath)
+                && !clipMutationEntryPaths.contains(entry.relativePath)
+                && !replacementModeActive && !trimModeActive
+        case .exportMarkdown:
+            return selectedEntry?.hasTranscript == true
+        case .shareAudio:
+            return selectedEntry?.hasAudio == true
+        case .openInObsidian:
+            return vaultHasObsidianConfig && selectedEntry?.hasTranscript == true
+
+        case .undoClipEdit, .redoClipEdit:
+            if editorInputOwnsInput { return workbenchUIState.editorReady }
+            return selectedEntry.map { clipEditBlockReason(for: $0) == nil } ?? false
+        case .skipBackward, .skipForward,
+             .jump0, .jump1, .jump2, .jump3, .jump4,
+             .jump5, .jump6, .jump7, .jump8, .jump9,
+             .decreasePlaybackSpeed, .increasePlaybackSpeed,
+             .resetPlaybackSpeed:
+            return player.url != nil
+        case .toggleSkipSilence:
+            return true
+        case .enterZenMode:
+            if case .replacementTake? = recorder.sessionTarget { return false }
+            return !recorder.isZenMode
+        case .findInNote:
+            return selectedEntry != nil && !isVaultSearchPresented
+        case .previousFolder, .nextFolder:
+            return snapshot != nil
+        case .showAbout, .showKeyboardShortcuts:
+            return true
+        }
+    }
+
+    func performAppCommand(_ action: AppShortcutAction) {
+        guard isAppCommandEnabled(action) else {
+            if action == .moveNote, let entry = selectedEntry {
+                errorMessage = quickMoveBlockedReason(for: entry.relativePath)
+            } else if (action == .undoClipEdit || action == .redoClipEdit),
+                      let entry = selectedEntry {
+                errorMessage = clipEditBlockReason(for: entry)
+            }
+            return
+        }
+
+        switch action {
+        case .newRecording:
+            Task { await startRecording() }
+        case .toggleRecording:
+            Task {
+                await performRecordingCommand(
+                    recorder.state == .idle ? .startNew : .stopAndSave
+                )
+            }
+        case .togglePausePlayback:
+            switch recorder.state {
+            case .recording, .paused: Task { await toggleRecordingPause() }
+            case .idle: player.togglePlayPause()
+            case .finalizing: break
+            }
+        case .importAudio: importViaPanel()
+        case .newFolder: requestNewFolder()
+        case .toggleFavorite:
+            if let entry = selectedEntry { Task { await toggleFavorite(for: entry) } }
+        case .renameEntry: requestRenameEntry()
+        case .duplicateEntry:
+            if let entry = selectedEntry { Task { await duplicateEntry(entry) } }
+        case .moveNote: requestQuickMove()
+        case .moveToRecentlyDeleted:
+            if let entry = selectedEntry {
+                Task { await deleteItem(atRelativePath: entry.relativePath) }
+            }
+        case .extendRecording:
+            if recorder.extensionSession != nil {
+                if recorder.state == .recording || recorder.state == .paused {
+                    Task { await stopRecording() }
+                }
+            } else {
+                requestEntryAction(.extendRecording)
+            }
+        case .editOrSaveNote: requestWorkbenchAction(.editOrSave)
+        case .copyMarkdown: requestWorkbenchAction(.copyAsMarkdown)
+        case .toggleTranscriptLayer: requestWorkbenchAction(.toggleLayer)
+        case .retranscribe: requestEntryAction(.retranscribe)
+        case .trimAudio: toggleTrimFromShortcut()
+        case .replaceAudio:
+            if let entry = selectedEntry { beginReplacement(for: entry) }
+        case .compressAudio: requestEntryAction(.compress)
+        case .restoreOriginalAudio: requestEntryAction(.restoreOriginalAudio)
+        case .toggleSpeakerDetection: requestWorkbenchAction(.toggleSpeakerDetection)
+        case .renameSpeakers: requestWorkbenchAction(.renameSpeakers)
+        case .deleteAudio: requestEntryAction(.deleteAudio)
+        case .showInfo: requestEntryAction(.showInfo)
+        case .revealInFinder:
+            if let entry = selectedEntry { revealInFinder(relativePath: entry.relativePath) }
+        case .exportMarkdown: requestEntryAction(.exportMarkdown)
+        case .shareAudio:
+            if let entry = selectedEntry { shareAudioFromMenu(for: entry) }
+        case .openInObsidian:
+            if let entry = selectedEntry { openInObsidian(entry: entry) }
+        case .undoClipEdit, .redoClipEdit:
+            if editorInputOwnsInput {
+                requestWorkbenchAction(.editorCommand(
+                    action == .undoClipEdit ? .undo : .redo
+                ))
+            } else if let entry = selectedEntry {
+                Task {
+                    await performClipEdit(
+                        action == .undoClipEdit ? .undo : .redo,
+                        for: entry
+                    )
+                }
+            }
+        case .skipBackward: player.skipBackward()
+        case .skipForward: player.skipForward()
+        case .jump0, .jump1, .jump2, .jump3, .jump4,
+             .jump5, .jump6, .jump7, .jump8, .jump9:
+            if let fraction = action.playbackFraction { player.seek(toFraction: fraction) }
+        case .decreasePlaybackSpeed: player.stepSpeed(-1)
+        case .increasePlaybackSpeed: player.stepSpeed(1)
+        case .resetPlaybackSpeed: player.speed = 1
+        case .toggleSkipSilence: player.skipSilence.toggle()
+        case .enterZenMode: recorder.isZenMode = true
+        case .findInNote: requestInNoteFind()
+        case .searchVault: presentVaultSearch()
+        case .previousFolder: _ = moveSidebarSelection(by: -1)
+        case .nextFolder: _ = moveSidebarSelection(by: 1)
+        case .sortByDate: selectEntrySortOrder(.dateNewest)
+        case .sortByDuration: selectEntrySortOrder(.duration)
+        case .sortByTitle: selectEntrySortOrder(.title)
+        case .sortByRecentlyEdited: selectEntrySortOrder(.recentlyEdited)
+        case .goToVaultRoot: requestSidebarSelection(.folder(""))
+        case .goToFavorites: requestSidebarSelection(.favorites)
+        case .goToRecentlyDeleted: requestSidebarSelection(.recentlyDeleted)
+        case .showTranscriptionQueue: requestQueuePopover()
+        case .showAbout: requestAppWindow(.about)
+        case .showKeyboardShortcuts: requestAppWindow(.keyboardShortcuts)
+        }
     }
 
     // MARK: - Keyboard (search / find / recording / playback / navigation)
@@ -964,262 +1712,74 @@ final class AppModel {
         }
     }
 
-    private let spaceKeyCode: UInt16 = 49
     private let escapeKeyCode: UInt16 = 53
-    private let deleteKeyCode: UInt16 = 51
-    private let zenKeyCode: UInt16 = 6
-    private let undoKeyCode: UInt16 = 6
-    private let extendKeyCode: UInt16 = 14
-    private let replaceKeyCode: UInt16 = 15
-    private let skipSilenceKeyCode: UInt16 = 1
-    private let trimKeyCode: UInt16 = 17
-    private let findKeyCode: UInt16 = 3
-    private let leftBracketKeyCode: UInt16 = 33
-    private let rightBracketKeyCode: UInt16 = 30
-    private let backslashKeyCode: UInt16 = 42
-    private let leftArrowKeyCode: UInt16 = 123
-    private let rightArrowKeyCode: UInt16 = 124
     private let downArrowKeyCode: UInt16 = 125
     private let upArrowKeyCode: UInt16 = 126
 
-    /// Top-row and numeric-keypad digit positions. Like common media players,
-    /// 1...8 seek in 10% increments while 9 means the end of the track.
-    private let playbackFractionsByKeyCode: [UInt16: Double] = [
-        29: 0.0, 18: 0.1, 19: 0.2, 20: 0.3, 21: 0.4,
-        23: 0.5, 22: 0.6, 26: 0.7, 28: 0.8, 25: 1.0,
-        82: 0.0, 83: 0.1, 84: 0.2, 85: 0.3, 86: 0.4,
-        87: 0.5, 88: 0.6, 89: 0.7, 91: 0.8, 92: 1.0,
-    ]
+    /// Matches every configurable local binding before the responder chain.
+    /// Unassigned/reserved/conflicting bindings never reach the dispatcher;
+    /// bare keys and focus-sensitive commands defer to editable text.
+    private func handleKeyDown(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        guard !shortcutCaptureOwnsInput else { return false }
 
-    /// Returns true when the event was consumed.
-    private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
-        guard phase == .ready else { return false }
-        let modifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
-        // Field editors (TextField, search) and TextEditor are all NSTextView.
+        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var modifiers: ShortcutModifiers = []
+        if flags.contains(.command) { modifiers.insert(.command) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+
         let focusedTextView = NSApp.keyWindow?.firstResponder as? NSTextView
-        // A selectable read-only transcript should not suppress transport
-        // shortcuts. Only an actual editor or field editor owns typing keys.
         let editingTextView = focusedTextView?.isEditable == true ? focusedTextView : nil
+        let editorOwnsText = editingTextView != nil || editorInputOwnsInput
 
+        // Escape remains structural and fixed. Give sheets, panels, windows,
+        // and editors first refusal before the workflow-level fallback.
         if keyCode == escapeKeyCode, modifiers.isEmpty {
-            // Let the responder chain dismiss anything visibly in front of the
-            // workbench. The global fallback is only for altered app modes,
-            // which must cancel even when blank window chrome owns focus.
-            guard editingTextView == nil, !foregroundPresentationOwnsEscape else {
+            guard !editorOwnsText, !foregroundPresentationOwnsEscape else {
                 return false
             }
             return handleExitCommand()
         }
 
-        if keyCode == findKeyCode, modifiers == [.command, .shift] {
-            presentVaultSearch()
-            return true
-        }
-        if keyCode == findKeyCode, modifiers == .command {
-            guard !isVaultSearchPresented else { return false }
-            requestInNoteFind()
-            return selectedEntry != nil
-        }
-
-        if keyCode == undoKeyCode,
-           modifiers == .command || modifiers == [.command, .shift] {
-            // Editable fields and the Markdown editor keep their native
-            // NSText undo manager. Clip history is only active outside text.
-            guard editingTextView == nil else { return false }
-            guard let entry = selectedEntry else {
-                // Match standard macOS undo behavior: with no applicable
-                // document/clip, the command is consumed as a silent no-op.
-                return true
-            }
-            if let reason = clipEditBlockReason(for: entry) {
-                errorMessage = reason
-                return true
-            }
-            Task {
-                await performClipEdit(
-                    modifiers.contains(.shift) ? .redo : .undo,
-                    for: entry
-                )
-            }
+        if let action = appShortcutAction(
+            forKeyCode: keyCode,
+            modifiers: modifiers,
+            editableTextHasFocus: editorOwnsText
+        ) {
+            performAppCommand(action)
             return true
         }
 
-        if keyCode == extendKeyCode {
-            // Plain E starts an extension or finishes the active one. An
-            // editable text view always keeps the key for normal typing.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
-            if recorder.extensionSession != nil {
-                switch recorder.state {
-                case .recording, .paused:
-                    Task { await stopRecording() }
-                case .finalizing:
-                    break // already joining/safely swapping; consume repeats
-                case .idle:
-                    break // retained recovery state is not a live extension
-                }
-                return true
-            }
-            guard let entry = selectedEntry else { return false }
-            if let reason = extensionBlockReason(for: entry) {
-                errorMessage = reason.explanation
-            } else {
-                Task { await startExtension(for: entry) }
-            }
-            return true
-        }
-
-        if keyCode == replaceKeyCode {
-            // Plain R enters Replace Audio for the selected clip. Keep this
-            // in the focus-aware monitor so typing in a field or note editor
-            // retains the letter normally.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
-            guard let entry = selectedEntry else {
-                errorMessage = "Select an audio clip before replacing audio."
-                return true
-            }
-            if let reason = replacementBlockedReason(for: entry) {
-                errorMessage = reason
-            } else {
-                beginReplacement(for: entry)
-            }
-            return true
-        }
-
-        if keyCode == trimKeyCode {
-            // Plain T mirrors the trim control from every non-editing pane.
-            // Consuming unavailable attempts also prevents List type-selection
-            // from scrolling the middle pane to titles beginning with T.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
-            toggleTrimFromShortcut()
-            return true
-        }
-
-        if keyCode == skipSilenceKeyCode {
-            // Skip Silence is an app-wide persisted playback preference, so S
-            // may toggle it even when focus is outside the detail pane.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
-            player.skipSilence.toggle()
-            return true
-        }
-
-        if keyCode == zenKeyCode {
-            // Plain Z enters Zen from anywhere except text input. Once Zen is
-            // active, Escape remains the deliberate exit control.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
-            if case .replacementTake? = recorder.sessionTarget { return true }
-            recorder.isZenMode = true
-            return true
-        }
-
-        if keyCode == leftBracketKeyCode || keyCode == rightBracketKeyCode || keyCode == backslashKeyCode {
-            // [ and ] step playback speed and \ resets it to 1× whenever an
-            // entry with audio is open, matching the transport speed control.
-            guard modifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            if keyCode == backslashKeyCode {
-                player.speed = 1.0
-            } else {
-                player.stepSpeed(keyCode == rightBracketKeyCode ? 1 : -1)
-            }
-            return true
-        }
-
-        if keyCode == leftArrowKeyCode || keyCode == rightArrowKeyCode {
-            // Left/Right use the loaded clip's contextual skip interval. Up/Down are
-            // deliberately not intercepted so list clip selection keeps its
-            // native keyboard behavior.
-            // AppKit marks arrow events as numeric-pad/function keys even on
-            // the built-in keyboard; those implicit flags are not user-held
-            // modifiers and must not block the shortcut.
-            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            if keyCode == rightArrowKeyCode {
-                player.skipForward()
-            } else {
-                player.skipBackward()
-            }
-            return true
-        }
-
-        if let fraction = playbackFractionsByKeyCode[keyCode] {
-            // Ignore the numeric-pad flag AppKit adds automatically, but do
-            // not steal modified digits or digits typed into an editor.
-            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            player.seek(toFraction: fraction)
-            return true
-        }
-
-        if keyCode == upArrowKeyCode || keyCode == downArrowKeyCode {
-            // Option-Up/Down navigates the far-left folder/sidebar pane while
-            // leaving keyboard focus in the clip list. Plain Up/Down normally
-            // falls through to the List, but its responder disappears when
-            // the responsive layout collapses the middle split item.
-            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard editingTextView == nil else { return false }
-            let offset = keyCode == downArrowKeyCode ? 1 : -1
-            if explicitModifiers == .option {
-                return moveSidebarSelection(by: offset)
-            }
-            if explicitModifiers.isEmpty, middleColumnIsCollapsed {
-                return moveMiddleSelection(by: offset)
-            }
-            return false
-        }
-
-        if keyCode == deleteKeyCode {
-            // Command+Delete and Shift+Delete both move the selected clip
-            // straight to Recently Deleted. Text editing keeps ownership of
-            // either chord while an editable field or note has focus.
-            guard modifiers == .command || modifiers == .shift, editingTextView == nil,
-                  let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath,
-                  !replacementModeActive,
-                  !clipMutationEntryPaths.contains(entry.relativePath)
-            else { return false }
-            Task { await deleteItem(atRelativePath: entry.relativePath) }
-            return true
-        }
-
-        guard keyCode == spaceKeyCode else { return false }
-        if modifiers == .shift {
-            if let focusedTextView = editingTextView {
-                // Typing wins: Shift+Space while writing inserts a space
-                // instead of reaching the Start/Stop Recording menu item.
-                focusedTextView.insertText(" ", replacementRange: focusedTextView.selectedRange())
-                return true
-            }
-            // Handle the recording intent here instead of falling through to
-            // SwiftUI's menu equivalent, whose dispatch depends on pane focus.
-            switch recorder.state {
-            case .recording, .paused:
-                Task { await stopRecording() }
-            case .finalizing:
-                break // consume repeats while the recording is being installed
-            case .idle:
-                Task { await startRecording() }
-            }
-            return true
-        }
-        if modifiers.isEmpty, editingTextView == nil {
-            // While recording, Space is the pause/resume control; playback
-            // only gets Space when the recorder is idle.
-            switch recorder.state {
-            case .recording:
-                if case .replacementTake? = recorder.sessionTarget { return true }
-                Task { await toggleRecordingPause() }
-                return true
-            case .paused:
-                Task { await toggleRecordingPause() }
-                return true
-            case .finalizing:
-                return false
-            case .idle:
-                if player.url != nil {
-                    player.togglePlayPause()
-                    return true
-                }
-            }
+        // Plain Up/Down remain native list navigation. When the middle split
+        // column is collapsed its List responder is absent, so preserve the
+        // existing equivalent selection fallback without making it remappable.
+        if (keyCode == upArrowKeyCode || keyCode == downArrowKeyCode),
+           modifiers.isEmpty, !editorOwnsText, middleColumnIsCollapsed {
+            return moveMiddleSelection(by: keyCode == downArrowKeyCode ? 1 : -1)
         }
         return false
+    }
+
+    /// Testable edge of the app-local monitor. Preferences are read live on
+    /// every event, so remapping, clearing, conflict changes, and capture
+    /// ownership take effect without reinstalling the monitor or relaunching.
+    func appShortcutAction(
+        forKeyCode keyCode: UInt16,
+        modifiers: ShortcutModifiers,
+        editableTextHasFocus: Bool
+    ) -> AppShortcutAction? {
+        AppShortcutMatcher.action(
+            forKeyCode: keyCode,
+            modifiers: modifiers,
+            preferences: appShortcutPreferences,
+            globalBindings: assignedGlobalShortcutBindings,
+            editableTextHasFocus: editableTextHasFocus,
+            captureOwnsInput: shortcutCaptureOwnsInput
+        )
     }
 
     /// Sheets, alerts, SwiftUI popovers, and auxiliary windows own their first
@@ -1247,7 +1807,7 @@ final class AppModel {
         guard !destinations.isEmpty else { return false }
         let currentIndex = sidebarSelection.flatMap { destinations.firstIndex(of: $0) } ?? 0
         let nextIndex = min(destinations.count - 1, max(0, currentIndex + offset))
-        sidebarSelection = destinations[nextIndex]
+        requestSidebarSelection(destinations[nextIndex])
         return true
     }
 
@@ -1270,7 +1830,7 @@ final class AppModel {
                 selectedID: selectedEntryID,
                 offset: offset
             ) else { return false }
-            selectedEntryID = nextID
+            requestEntrySelection(nextID)
             return true
 
         case .none:
@@ -1310,6 +1870,14 @@ final class AppModel {
         case .finalizing:
             break
         }
+    }
+
+    func showGlobalIndicatorManually() {
+        isGlobalIndicatorManuallyPresented = true
+    }
+
+    func dismissGlobalIndicatorManually() {
+        isGlobalIndicatorManuallyPresented = false
     }
 
     func performRecordingCommand(_ command: RecordingCommand) async {
@@ -1433,6 +2001,15 @@ final class AppModel {
     /// but does not require the Start shortcut itself to be registered.
     var menuBarRecordingPresentationState: GlobalRecordingPresentationState {
         recordingPresentationState(requiresRegisteredShortcut: false)
+    }
+
+    /// A manually presented indicator stays meaningful when global hotkeys
+    /// are disabled, so manual presentation drops the registered-shortcut
+    /// requirement.
+    var globalIndicatorPresentationState: GlobalRecordingPresentationState {
+        recordingPresentationState(
+            requiresRegisteredShortcut: !isGlobalIndicatorManuallyPresented
+        )
     }
 
     private func recordingPresentationState(
@@ -1874,7 +2451,7 @@ final class AppModel {
             replacementTakeWaveformID = nil
             replacementPreviewGeneration = nil
             replacementPreviewTakeID = nil
-            await refresh { self.selectedEntryID = session.entryRelativePath }
+            if selectedEntryID == session.entryRelativePath { await refresh() }
         } catch {
             errorMessage = "The replacement was not installed. Your current audio and complete takes are safe: \(error.localizedDescription)"
         }
@@ -1997,7 +2574,7 @@ final class AppModel {
                     entryRelativePath: relPath, source: TranscriptionSeam.Source.extended.rawValue
                 )
                 recorder.completeExtensionWorkflow()
-                await refresh { self.selectedEntryID = relPath }
+                _ = await refreshSelectingEntry(relPath)
                 return true
             } catch {
                 recorder.completeExtensionWorkflow(error: error)
@@ -2012,7 +2589,7 @@ final class AppModel {
         // Enqueue before the rescan so the entry's first selected frame
         // already carries its "waiting to transcribe" status row.
         TranscriptionSeam.audioEntryReady(entryRelativePath: relPath, source: .recorded)
-        await refresh { self.selectedEntryID = relPath }
+        _ = await refreshSelectingEntry(relPath)
         return true
     }
 
@@ -2042,7 +2619,7 @@ final class AppModel {
                 errorMessage = "The recording was discarded, but its empty folder could not be removed: \(error.localizedDescription)"
             }
         case .extensionOf:
-            await refresh { self.selectedEntryID = cancelled.entryRelativePath }
+            if selectedEntryID == cancelled.entryRelativePath { await refresh() }
             restoreCanonicalPlayback(for: cancelled.entryRelativePath)
         case .replacementTake:
             if var session = replacementSession,
@@ -2085,7 +2662,7 @@ final class AppModel {
             extensionRecoveries.removeAll { $0.id == recovery.id }
             isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
             audioRevision &+= 1
-            await refresh { self.selectedEntryID = recovery.entryRelativePath }
+            _ = await refreshSelectingEntry(recovery.entryRelativePath)
         } catch {
             errorMessage = "The extension could not be finished. Its segment remains recoverable: \(error.localizedDescription)"
         }
@@ -2105,7 +2682,7 @@ final class AppModel {
             )
             extensionRecoveries.removeAll { $0.id == recovery.id }
             isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
-            await refresh { self.selectedEntryID = newPath }
+            _ = await refreshSelectingEntry(newPath)
         } catch {
             errorMessage = "The extension segment could not be saved as a new entry: \(error.localizedDescription)"
         }
@@ -2191,7 +2768,14 @@ final class AppModel {
             await refresh {
                 self.transcriptRevision += 1
                 if self.selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
-                    self.selectedEntryID = outcome.entryRelativePath
+                    if self.editorLifecycleCoordinator.remapActiveDocument(
+                        expectedOldPath: originalPath,
+                        to: outcome.entryRelativePath
+                    ) {
+                        self.selectedEntryID = outcome.entryRelativePath
+                    } else {
+                        self.errorMessage = "The note was retitled, but the open editor could not be rebound safely. Reopen it before editing."
+                    }
                 }
             }
         }
@@ -2217,6 +2801,8 @@ final class AppModel {
     /// rest of the batch; they're reported together at the end.
     func importFiles(_ urls: [URL]) async {
         guard let service else { return }
+        let intent = beginSelectionIntent()
+        guard await prepareSelectionIntent(intent, destination: nil) else { return }
         let folder = newEntryTargetFolder
         var failures: [String] = []
         var lastImported: RelativePath?
@@ -2235,7 +2821,9 @@ final class AppModel {
         }
         await refresh()
         refreshVaultSearchIfVisible()
-        if let lastImported { selectedEntryID = lastImported }
+        if let lastImported, selectionIntentIsCurrent(intent) {
+            selectedEntryID = lastImported
+        }
         if !failures.isEmpty {
             let imported = urls.count - failures.count
             errorMessage = (imported > 0 ? "\(imported) of \(urls.count) files were imported. " : "")
@@ -2381,11 +2969,11 @@ final class AppModel {
                 source: outcome.operation.transcriptionSource,
                 isRetranscribe: true
             )
-            await refresh { self.selectedEntryID = path }
+            if selectedEntryID == path { await refresh() }
             refreshVaultSearchIfVisible()
         } catch {
             errorMessage = "The clip could not be \(direction == .undo ? "undone" : "redone"): \(error.localizedDescription)"
-            await refresh { self.selectedEntryID = path }
+            if selectedEntryID == path { await refresh() }
         }
     }
 
@@ -2394,8 +2982,25 @@ final class AppModel {
     /// Applies speaker renames (machine id → display name; nil/empty removes)
     /// and reloads the open transcript so the new labels render everywhere.
     func renameSpeakers(_ names: [String: String?], for entry: Entry) async {
+        if selectedEntryID == entry.relativePath {
+            guard await editorLifecycleCoordinator.prepare(for: .externalReload) else { return }
+        }
         await perform("renameSpeakers [\(entry.relativePath)]") { service in
             try await service.saveSpeakerNames(names, atEntryPath: entry.relativePath)
+            await MainActor.run { self.transcriptRevision += 1 }
+        }
+    }
+
+    /// Changes only the presentation preference for cached speaker ids. The
+    /// Original JSON is never rewritten and no transcription work is queued.
+    func setSpeakerDetectionEnabled(_ enabled: Bool, for entry: Entry) async {
+        if selectedEntryID == entry.relativePath {
+            guard await editorLifecycleCoordinator.prepare(for: .externalReload) else { return }
+        }
+        await perform("setSpeakerDetectionEnabled [\(entry.relativePath)] = \(enabled)") { service in
+            try await service.setSpeakerDetectionEnabled(
+                enabled, atEntryPath: entry.relativePath
+            )
             await MainActor.run { self.transcriptRevision += 1 }
         }
     }
@@ -2553,7 +3158,11 @@ final class AppModel {
     }
 
     func readTranscript(for entry: Entry) async -> FrontmatterDocument? {
-        await service?.readTranscript(atEntryPath: entry.relativePath)
+        await readTranscript(atEntryPath: entry.relativePath)
+    }
+
+    func readTranscript(atEntryPath entryPath: RelativePath) async -> FrontmatterDocument? {
+        await service?.readTranscript(atEntryPath: entryPath)
     }
 
     func readTranscriptContent(for entry: Entry) async -> EntryTranscriptContent? {
@@ -2583,6 +3192,49 @@ final class AppModel {
             await refresh()
             refreshVaultSearchIfVisible()
             return saved
+        } catch {
+            errorMessage = "Could not save the transcript: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func compareAndSaveTranscriptBody(
+        _ body: String,
+        expectedRevision: EditorBodyRevision,
+        markHandEdited: Bool,
+        clearHandEdited: Bool = false,
+        for entry: Entry
+    ) async -> TranscriptBodySaveResult? {
+        await compareAndSaveTranscriptBody(
+            body,
+            expectedRevision: expectedRevision,
+            markHandEdited: markHandEdited,
+            clearHandEdited: clearHandEdited,
+            atEntryPath: entry.relativePath
+        )
+    }
+
+    func compareAndSaveTranscriptBody(
+        _ body: String,
+        expectedRevision: EditorBodyRevision,
+        markHandEdited: Bool,
+        clearHandEdited: Bool = false,
+        atEntryPath entryPath: RelativePath
+    ) async -> TranscriptBodySaveResult? {
+        guard let service else { return nil }
+        do {
+            let result = try await service.compareAndSaveTranscriptBody(
+                body,
+                expectedRevision: expectedRevision,
+                markHandEdited: markHandEdited,
+                clearHandEdited: clearHandEdited,
+                atEntryPath: entryPath
+            )
+            if case .saved = result {
+                await refresh()
+                refreshVaultSearchIfVisible()
+            }
+            return result
         } catch {
             errorMessage = "Could not save the transcript: \(error.localizedDescription)"
             return nil
