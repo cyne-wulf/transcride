@@ -48,6 +48,10 @@ actor VaultService {
     }
 
     func recoverInterruptedRecordings() async -> InterruptedRecordingRecoverySummary {
+        // Entries staged by an import/duplicate that never finished are
+        // invisible to the library; clear them out at launch so they cannot
+        // accumulate on disk.
+        EntryStaging.sweep(inVault: rootURL)
         let summary = await InterruptedRecordingRecovery.recoverAll(inVault: rootURL)
         if !summary.recovered.isEmpty {
             synchronizeSearchIndex(relativePaths: summary.recovered.map(\.entryRelativePath))
@@ -72,6 +76,10 @@ actor VaultService {
         let segmentURL = entryURL.appending(path: segmentName)
         let segmentDuration = try await AudioImportFormat.probeDuration(of: segmentURL)
         var session = recovery.session
+        // The manifest was found *inside* this folder, so the folder is
+        // authoritative: a rename or move since the crash left the stored path
+        // stale, and trusting it would dead-end every retry on `sourceChanged`.
+        session.target.entryRelativePath = recovery.entryRelativePath
         session.phase = .segmentReady
         session.segmentDuration = segmentDuration
         session.failureMessage = nil
@@ -96,25 +104,26 @@ actor VaultService {
         let segmentURL = sourceEntryURL.appending(path: segmentName)
         let duration = try await AudioImportFormat.probeDuration(of: segmentURL)
         let parent = recovery.entryRelativePath.parentRelativePath
-        let newPath = try EntryCreator(vaultRoot: rootURL).createEntryFolder(
-            inFolder: parent, date: .now, slug: "recovered-extension"
-        )
-        let newEntryURL = rootURL.appendingRelativePath(newPath)
+        // Build the whole entry out of sight and reveal it with one rename:
+        // a termination mid-recovery must not leave a phantom entry behind.
+        let date = Date.now
+        let staging = try EntryStaging(vaultRoot: rootURL)
+        let newPath: RelativePath
         do {
             let extensionName = AudioImportFormat.normalizedExtension(of: segmentName)
             let audioName = extensionName == "m4a" ? "audio.m4a" : "audio.caf"
-            let stagedURL = newEntryURL.appending(path: ".recovered-segment-\(audioName)")
-            try FileManager.default.copyItem(at: segmentURL, to: stagedURL)
-            let waveform = try await WaveformGenerator.generate(fromAudioAt: stagedURL)
+            let audioURL = staging.url.appending(path: audioName)
+            try FileManager.default.copyItem(at: segmentURL, to: audioURL)
+            let waveform = try await WaveformGenerator.generate(fromAudioAt: audioURL)
             try EntryCreator.writeRecordingStub(
-                entryURL: newEntryURL, created: .now, duration: duration
+                entryURL: staging.url, created: date, duration: duration
             )
-            try FileManager.default.moveItem(
-                at: stagedURL, to: newEntryURL.appending(path: audioName)
+            try waveform.write(to: WaveformData.url(inEntry: staging.url))
+            newPath = try staging.commit(
+                inFolder: parent, date: date, slug: "recovered-extension"
             )
-            try waveform.write(to: WaveformData.url(inEntry: newEntryURL))
         } catch {
-            try? FileManager.default.removeItem(at: newEntryURL)
+            staging.discard()
             throw error
         }
         RecordingExtensionRecovery.removeArtifacts(in: sourceEntryURL)
@@ -137,11 +146,17 @@ actor VaultService {
         guard let audioName = VaultScanner.audioFile(in: names) else {
             throw VaultError.notFound(recovery.entryRelativePath.appendingComponent("audio"))
         }
-        let trashItems = try trash.items()
+        // The staged wrapper's sidecar recorded the entry path as it was when
+        // the swap started. Prefer an exact match, but fall back to the
+        // entry's stable identity so a rename since then cannot strand a swap
+        // that has already happened on disk.
+        let trashItems = try trash.items().filter { $0.kind == .preExtensionAudio }
         guard let staged = trashItems.first(where: {
-            $0.kind == .preExtensionAudio
-                && $0.originalPath == recovery.entryRelativePath
-        }) else {
+            $0.originalPath == recovery.entryRelativePath
+        }) ?? trashItems
+            .filter({ EntryIdentity.sameEntry($0.originalPath, recovery.entryRelativePath) })
+            .max(by: { $0.deletedAt < $1.deletedAt })
+        else {
             throw RecordingExtensionError.sourceChanged
         }
         let audioURL = entryURL.appending(path: audioName)
@@ -398,18 +413,11 @@ actor VaultService {
     /// byte-identical, so it can never fork the entry, and the search index
     /// (title + content only) needs no re-sync.
     func setFavorite(_ favorite: Bool, atEntryPath relPath: RelativePath) throws {
-        let entryURL = rootURL.appendingRelativePath(relPath)
-        let transcriptURL = TranscriptFile.url(inEntry: entryURL)
-            ?? entryURL.appending(path: TranscriptFile.defaultName)
-        var doc: FrontmatterDocument
-        if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
-            doc = FrontmatterDocument.parse(text)
-        } else {
-            doc = FrontmatterDocument(fields: [], body: "")
-            doc.created = EntryFolderName(parsing: relPath.lastComponent)?.date
+        try EntryFrontmatter.update(
+            inEntry: rootURL.appendingRelativePath(relPath), createIfMissing: favorite
+        ) { doc in
+            doc.favorite = favorite
         }
-        doc.favorite = favorite
-        try AtomicFile.write(doc.serialized(), to: transcriptURL)
     }
 
     /// Per-entry silence source. Re-read and atomically rewrite only the
@@ -810,9 +818,20 @@ actor VaultService {
             guard let data = try? Data(contentsOf: manifest),
                   var session = try? JSONDecoder().decode(
                     ReplacementTakeSession.self, from: data
-                  ),
-                  session.entryRelativePath == entry.relativePath
+                  )
             else { continue }
+            if session.entryRelativePath != entry.relativePath {
+                // The manifest lives inside this entry, so the folder is
+                // authoritative: the entry was renamed or moved (an in-app
+                // rename rewrites the slug too) after the session was written.
+                // Skipping it would strand the takes forever; every
+                // destructive step downstream still re-validates the source
+                // audio and the frame-locked timeline before touching it.
+                session.entryRelativePath = entry.relativePath
+                // Best effort — an unwritable manifest must not strand takes
+                // that the in-memory session can still reach.
+                try? saveReplacementSession(session)
+            }
             if session.phase == .swapping || session.phase == .retranscribing,
                let selectedID = session.selectedTakeID,
                AudioReplacementStore.loadRecipe(in: entryURL)?.sources

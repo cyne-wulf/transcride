@@ -25,6 +25,30 @@ extension URL {
     }
 }
 
+/// The part of an entry's location that never changes.
+///
+/// Slugs are rewritten on rename and the parent folder changes on move, but the
+/// `transcride-<timestamp>` prefix is the entry's permanent identity. Recovery
+/// records (replacement sessions, extension manifests, trash sidecars) store a
+/// path at the moment they are written; matching them back to an entry by
+/// string equality strands them the first time the user renames or moves it.
+enum EntryIdentity {
+    /// Timestamp identity of an entry path; nil when the path does not name an
+    /// entry folder.
+    static func of(_ path: RelativePath) -> String? {
+        EntryFolderName(parsing: path.lastComponent)?.timestamp
+    }
+
+    /// Whether two (possibly stale) paths name the same entry. Callers should
+    /// still prefer an exact path match when one is available: two entries
+    /// created in the same second in different folders share an identity.
+    static func sameEntry(_ lhs: RelativePath, _ rhs: RelativePath) -> Bool {
+        if lhs == rhs { return true }
+        guard let left = of(lhs), let right = of(rhs) else { return false }
+        return left == right
+    }
+}
+
 /// One entry (a `transcride-<timestamp>` folder) as shown in the library.
 struct Entry: Identifiable, Hashable, Sendable {
     var relativePath: RelativePath
@@ -125,6 +149,12 @@ enum VaultError: LocalizedError, Equatable {
     case invalidName(String)
     case alreadyExists(String)
     case notFound(String)
+    /// A transcript is on disk but could not be read. Raised instead of
+    /// replacing it with a stub — see `EntryFrontmatter`.
+    case unreadableTranscript(String)
+    /// A metadata-only frontmatter update tried to change the markdown body.
+    /// Refused so a caller's bug can never drop a hand-edited note.
+    case metadataWriteWouldReplaceBody(String)
 
     var errorDescription: String? {
         switch self {
@@ -134,6 +164,10 @@ enum VaultError: LocalizedError, Equatable {
             return "“\(name)” already exists."
         case .notFound(let path):
             return "“\(path)” could not be found."
+        case .unreadableTranscript(let name):
+            return "“\(name)” could not be read, so it was left unchanged."
+        case .metadataWriteWouldReplaceBody(let name):
+            return "“\(name)” was left unchanged: the update would have rewritten the note."
         }
     }
 }

@@ -115,4 +115,80 @@ struct VaultOperationsMoveTests {
             try ops.moveItem(at: "Journal/absent", toFolder: "Projects")
         }
     }
+
+    // MARK: - Rename over an unreadable transcript (D5)
+
+    @Test func renameRefusesToStubOverAnUnreadableTranscript() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entry = root.appending(path: "Journal/\(entryName)")
+        let bytes = Data([0x2D, 0x2D, 0x2D, 0x0A, 0xFF, 0xFE, 0x0A])
+        try bytes.write(to: entry.appending(path: "Field Notes.md"))
+
+        #expect(throws: VaultError.unreadableTranscript("Field Notes.md")) {
+            try VaultOperations(vaultRoot: root)
+                .renameEntry(at: "Journal/\(entryName)", toTitle: "New Title")
+        }
+        // Transcript, file name, and folder name are all untouched.
+        #expect(try Data(contentsOf: entry.appending(path: "Field Notes.md")) == bytes)
+        #expect(FileManager.default.fileExists(atPath: entry.path))
+    }
+
+    @Test func renameOfATranscriptlessEntryCreatesTheTitledFile() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bare = "Journal/transcride-2026-07-03T09-00-00"
+        try FileManager.default.createDirectory(
+            at: root.appendingRelativePath(bare), withIntermediateDirectories: true
+        )
+
+        let newPath = try VaultOperations(vaultRoot: root)
+            .renameEntry(at: bare, toTitle: "Fresh Start")
+        #expect(newPath == "Journal/transcride-2026-07-03T09-00-00-fresh-start")
+        let doc = FrontmatterDocument.parse(try String(
+            contentsOf: root.appendingRelativePath(newPath).appending(path: "Fresh Start.md"),
+            encoding: .utf8
+        ))
+        #expect(doc.title == "Fresh Start")
+    }
+}
+
+/// Recovery records store a path when they are written; renames and moves must
+/// not strand them (R7).
+@Suite("Entry identity across rename and move")
+struct EntryIdentityTests {
+    @Test func aSlugChangeKeepsTheIdentity() {
+        #expect(EntryIdentity.sameEntry(
+            "Journal/transcride-2026-07-01T10-00-00",
+            "Journal/transcride-2026-07-01T10-00-00-renamed-twice"
+        ))
+    }
+
+    @Test func aMoveToAnotherFolderKeepsTheIdentity() {
+        #expect(EntryIdentity.sameEntry(
+            "Journal/transcride-2026-07-01T10-00-00-notes",
+            "Archive/2026/transcride-2026-07-01T10-00-00-notes"
+        ))
+    }
+
+    @Test func differentTimestampsAreDifferentEntries() {
+        #expect(!EntryIdentity.sameEntry(
+            "transcride-2026-07-01T10-00-00-notes",
+            "transcride-2026-07-01T10-00-01-notes"
+        ))
+    }
+
+    @Test func nonEntryPathsOnlyMatchThemselves() {
+        #expect(EntryIdentity.of("Journal/Ideas") == nil)
+        #expect(EntryIdentity.sameEntry("Journal/Ideas", "Journal/Ideas"))
+        #expect(!EntryIdentity.sameEntry("Journal/Ideas", "Journal/Other"))
+        #expect(!EntryIdentity.sameEntry(
+            "Journal/Ideas", "transcride-2026-07-01T10-00-00"
+        ))
+    }
+
+    @Test func identityIsTheFolderTimestamp() {
+        #expect(EntryIdentity.of("Journal/transcride-2026-07-01T10-00-00-notes")
+            == "2026-07-01T10-00-00")
+    }
 }

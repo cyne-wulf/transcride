@@ -61,4 +61,193 @@ struct AtomicFileTests {
         try AtomicFile.write(data, to: target)
         #expect(try Data(contentsOf: target) == data)
     }
+
+    // MARK: - Durability (D9)
+
+    @Test func fullDurabilityRoundTripsAndLeavesNoTemps() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let target = dir.appending(path: "note.md")
+        try AtomicFile.write("first", to: target, durability: .full)
+        try AtomicFile.write("second, longer", to: target, durability: .full)
+        #expect(try String(contentsOf: target, encoding: .utf8) == "second, longer")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["note.md"])
+    }
+
+    @Test func fullDurabilityFailsCleanlyWhenDirectoryMissing() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let target = dir.appending(path: "missing-subdir/note.md")
+        #expect(throws: (any Error).self) {
+            try AtomicFile.write("data", to: target, durability: .full)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+    }
+}
+
+/// The read-else-stub trap: a transcript that exists but cannot be read must
+/// never be replaced by a fabricated one (D5).
+@Suite("Entry frontmatter updates")
+struct EntryFrontmatterTests {
+    /// Bytes that are not valid UTF-8, so the file exists but cannot be read.
+    private static let undecodableBytes = Data([0x2D, 0x2D, 0x2D, 0x0A, 0xFF, 0xFE, 0x0A])
+
+    private func makeEntry(withTranscript contents: String? = nil) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-fm-\(UUID().uuidString)", directoryHint: .isDirectory)
+            .appending(path: "transcride-2026-07-01T10-00-00-notes", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        if let contents {
+            try AtomicFile.write(contents, to: url.appending(path: "transcript.md"))
+        }
+        return url
+    }
+
+    private func remove(_ entryURL: URL) {
+        try? FileManager.default.removeItem(at: entryURL.deletingLastPathComponent())
+    }
+
+    @Test func readParsesAnExistingTranscript() throws {
+        let entry = try makeEntry(withTranscript: "---\ntitle: \"Notes\"\n---\nBody.\n")
+        defer { remove(entry) }
+
+        let slot = try EntryFrontmatter.read(inEntry: entry)
+        #expect(slot.url.lastPathComponent == "transcript.md")
+        #expect(slot.document?.title == "Notes")
+    }
+
+    @Test func readReportsMissingWhenTheEntryHasNoMarkdown() throws {
+        let entry = try makeEntry()
+        defer { remove(entry) }
+
+        let slot = try EntryFrontmatter.read(inEntry: entry)
+        #expect(slot.document == nil)
+        #expect(slot.url.lastPathComponent == "transcript.md")
+    }
+
+    @Test func readThrowsWhenTheEntryFolderIsGone() throws {
+        let entry = try makeEntry()
+        remove(entry)
+
+        #expect(throws: VaultError.notFound("transcride-2026-07-01T10-00-00-notes")) {
+            try EntryFrontmatter.read(inEntry: entry)
+        }
+    }
+
+    @Test func readThrowsForAnUndecodableTranscript() throws {
+        let entry = try makeEntry()
+        defer { remove(entry) }
+        try Self.undecodableBytes.write(to: entry.appending(path: "transcript.md"))
+
+        #expect(throws: VaultError.unreadableTranscript("transcript.md")) {
+            try EntryFrontmatter.read(inEntry: entry)
+        }
+    }
+
+    /// The heart of D5: the toggle fails, the note survives byte-for-byte.
+    @Test func updateNeverStubsOverAnUnreadableTranscript() throws {
+        let entry = try makeEntry()
+        defer { remove(entry) }
+        let transcript = entry.appending(path: "transcript.md")
+        try Self.undecodableBytes.write(to: transcript)
+
+        #expect(throws: VaultError.unreadableTranscript("transcript.md")) {
+            try EntryFrontmatter.update(inEntry: entry) { $0.favorite = true }
+        }
+        #expect(try Data(contentsOf: transcript) == Self.undecodableBytes)
+    }
+
+    @Test func updateCreatesASeededStubWhenTheTranscriptIsAbsent() throws {
+        let entry = try makeEntry()
+        defer { remove(entry) }
+
+        let result = try EntryFrontmatter.update(inEntry: entry) { $0.favorite = true }
+        #expect(result.wrote)
+        #expect(result.document.favorite)
+        // `created` is seeded from the entry folder's timestamp.
+        #expect(result.document.created == EntryFolderName(
+            parsing: "transcride-2026-07-01T10-00-00-notes"
+        )?.date)
+        let doc = FrontmatterDocument.parse(
+            try String(contentsOf: entry.appending(path: "transcript.md"), encoding: .utf8)
+        )
+        #expect(doc.favorite)
+    }
+
+    @Test func updateWritesNothingWhenTheTranscriptIsAbsentAndCreationIsOff() throws {
+        let entry = try makeEntry()
+        defer { remove(entry) }
+
+        let result = try EntryFrontmatter.update(inEntry: entry, createIfMissing: false) {
+            $0.favorite = true
+        }
+        #expect(!result.wrote)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: entry.path).isEmpty)
+    }
+
+    @Test func updateSkipsTheWriteWhenNothingChanged() throws {
+        let contents = "---\ntitle: \"Notes\"\nfavorite: true\n---\nBody.\n"
+        let entry = try makeEntry(withTranscript: contents)
+        defer { remove(entry) }
+        let transcript = entry.appending(path: "transcript.md")
+        let before = try FileManager.default.attributesOfItem(atPath: transcript.path)[.modificationDate] as? Date
+
+        let result = try EntryFrontmatter.update(inEntry: entry) { $0.favorite = true }
+        #expect(!result.wrote)
+        #expect(result.document.favorite)
+        #expect(try String(contentsOf: transcript, encoding: .utf8) == contents)
+        let after = try FileManager.default.attributesOfItem(atPath: transcript.path)[.modificationDate] as? Date
+        #expect(before == after)
+    }
+
+    @Test func updatePreservesUnknownFieldsAndBody() throws {
+        let entry = try makeEntry(
+            withTranscript: "---\ntitle: \"Notes\"\nobsidian_tag: keep-me\n---\nBody text.\n"
+        )
+        defer { remove(entry) }
+
+        try EntryFrontmatter.update(inEntry: entry) { $0.favorite = true }
+        let text = try String(
+            contentsOf: entry.appending(path: "transcript.md"), encoding: .utf8
+        )
+        #expect(text.contains("obsidian_tag: keep-me"))
+        #expect(text.contains("Body text."))
+        #expect(FrontmatterDocument.parse(text).favorite)
+    }
+
+    /// A metadata write that would rewrite the note is a caller bug, refused
+    /// before it reaches the disk.
+    @Test func updateRefusesToReplaceTheBody() throws {
+        let contents = "---\ntitle: \"Notes\"\n---\nOriginal body.\n"
+        let entry = try makeEntry(withTranscript: contents)
+        defer { remove(entry) }
+
+        #expect(throws: VaultError.metadataWriteWouldReplaceBody("transcript.md")) {
+            try EntryFrontmatter.update(inEntry: entry) { doc in
+                doc.favorite = true
+                doc.body = "Clobbered."
+            }
+        }
+        #expect(try String(
+            contentsOf: entry.appending(path: "transcript.md"), encoding: .utf8
+        ) == contents)
+    }
+
+    @Test func updateFindsARetitledTranscriptFile() throws {
+        let entry = try makeEntry()
+        defer { remove(entry) }
+        try AtomicFile.write(
+            "---\ntitle: \"Field Notes\"\n---\nBody.\n",
+            to: entry.appending(path: "Field Notes.md")
+        )
+
+        let result = try EntryFrontmatter.update(inEntry: entry) { $0.favorite = true }
+        #expect(result.url.lastPathComponent == "Field Notes.md")
+        // No stub was created alongside it.
+        #expect(!FileManager.default.fileExists(
+            atPath: entry.appending(path: "transcript.md").path
+        ))
+    }
 }

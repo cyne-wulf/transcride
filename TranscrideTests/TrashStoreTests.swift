@@ -280,6 +280,111 @@ struct TrashStoreTests {
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "orphan-folder").path))
     }
 
+    // MARK: - Interrupted deletes (D5 / D10)
+
+    /// Bytes that are not valid UTF-8: the transcript exists but cannot be read.
+    private static let undecodableBytes = Data([0x2D, 0x2D, 0x2D, 0x0A, 0xFF, 0xFE, 0x0A])
+
+    @Test func deleteAudioRefusesToStubOverAnUnreadableTranscript() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        try Self.undecodableBytes.write(to: entryURL.appending(path: "transcript.md"))
+        let store = TrashStore(vaultRoot: root)
+
+        #expect(throws: VaultError.unreadableTranscript("transcript.md")) {
+            try store.trashEntryAudio(atEntryPath: entryRelPath)
+        }
+        // Nothing moved, nothing rewritten: the note is intact and so is the audio.
+        #expect(try Data(
+            contentsOf: entryURL.appending(path: "transcript.md")
+        ) == Self.undecodableBytes)
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "audio.m4a").path))
+        #expect(try store.items().isEmpty)
+    }
+
+    /// The flag is written before the move, so a delete that cannot proceed
+    /// must leave no trace of it.
+    @Test func deleteAudioWithNoAudioLeavesNoFlagBehind() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+
+        #expect(throws: VaultError.self) {
+            try store.trashEntryAudio(atEntryPath: entryRelPath)
+        }
+        #expect(!(try transcriptText(ofEntryAt: entryRelPath, inVault: root))
+            .contains("audio_deleted"))
+    }
+
+    /// Sidecars are written before their payload, so an interrupted delete can
+    /// leave one behind — and the next item must not inherit its origin.
+    @Test func anOrphanedSidecarDoesNotCaptureTheNextItemsName() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+        try FileManager.default.createDirectory(
+            at: store.trashDirectory, withIntermediateDirectories: true
+        )
+        let claimed = entryRelPath.lastComponent
+        try Data(#"{"deletedAt":"2020-01-01T00:00:00Z","originalPath":"Elsewhere/other"}"#.utf8)
+            .write(to: store.sidecarURL(forTrashedName: claimed))
+
+        let trashedName = try store.trashItem(atRelativePath: entryRelPath)
+        #expect(trashedName == "\(claimed)-2")
+        let info = try #require(store.readInfo(forTrashedName: trashedName))
+        #expect(info.originalPath == entryRelPath)
+    }
+
+    @Test func purgeRemovesSidecarsWhosePayloadNeverArrived() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TrashStore(vaultRoot: root)
+        let trashedName = try store.trashItem(atRelativePath: entryRelPath)
+        // A delete interrupted between the sidecar and the move.
+        try Data(#"{"deletedAt":"2020-01-01T00:00:00Z","originalPath":"Journal/ghost"}"#.utf8)
+            .write(to: store.sidecarURL(forTrashedName: "ghost"))
+
+        let purged = try store.purge(olderThanDays: 30, now: Date())
+        #expect(purged == 0)
+        #expect(!FileManager.default.fileExists(
+            atPath: store.sidecarURL(forTrashedName: "ghost").path
+        ))
+        // The real item and its sidecar are untouched.
+        #expect(try store.items().map(\.trashedName) == [trashedName])
+        #expect(store.readInfo(forTrashedName: trashedName) != nil)
+    }
+
+    /// A version wrapper stages the entry's current audio out before restoring
+    /// its own; an empty one (delete interrupted before the move) would take
+    /// the audio and give nothing back.
+    @Test func restoringAnEmptyVersionWrapperIsRefused() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addAudio(toEntryAt: entryRelPath, inVault: root)
+        let store = TrashStore(vaultRoot: root)
+
+        let trashedName = "original-audio-\(entryRelPath.lastComponent)"
+        try FileManager.default.createDirectory(
+            at: store.trashDirectory.appending(path: trashedName),
+            withIntermediateDirectories: true
+        )
+        let info = """
+        {"deletedAt":"2026-07-02T10:00:00Z","kind":"preTrimAudio","originalPath":"\(entryRelPath)"}
+        """
+        try Data(info.utf8).write(to: store.sidecarURL(forTrashedName: trashedName))
+
+        let item = try #require(try store.items().first(where: { $0.trashedName == trashedName }))
+        #expect(throws: VaultError.notFound(trashedName)) {
+            try store.restore(item)
+        }
+        // The entry kept its audio, and nothing was staged out to the trash.
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        #expect(FileManager.default.fileExists(atPath: entryURL.appending(path: "audio.m4a").path))
+        #expect(try store.items().count == 1)
+    }
+
     @Test func deleteAllPermanentlyEmptiesTheTrash() throws {
         let (root, entryRelPath) = try makeVault()
         defer { try? FileManager.default.removeItem(at: root) }

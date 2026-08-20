@@ -129,4 +129,60 @@ struct EntryDuplicationTests {
                 .duplicateEntry(at: "transcride-2099-01-01T00-00-00")
         }
     }
+
+    // MARK: - Staging (D11)
+
+    @Test func duplicateLeavesNothingStagedOnSuccess() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = try VaultOperations(vaultRoot: root)
+            .duplicateEntry(at: "Journal/transcride-2026-07-01T10-00-00-meeting-notes")
+        let staging = root.appending(path: EntryStaging.directoryName)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)
+    }
+
+    /// A copy that dies partway must not leave a phantom entry in the library.
+    @Test(.enabled(if: geteuid() != 0))
+    func duplicateLeavesNoEntryWhenACopyFails() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourcePath = "Journal/transcride-2026-07-01T10-00-00-meeting-notes"
+        let unreadable = root.appendingRelativePath(sourcePath).appending(path: "audio.m4a")
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0], ofItemAtPath: unreadable.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: unreadable.path
+            )
+        }
+
+        #expect(throws: (any Error).self) {
+            try VaultOperations(vaultRoot: root).duplicateEntry(at: sourcePath)
+        }
+        // Only the source entry exists, and nothing is left staged.
+        let journal = try FileManager.default.contentsOfDirectory(
+            atPath: root.appending(path: "Journal").path
+        )
+        #expect(journal == [sourcePath.lastComponent])
+        let staging = root.appending(path: EntryStaging.directoryName)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)
+    }
+
+    /// An unreadable transcript is still copied faithfully — the duplicate
+    /// just cannot be retitled, and is never stubbed over.
+    @Test func duplicateOfAnUnreadableTranscriptCopiesItVerbatim() throws {
+        let root = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourcePath = "transcride-2026-07-02T08-00-00"
+        let entry = root.appending(path: sourcePath)
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        let bytes = Data([0x2D, 0x2D, 0x2D, 0x0A, 0xFF, 0xFE, 0x0A])
+        try bytes.write(to: entry.appending(path: "transcript.md"))
+
+        let newPath = try VaultOperations(vaultRoot: root).duplicateEntry(at: sourcePath)
+        let copied = root.appendingRelativePath(newPath).appending(path: "transcript.md")
+        #expect(try Data(contentsOf: copied) == bytes)
+    }
 }

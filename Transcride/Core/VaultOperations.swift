@@ -53,22 +53,19 @@ struct VaultOperations: Sendable {
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespaces)
 
-        // 1. Title into the frontmatter of whichever markdown file the entry has.
-        let transcriptURL = TranscriptFile.url(inEntry: entryURL)
-            ?? entryURL.appending(path: TranscriptFile.defaultName)
-        var doc: FrontmatterDocument
-        if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
-            doc = FrontmatterDocument.parse(text)
-        } else {
-            doc = FrontmatterDocument(fields: [], body: "")
-            doc.created = folderName.date
+        // 1. Title into the frontmatter of whichever markdown file the entry
+        // has. A transcript that exists but cannot be read is never replaced
+        // by a stub: the rename fails and the file is left alone.
+        let updated = try EntryFrontmatter.update(inEntry: entryURL) { doc in
+            doc.title = title.isEmpty ? nil : title
         }
-        doc.title = title.isEmpty ? nil : title
-        try AtomicFile.write(doc.serialized(), to: transcriptURL)
+        let transcriptURL = updated.url
+        let doc = updated.document
 
         // 2. Rename the transcript file to match the title.
         let newFileName = TranscriptFile.fileName(forTitle: doc.title)
-        if newFileName != transcriptURL.lastPathComponent {
+        if newFileName != transcriptURL.lastPathComponent,
+           fm.fileExists(atPath: transcriptURL.path) {
             let newFileURL = entryURL.appending(path: newFileName)
             if !fm.fileExists(atPath: newFileURL.path) {
                 try fm.moveItem(at: transcriptURL, to: newFileURL)
@@ -108,10 +105,9 @@ struct VaultOperations: Sendable {
         let copyTitle = sourceTitle.map { $0 + " copy" }
 
         let slug = Slug.make(from: copyTitle ?? "")
-        let newRelPath = try EntryCreator(vaultRoot: vaultRoot).createEntryFolder(
-            inFolder: relPath.parentRelativePath, date: date, slug: slug.isEmpty ? nil : slug
-        )
-        let destURL = vaultRoot.appendingRelativePath(newRelPath)
+        // Copy into a hidden staging folder and reveal the finished entry with
+        // one rename, so a crash mid-copy leaves no half-made duplicate.
+        let staging = try EntryStaging(vaultRoot: vaultRoot)
         do {
             let names = try fm.contentsOfDirectory(atPath: sourceURL.path)
                 .filter {
@@ -120,29 +116,39 @@ struct VaultOperations: Sendable {
             for name in names {
                 try fm.copyItem(
                     at: sourceURL.appending(path: name),
-                    to: destURL.appending(path: name)
+                    to: staging.url.appending(path: name)
                 )
             }
-            if let transcriptURL = TranscriptFile.url(inEntry: destURL),
-               let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
-                var doc = FrontmatterDocument.parse(text)
-                if let copyTitle { doc.title = copyTitle }
-                doc.created = date
-                try AtomicFile.write(doc.serialized(), to: transcriptURL)
-                let newFileName = TranscriptFile.fileName(forTitle: doc.title)
-                if newFileName != transcriptURL.lastPathComponent {
-                    let newFileURL = destURL.appending(path: newFileName)
+            let updated: EntryFrontmatter.UpdateResult?
+            do {
+                updated = try EntryFrontmatter.update(
+                    inEntry: staging.url, createIfMissing: false
+                ) { doc in
+                    if let copyTitle { doc.title = copyTitle }
+                    doc.created = date
+                }
+            } catch VaultError.unreadableTranscript {
+                // The copy is byte-faithful either way; we simply cannot
+                // retitle a transcript we cannot read.
+                updated = nil
+            }
+            if let updated, updated.wrote {
+                let newFileName = TranscriptFile.fileName(forTitle: updated.document.title)
+                if newFileName != updated.url.lastPathComponent {
+                    let newFileURL = staging.url.appending(path: newFileName)
                     if !fm.fileExists(atPath: newFileURL.path) {
-                        try fm.moveItem(at: transcriptURL, to: newFileURL)
+                        try fm.moveItem(at: updated.url, to: newFileURL)
                     }
                 }
             }
+            return try staging.commit(
+                inFolder: relPath.parentRelativePath, date: date,
+                slug: slug.isEmpty ? nil : slug
+            )
         } catch {
-            // Failed mid-copy: remove the half-made duplicate.
-            try? fm.removeItem(at: destURL)
+            staging.discard()
             throw error
         }
-        return newRelPath
     }
 
     /// Moves an entry (or folder) into another folder. Returns the new path.

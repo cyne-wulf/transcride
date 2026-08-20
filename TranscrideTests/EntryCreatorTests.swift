@@ -85,6 +85,85 @@ struct EntryCreatorTests {
         #expect(entry.duration == 12.25)
     }
 
+    // MARK: - Staging (D11)
+
+    @Test func importLeavesNoPartialEntryWhenTheCopyFails() throws {
+        let root = try makeVaultRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let creator = EntryCreator(vaultRoot: root)
+
+        let missing = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-absent-\(UUID().uuidString).wav")
+        #expect(throws: (any Error).self) {
+            try creator.importFile(from: missing, toFolder: "", date: date, duration: 1)
+        }
+        // No phantom entry, and the staging folder was cleaned up.
+        let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        #expect(!names.contains { $0.hasPrefix(EntryFolderName.prefix) })
+        let staging = root.appending(path: EntryStaging.directoryName)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)
+    }
+
+    @Test func importLeavesNothingStagedOnSuccess() throws {
+        let root = try makeVaultRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceDir = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-src-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let sourceURL = sourceDir.appending(path: "Take One.wav")
+        try Data([0x01, 0x02]).write(to: sourceURL)
+
+        _ = try EntryCreator(vaultRoot: root).importFile(
+            from: sourceURL, toFolder: "Journal", date: date, duration: 3
+        )
+        let staging = root.appending(path: EntryStaging.directoryName)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)
+    }
+
+    /// Staged work is hidden, so a termination mid-import can never surface a
+    /// half-made entry in the library.
+    @Test func stagedWorkIsInvisibleToTheScanner() throws {
+        let root = try makeVaultRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let staging = try EntryStaging(vaultRoot: root)
+        try Data([0x00]).write(to: staging.url.appending(path: "audio.m4a"))
+
+        var scanner = VaultScanner()
+        #expect(scanner.scan(root: root).allEntries.isEmpty)
+
+        let relPath = try staging.commit(inFolder: "Journal", date: date, slug: "recovered")
+        #expect(relPath == "Journal/transcride-2026-07-08T10-00-00-recovered")
+        var afterScanner = VaultScanner()
+        #expect(afterScanner.scan(root: root).allEntries.count == 1)
+    }
+
+    @Test func stagingCommitAdvancesPastAnOccupiedName() throws {
+        let root = try makeVaultRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try EntryCreator(vaultRoot: root).createEntryFolder(inFolder: "", date: date)
+
+        let staging = try EntryStaging(vaultRoot: root)
+        let relPath = try staging.commit(inFolder: "", date: date)
+        #expect(relPath == "transcride-2026-07-08T10-00-01")
+    }
+
+    @Test func sweepRemovesAbandonedStagingFoldersOnly() throws {
+        let root = try makeVaultRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let fresh = try EntryStaging(vaultRoot: root)
+        let stale = try EntryStaging(vaultRoot: root)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: stale.url.path
+        )
+
+        EntryStaging.sweep(inVault: root)
+        #expect(FileManager.default.fileExists(atPath: fresh.url.path))
+        #expect(!FileManager.default.fileExists(atPath: stale.url.path))
+    }
+
     @Test func scannerPrefersCanonicalAudioAndIgnoresHiddenFiles() throws {
         let root = try makeVaultRoot()
         defer { try? FileManager.default.removeItem(at: root) }

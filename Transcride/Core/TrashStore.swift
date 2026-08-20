@@ -137,11 +137,19 @@ struct TrashStore: Sendable {
 
         let trashedName = availableName(for: relativePath.lastComponent)
         let destination = trashDirectory.appending(path: trashedName)
-        try fm.moveItem(at: sourceURL, to: destination)
 
+        // Sidecar first: it is what records where the item came from, and a
+        // crash between the two steps must not leave a payload that only
+        // Recently Deleted's fallback (restore to the vault root) can handle.
         let info = TrashInfo(originalPath: relativePath, deletedAt: deletedAt)
         let data = try Self.makeEncoder().encode(info)
         try AtomicFile.write(data, to: sidecarURL(forTrashedName: trashedName))
+        do {
+            try fm.moveItem(at: sourceURL, to: destination)
+        } catch {
+            try? fm.removeItem(at: sidecarURL(forTrashedName: trashedName))
+            throw error
+        }
         return trashedName
     }
 
@@ -151,11 +159,24 @@ struct TrashStore: Sendable {
     /// entry becomes a plain note. Returns the item's name in the trash.
     @discardableResult
     func trashEntryAudio(atEntryPath entryPath: RelativePath, deletedAt: Date = Date()) throws -> String {
-        let trashedName = try trashAudioFiles(
-            atEntryPath: entryPath, wrapperPrefix: "audio-", kind: .entryAudio, deletedAt: deletedAt
-        )
-        try setAudioDeletedFlag(true, inEntry: vaultRoot.appendingRelativePath(entryPath))
-        return trashedName
+        let entryURL = vaultRoot.appendingRelativePath(entryPath)
+        guard currentAudioFileName(in: entryURL) != nil else {
+            throw VaultError.notFound(entryPath.appendingComponent("audio"))
+        }
+        // Flag first. A crash between the two steps then leaves the flag set
+        // with the audio still present, which the library treats as "audio is
+        // there" (the disk is the source of truth) and a retry re-converges —
+        // whereas the reverse order loses the record of why the audio is gone.
+        try setAudioDeletedFlag(true, inEntry: entryURL)
+        do {
+            return try trashAudioFiles(
+                atEntryPath: entryPath, wrapperPrefix: "audio-",
+                kind: .entryAudio, deletedAt: deletedAt
+            )
+        } catch {
+            try? setAudioDeletedFlag(false, inEntry: entryURL)
+            throw error
+        }
     }
 
     /// Trim (AUD-3): stages the pre-trim audio and its now-stale waveform
@@ -225,10 +246,29 @@ struct TrashStore: Sendable {
         let trashedName = availableName(for: wrapperPrefix + entryPath.lastComponent)
         let wrapperURL = trashDirectory.appending(path: trashedName, directoryHint: .isDirectory)
         try fm.createDirectory(at: wrapperURL, withIntermediateDirectories: false)
-        try fm.moveItem(
-            at: entryURL.appending(path: audioName),
-            to: wrapperURL.appending(path: audioName)
-        )
+
+        // Sidecar before the files. A crash in between leaves an empty,
+        // correctly-typed wrapper (harmless, and refused by restore) instead
+        // of audio that Recently Deleted can only put back at the vault root.
+        let info = TrashInfo(originalPath: entryPath, deletedAt: deletedAt, kind: kind)
+        let data = try Self.makeEncoder().encode(info)
+        do {
+            try AtomicFile.write(data, to: sidecarURL(forTrashedName: trashedName))
+        } catch {
+            try? fm.removeItem(at: wrapperURL)
+            throw error
+        }
+
+        do {
+            try fm.moveItem(
+                at: entryURL.appending(path: audioName),
+                to: wrapperURL.appending(path: audioName)
+            )
+        } catch {
+            try? fm.removeItem(at: wrapperURL)
+            try? fm.removeItem(at: sidecarURL(forTrashedName: trashedName))
+            throw error
+        }
         let waveformURL = WaveformData.url(inEntry: entryURL)
         if fm.fileExists(atPath: waveformURL.path) {
             try? fm.moveItem(at: waveformURL, to: wrapperURL.appending(path: WaveformData.fileName))
@@ -246,10 +286,6 @@ struct TrashStore: Sendable {
                 )
             }
         }
-
-        let info = TrashInfo(originalPath: entryPath, deletedAt: deletedAt, kind: kind)
-        let data = try Self.makeEncoder().encode(info)
-        try AtomicFile.write(data, to: sidecarURL(forTrashedName: trashedName))
         return trashedName
     }
 
@@ -352,6 +388,13 @@ struct TrashStore: Sendable {
         let timelineVersion = item.kind == .audioVersion || item.kind == .preTrimAudio
             || item.kind == .preExtensionAudio || item.kind == .preCompressionAudio
             || item.kind == .preReplacementAudio || legacyAudioVersion
+        // A version swap stages the entry's current audio out before putting
+        // the wrapper's contents in. An empty wrapper (a delete interrupted
+        // between creating it and moving the files) would therefore take the
+        // entry's audio away and give nothing back: refuse instead.
+        if timelineVersion, currentAudioFileName(in: wrapperURL) == nil {
+            throw VaultError.notFound(item.trashedName)
+        }
         let stagedDerivativeName: String?
         if timelineVersion {
             let stagedKind: TrashItemKind = legacyAudioVersion ? .audioVersion : item.kind
@@ -411,7 +454,13 @@ struct TrashStore: Sendable {
                 ).write(to: entryURL)
             }
         }
-        try setAudioDeletedFlag(false, inEntry: entryURL)
+        do {
+            try setAudioDeletedFlag(false, inEntry: entryURL)
+        } catch VaultError.unreadableTranscript {
+            // The audio is already back in place. A flag we cannot read is
+            // advisory only — the library trusts the disk — so an unreadable
+            // transcript must not fail an otherwise complete restore.
+        }
         if item.kind == .audioVersion || item.kind == .preTrimAudio
             || item.kind == .preExtensionAudio || item.kind == .preCompressionAudio
             || item.kind == .preReplacementAudio
@@ -454,7 +503,23 @@ struct TrashStore: Sendable {
             try deletePermanently(item)
             purged += 1
         }
+        removeOrphanedSidecars()
         return purged
+    }
+
+    /// Drops sidecars whose payload never arrived (a delete interrupted
+    /// between the two writes). Purge runs at launch, when no trash operation
+    /// is in flight — they are all synchronous on the vault actor. The count
+    /// is deliberately not reported: nothing the user deleted was purged.
+    private func removeOrphanedSidecars() {
+        guard let contents = try? fm.contentsOfDirectory(atPath: trashDirectory.path) else { return }
+        for name in contents where name.hasSuffix(Self.sidecarSuffix) {
+            let payload = String(name.dropLast(Self.sidecarSuffix.count))
+            guard !payload.isEmpty,
+                  !fm.fileExists(atPath: trashDirectory.appending(path: payload).path)
+            else { continue }
+            try? fm.removeItem(at: trashDirectory.appending(path: name))
+        }
     }
 
     // MARK: - Helpers
@@ -468,11 +533,15 @@ struct TrashStore: Sendable {
         return try? Self.makeDecoder().decode(TrashInfo.self, from: data)
     }
 
-    /// First non-colliding name inside the trash for an incoming item.
+    /// First non-colliding name inside the trash for an incoming item. A
+    /// leftover sidecar reserves its name too: sidecars are now written before
+    /// their payload, so an interrupted delete can leave one behind, and a
+    /// later item must never inherit another item's origin record.
     func availableName(for name: String) -> String {
         var candidate = name
         var counter = 2
-        while fm.fileExists(atPath: trashDirectory.appending(path: candidate).path) {
+        while fm.fileExists(atPath: trashDirectory.appending(path: candidate).path)
+            || fm.fileExists(atPath: sidecarURL(forTrashedName: candidate).path) {
             candidate = "\(name)-\(counter)"
             counter += 1
         }
@@ -500,29 +569,18 @@ struct TrashStore: Sendable {
     }
 
     private func entryAudioIsMarkedDeleted(_ entryURL: URL) -> Bool {
-        guard let transcriptURL = TranscriptFile.url(inEntry: entryURL),
-              let text = try? String(contentsOf: transcriptURL, encoding: .utf8) else {
-            return false
-        }
-        return FrontmatterDocument.parse(text).audioDeleted
+        (try? EntryFrontmatter.read(inEntry: entryURL))?.document?.audioDeleted ?? false
     }
 
     /// Writes the `audio_deleted` frontmatter flag, creating a minimal
     /// `transcript.md` when the entry has none (an untranscribed import must
-    /// still record why its audio is gone).
+    /// still record why its audio is gone). A transcript that exists but
+    /// cannot be read is never replaced by that stub — the delete fails
+    /// instead. Clearing the flag on an entry with no transcript writes
+    /// nothing: there is nothing to clear.
     private func setAudioDeletedFlag(_ deleted: Bool, inEntry entryURL: URL) throws {
-        let transcriptURL = TranscriptFile.url(inEntry: entryURL)
-            ?? entryURL.appending(path: TranscriptFile.defaultName)
-        var doc: FrontmatterDocument
-        if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
-            doc = FrontmatterDocument.parse(text)
-        } else {
-            guard deleted else { return }
-            doc = FrontmatterDocument(fields: [], body: "")
-            doc.created = EntryFolderName(parsing: entryURL.lastPathComponent)?.date
+        try EntryFrontmatter.update(inEntry: entryURL, createIfMissing: deleted) { doc in
+            doc.audioDeleted = deleted
         }
-        guard doc.audioDeleted != deleted else { return }
-        doc.audioDeleted = deleted
-        try AtomicFile.write(doc.serialized(), to: transcriptURL)
     }
 }
