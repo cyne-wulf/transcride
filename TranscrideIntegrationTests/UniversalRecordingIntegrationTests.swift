@@ -126,6 +126,227 @@ struct UniversalRecordingIntegrationTests {
         )?.startFrame == 4_410)
     }
 
+    /// Simulates the phase that makes R3 bite: ScreenCaptureKit delivering
+    /// 10 ms buffers ahead of the microphone tap's 100 ms callback cadence, so
+    /// every Mac buffer arrives after the covered end its predecessor's mic
+    /// callback established. Before the fix the segment-time guard rejected all
+    /// of them and `placement` returned nil for every buffer.
+    private func simulateLeadingCapture(
+        windows: Int,
+        timeline: UniversalRecordingTimeline,
+        baseSeconds: Double,
+        rate: Double
+    ) -> (placements: [UniversalRecordingTimelinePlacement], sourceFrames: Int) {
+        let microphoneBufferFrames = 4_410     // 100 ms
+        let systemBufferFrames = 441           // 10 ms
+        let systemBuffersPerWindow = 10
+        var placements: [UniversalRecordingTimelinePlacement] = []
+        var sourceFrames = 0
+        for window in 0..<windows {
+            // The Mac buffers covering this window arrive before the microphone
+            // callback that will retain the same span.
+            for index in 0..<systemBuffersPerWindow {
+                let hostSeconds = baseSeconds
+                    + Double(window) * 0.1
+                    + Double(index) * 0.01
+                sourceFrames += systemBufferFrames
+                if let placement = timeline.placement(
+                    forHostTime: AVAudioTime.hostTime(forSeconds: hostSeconds),
+                    sourceFrameCount: systemBufferFrames
+                ) {
+                    placements.append(placement)
+                }
+            }
+            // Frame zero belongs to the caller's priming callback, so this
+            // window's buffer continues from there: the mapping stays
+            // continuous and no discontinuity is manufactured.
+            timeline.observeMicrophoneBuffer(
+                startFrame: Int64((window + 1) * microphoneBufferFrames),
+                frameCount: microphoneBufferFrames,
+                hostTime: AVAudioTime.hostTime(
+                    forSeconds: baseSeconds + Double(window) * 0.1
+                )
+            )
+        }
+        return (placements, sourceFrames)
+    }
+
+    @Test func macAudioArrivingBetweenMicrophoneCallbacksIsPlacedWithoutGaps() throws {
+        let rate = 44_100.0
+        let baseSeconds = 1_000.0
+        let timeline = UniversalRecordingTimeline(sampleRate: rate)
+        timeline.beginSegment(atFrame: 0)
+        // Prime the first anchor; the simulation then always runs ahead of the
+        // most recent microphone callback.
+        timeline.observeMicrophoneBuffer(
+            startFrame: 0,
+            frameCount: 4_410,
+            hostTime: AVAudioTime.hostTime(forSeconds: baseSeconds)
+        )
+        let simulated = simulateLeadingCapture(
+            windows: 20, timeline: timeline, baseSeconds: baseSeconds + 0.1, rate: rate
+        )
+        let placements = simulated.placements
+
+        // Every buffer is placed. At HEAD this count was zero.
+        #expect(placements.count == 200)
+        var placedFrames = 0
+        var maximumGap: Int64 = 0
+        for (index, placement) in placements.enumerated() {
+            placedFrames += placement.frameCount
+            guard index > 0 else { continue }
+            let previous = placements[index - 1]
+            let previousEnd = previous.startFrame + Int64(previous.frameCount)
+            // Never backwards, never overlapping.
+            #expect(placement.startFrame >= previousEnd)
+            maximumGap = max(maximumGap, placement.startFrame - previousEnd)
+        }
+        // A gap of a frame is host-clock rounding; the comb this fixes was
+        // thousands of frames wide, at the 100 ms tap cadence.
+        #expect(maximumGap <= 1)
+        #expect(placedFrames >= simulated.sourceFrames - placements.count)
+        #expect(placedFrames <= simulated.sourceFrames)
+    }
+
+    @Test func placementsFromASimulatedCaptureMixAsOneContinuousRegion() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rate = 44_100.0
+        let baseSeconds = 1_000.0
+        let timeline = UniversalRecordingTimeline(sampleRate: rate)
+        timeline.beginSegment(atFrame: 0)
+        timeline.observeMicrophoneBuffer(
+            startFrame: 0,
+            frameCount: 4_410,
+            hostTime: AVAudioTime.hostTime(forSeconds: baseSeconds)
+        )
+        let simulated = simulateLeadingCapture(
+            windows: 10, timeline: timeline, baseSeconds: baseSeconds + 0.1, rate: rate
+        )
+        let placements = simulated.placements
+        #expect(!placements.isEmpty)
+
+        let microphoneURL = directory.appending(path: ".recording.caf")
+        let sidecarURL = directory.appending(path: "system.sparse")
+        let stagedURL = directory.appending(path: ".mixed.caf")
+        let microphoneFrames = 11 * 4_410
+        try writeJournal(
+            [Float](repeating: 0.25, count: microphoneFrames), to: microphoneURL
+        )
+        let sparse = SparseSystemAudioJournal(
+            url: sidecarURL,
+            configuration: .init(preRollFrames: 0, releaseFrames: 0)
+        )
+        // The journal rejects any record that starts before its predecessor
+        // ended, so a placement stream that overlapped would throw here.
+        for placement in placements {
+            try sparse.append(
+                samples: [Float](repeating: 0.8, count: placement.frameCount),
+                startFrame: placement.startFrame,
+                peak: 0.8
+            )
+        }
+        let artifact = try #require(sparse.finish())
+
+        let result = try UniversalRecordingFileMixer.render(
+            microphoneURL: microphoneURL,
+            systemJournalURL: artifact,
+            stagedURL: stagedURL
+        )
+        #expect(result.frames == Int64(microphoneFrames))
+        let mixed = try readJournal(stagedURL)
+        let microphone = try readJournal(microphoneURL)
+        let first = try #require(result.firstSystemFrame)
+        let last = placements[placements.count - 1]
+        let regionEnd = Int(last.startFrame + Int64(last.frameCount))
+
+        // The comb this fixes appeared as microphone-only frames *inside* the
+        // Mac-audio region. Count them: a handful of host-clock rounding frames
+        // are tolerable, a periodic comb is not.
+        var microphoneOnlyFrames = 0
+        for index in Int(first)..<min(regionEnd, microphoneFrames)
+        where mixed[index].bitPattern == microphone[index].bitPattern {
+            microphoneOnlyFrames += 1
+        }
+        #expect(microphoneOnlyFrames <= placements.count)
+    }
+
+    @Test func placementNeverOverlapsOrReordersAcrossAnAnchorRebase() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rate = 44_100.0
+        let baseSeconds = 1_000.0
+        let timeline = UniversalRecordingTimeline(sampleRate: rate)
+        timeline.beginSegment(atFrame: 0)
+        timeline.observeMicrophoneBuffer(
+            startFrame: 0,
+            frameCount: 4_410,
+            hostTime: AVAudioTime.hostTime(forSeconds: baseSeconds)
+        )
+        let first = try #require(timeline.placement(
+            forHostTime: AVAudioTime.hostTime(forSeconds: baseSeconds + 0.097),
+            sourceFrameCount: 441
+        ))
+        // The microphone ran fractionally ahead of the host clock (2 ms, well
+        // inside the discontinuity tolerance), so this anchor maps the same
+        // wall-clock instant to an earlier canonical frame than the last one.
+        timeline.observeMicrophoneBuffer(
+            startFrame: 4_410,
+            frameCount: 4_410,
+            hostTime: AVAudioTime.hostTime(forSeconds: baseSeconds + 0.098)
+        )
+        let second = try #require(timeline.placement(
+            forHostTime: AVAudioTime.hostTime(forSeconds: baseSeconds + 0.0995),
+            sourceFrameCount: 441
+        ))
+
+        let firstEnd = first.startFrame + Int64(first.frameCount)
+        #expect(second.startFrame >= firstEnd)
+        // The overlap was absorbed by dropping source frames from the front,
+        // never by writing the same canonical frame twice.
+        #expect(second.sourceOffset > 0)
+        #expect(second.frameCount == 441 - second.sourceOffset)
+
+        // Proof that this is what kept the whole capture alive: at HEAD the
+        // second record started before the first ended and the journal rejected
+        // it, failing the session with `sidecarWriteFailed`.
+        let journal = SparseSystemAudioJournal(
+            url: directory.appending(path: "rebase.sparse"),
+            configuration: .init(preRollFrames: 0, releaseFrames: 0)
+        )
+        for placement in [first, second] {
+            try journal.append(
+                samples: [Float](repeating: 0.8, count: placement.frameCount),
+                startFrame: placement.startFrame,
+                peak: 0.8
+            )
+        }
+        #expect(journal.finish() != nil)
+    }
+
+    @Test func microphoneStallBeyondToleranceStopsProjection() throws {
+        let rate = 44_100.0
+        let baseSeconds = 1_000.0
+        let timeline = UniversalRecordingTimeline(sampleRate: rate)
+        timeline.beginSegment(atFrame: 0)
+        timeline.observeMicrophoneBuffer(
+            startFrame: 0,
+            frameCount: 4_410,
+            hostTime: AVAudioTime.hostTime(forSeconds: baseSeconds)
+        )
+        // Inside the allowance (one observed 100 ms buffer + 50 ms tolerance).
+        #expect(timeline.placement(
+            forHostTime: AVAudioTime.hostTime(forSeconds: baseSeconds + 0.2),
+            sourceFrameCount: 441
+        ) != nil)
+        // A real tap stall: Mac audio must not fill wall-clock time the
+        // microphone journal never retained.
+        #expect(timeline.placement(
+            forHostTime: AVAudioTime.hostTime(forSeconds: baseSeconds + 1.0),
+            sourceFrameCount: 441
+        ) == nil)
+    }
+
     @Test func silenceCreatesNoSidecarAndOversizedPreRollIsTrimmed() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -369,7 +590,10 @@ struct UniversalRecordingIntegrationTests {
         #expect(selection.fallbackReason == .mixFailed)
         #expect(try Data(contentsOf: microphoneURL) == micBefore)
         #expect(!FileManager.default.fileExists(atPath: stagedURL.path))
-        #expect(!FileManager.default.fileExists(atPath: corruptURL.path))
+        // R4: a failed mix must not destroy the sidecar. It is the only copy of
+        // the captured Mac audio, and deleting it here turned a transient
+        // failure into permanent loss of half the recording.
+        #expect(FileManager.default.fileExists(atPath: corruptURL.path))
 
         let map = TranscriptWordMap(transcript: transcript(), duration: 3)
         #expect(map.wordIndex(atTime: 1.3) == 1)
@@ -411,7 +635,118 @@ struct UniversalRecordingIntegrationTests {
         #expect(selection.fallbackReason == .mixFailed)
         #expect(try Data(contentsOf: microphoneURL) == micBefore)
         #expect(!FileManager.default.fileExists(atPath: stagedURL.path))
-        #expect(!FileManager.default.fileExists(atPath: corruptURL.path))
+        // R4: see above. The rejection here comes from the appended stray byte,
+        // not from the record's position past EOF — see
+        // `validRecordBeyondMicrophoneEOFStillMixesAtTheMicrophoneFrameCount`,
+        // which holds position constant and removes the corruption.
+        #expect(FileManager.default.fileExists(atPath: corruptURL.path))
+    }
+
+    /// Isolation experiment for the open-segment projection allowance (R3): a
+    /// buffer in flight at stop can be journaled slightly past the microphone's
+    /// final frame. This holds "record beyond EOF" constant and removes the
+    /// corruption that `corruptSparseRecordBeyondMicrophoneEOFStillFallsBack`
+    /// actually rejects on, then asserts the criterion that matters to both
+    /// consumers of the render: the output frame count still equals the
+    /// microphone's, so the `result.frames == microphoneFrames` gate passes and
+    /// no clean stop is demoted to a microphone-only fallback.
+    @Test func validRecordBeyondMicrophoneEOFStillMixesAtTheMicrophoneFrameCount() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let microphoneURL = directory.appending(path: ".recording.caf")
+        let sidecarURL = directory.appending(path: "trailing.sparse")
+        let stagedURL = directory.appending(path: ".mixed.caf")
+        let microphoneFrames = 1_000
+        try writeJournal(
+            [Float](repeating: 0.25, count: microphoneFrames), to: microphoneURL
+        )
+
+        let sparse = SparseSystemAudioJournal(
+            url: sidecarURL,
+            configuration: .init(preRollFrames: 0, releaseFrames: 0)
+        )
+        // Wholly in bounds.
+        try sparse.append(
+            samples: [Float](repeating: 0.8, count: 200), startFrame: 100, peak: 0.8
+        )
+        // Straddling EOF: the shape a buffer in flight at stop produces.
+        try sparse.append(
+            samples: [Float](repeating: 0.8, count: 400), startFrame: 900, peak: 0.8
+        )
+        // Wholly beyond EOF.
+        try sparse.append(
+            samples: [Float](repeating: 0.8, count: 100), startFrame: 1_400, peak: 0.8
+        )
+        let artifact = try #require(sparse.finish())
+
+        let result = try UniversalRecordingFileMixer.render(
+            microphoneURL: microphoneURL,
+            systemJournalURL: artifact,
+            stagedURL: stagedURL
+        )
+        // The renderer's output length is driven solely by microphone reads;
+        // past-EOF source frames are never emitted, only ignored.
+        #expect(result.frames == Int64(microphoneFrames))
+        #expect(result.firstSystemFrame == 100)
+        let mixed = try readJournal(stagedURL)
+        #expect(mixed.count == microphoneFrames)
+
+        let microphone = try readJournal(microphoneURL)
+        // The in-bounds half of the straddling record is audible.
+        #expect(mixed[950].bitPattern != microphone[950].bitPattern)
+        #expect(mixed[999].bitPattern != microphone[999].bitPattern)
+        // Untouched where no system audio was placed.
+        #expect(mixed[50].bitPattern == microphone[50].bitPattern)
+
+        // End to end: the frame-count gate passes, so this is a real mix and
+        // not a demoted fallback, and the sidecar is retired on success.
+        try? FileManager.default.removeItem(at: stagedURL)
+        let selection = UniversalRecordingFileResolver.renderOrUseMicrophone(
+            microphoneURL: microphoneURL,
+            microphoneFrames: Int64(microphoneFrames),
+            microphonePeaks: [0.25],
+            systemJournalURL: artifact,
+            stagedURL: stagedURL
+        )
+        #expect(selection.fallbackReason == nil)
+        #expect(selection.journalURL == stagedURL)
+        #expect(!FileManager.default.fileExists(atPath: sidecarURL.path))
+    }
+
+    /// R4 in isolation: the sidecar is intact and readable, and only the
+    /// caller's frame-count gate fails. The mix result is discarded, but the
+    /// only copy of the Mac audio must survive.
+    @Test func mixFailureKeepsTheOnlyCopyOfTheMacAudio() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let microphoneURL = directory.appending(path: ".recording.caf")
+        let sidecarURL = directory.appending(path: "system.sparse")
+        let stagedURL = directory.appending(path: ".mixed.caf")
+        try writeJournal([Float](repeating: 0.25, count: 1_000), to: microphoneURL)
+        let sparse = SparseSystemAudioJournal(
+            url: sidecarURL,
+            configuration: .init(preRollFrames: 0, releaseFrames: 0)
+        )
+        try sparse.append(
+            samples: [Float](repeating: 0.8, count: 200), startFrame: 100, peak: 0.8
+        )
+        let artifact = try #require(sparse.finish())
+        let sidecarBytes = try Data(contentsOf: artifact)
+
+        let selection = UniversalRecordingFileResolver.renderOrUseMicrophone(
+            microphoneURL: microphoneURL,
+            // Deliberately disagrees with the journal, so the render succeeds
+            // and the caller's own guard is what fails.
+            microphoneFrames: 999,
+            microphonePeaks: [0.25],
+            systemJournalURL: artifact,
+            stagedURL: stagedURL
+        )
+        #expect(selection.fallbackReason == .mixFailed)
+        #expect(selection.journalURL == microphoneURL)
+        #expect(!FileManager.default.fileExists(atPath: stagedURL.path))
+        #expect(FileManager.default.fileExists(atPath: sidecarURL.path))
+        #expect(try Data(contentsOf: sidecarURL) == sidecarBytes)
     }
 
     @Test @MainActor

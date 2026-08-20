@@ -22,6 +22,51 @@ struct InterruptedRecordingRecoveryTests {
         }
     }
 
+    /// Writes a real Mac-audio sidecar carrying a loud block over
+    /// `[startFrame, startFrame + frameCount)` on the microphone timeline.
+    @discardableResult
+    private func seedSystemAudioSidecar(
+        in entryURL: URL, startFrame: Int64, frameCount: Int, amplitude: Float = 0.8
+    ) throws -> URL {
+        let url = entryURL.appending(
+            path: UniversalRecordingArtifacts.systemAudioFileName
+        )
+        let journal = SparseSystemAudioJournal(
+            url: url,
+            configuration: .init(preRollFrames: 0, releaseFrames: 0)
+        )
+        try journal.append(
+            samples: [Float](repeating: amplitude, count: frameCount),
+            startFrame: startFrame,
+            peak: amplitude
+        )
+        _ = journal.finish()
+        return url
+    }
+
+    private func decode(_ url: URL) throws -> [Float] {
+        let file = try AVAudioFile(forReading: url)
+        defer { file.close() }
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat,
+            frameCapacity: AVAudioFrameCount(file.length)
+        ))
+        try file.read(into: buffer)
+        let channel = try #require(buffer.floatChannelData?[0])
+        return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+    }
+
+    private func peak(_ samples: ArraySlice<Float>) -> Float {
+        samples.reduce(Float.zero) { max($0, abs($1)) }
+    }
+
+    private func backdate(_ url: URL, days: Double) throws {
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-days * 24 * 3_600)],
+            ofItemAtPath: url.path
+        )
+    }
+
     private func expectNoUniversalArtifacts(in entryURL: URL) {
         for fileName in UniversalRecordingArtifacts.interruptedRecoveryCleanupFileNames {
             #expect(!FileManager.default.fileExists(
@@ -454,5 +499,111 @@ struct InterruptedRecordingRecoveryTests {
         let second = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
         #expect(second == InterruptedRecordingRecoverySummary())
         #expect(try Data(contentsOf: partial) == bytes)
+    }
+
+    /// R1: a crashed meeting recording. The microphone journal and the sparse
+    /// Mac-audio sidecar only ever coexist here, so recovery is the last moment
+    /// the two halves can be joined. The microphone captured nothing, which
+    /// makes the assertion unambiguous: signal in the recovered canonical file
+    /// can only have come from the sidecar.
+    @Test func crashedMeetingRecoveryMixesTheMacAudioSidecarIntoTheRecoveredEntry()
+        async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = try TestAudio.makeWAV(seconds: 1.0, amplitude: 0)
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let partial = fixture.url.appending(path: RecorderPartialFile.name)
+        try FileManager.default.copyItem(at: source, to: partial)
+        try seedSystemAudioSidecar(in: fixture.url, startFrame: 10_000, frameCount: 20_000)
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(recovered.mixedSystemAudio)
+        // The microphone half is reported honestly; the canonical file is
+        // useful anyway, so the entry is still worth transcribing.
+        #expect(!recovered.microphoneHasSignal)
+        #expect(recovered.canonicalHasSignal)
+        #expect(recovered.shouldQueueTranscription)
+        #expect(abs(recovered.duration - 1.0) < 0.05)
+
+        let canonical = fixture.url.appending(path: recovered.audioFileName)
+        let samples = try decode(canonical)
+        // Frame-exact with the journal: the mix adds Mac audio at the same
+        // frame indices, it never shifts the timeline.
+        #expect(abs(samples.count - 44_100) <= 4_096)
+        #expect(peak(samples[12_000..<28_000]) > 0.05)
+        #expect(peak(samples[0..<9_000]) < 0.01)
+        expectNoUniversalArtifacts(in: fixture.url)
+        #expect(!FileManager.default.fileExists(atPath: partial.path))
+        #expect(WaveformData.load(from: WaveformData.url(inEntry: fixture.url)) != nil)
+
+        let second = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        #expect(second == InterruptedRecordingRecoverySummary())
+    }
+
+    /// A mix that cannot be trusted must cost nothing: recovery falls back to
+    /// the microphone journal exactly as it did before R1.
+    @Test func unreadableSidecarFallsBackToTheMicrophoneOnlyRecovery() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = try TestAudio.makeWAV(seconds: 0.8, amplitude: 0.35)
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let partial = fixture.url.appending(path: RecorderPartialFile.name)
+        try FileManager.default.copyItem(at: source, to: partial)
+        try AtomicFile.write(
+            Data("not a sparse journal".utf8),
+            to: fixture.url.appending(
+                path: UniversalRecordingArtifacts.systemAudioFileName
+            )
+        )
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(!recovered.mixedSystemAudio)
+        #expect(recovered.microphoneHasSignal)
+        #expect(recovered.canonicalHasSignal)
+        #expect(peak(try decode(
+            fixture.url.appending(path: recovered.audioFileName)
+        )[0..<10_000]) > 0.1)
+        expectNoUniversalArtifacts(in: fixture.url)
+        #expect(!FileManager.default.fileExists(atPath: partial.path))
+    }
+
+    /// R4's other half: a sidecar preserved by a failed offline mix has no
+    /// automatic consumer, so it is swept once the salvage window passes — but
+    /// never while its microphone journal is still on disk, and never early.
+    @Test func abandonedSidecarSurvivesTheSalvageWindowThenIsSwept() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let recentURL = try seedSystemAudioSidecar(
+            in: fixture.url, startFrame: 0, frameCount: 128
+        )
+
+        _ = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        #expect(FileManager.default.fileExists(atPath: recentURL.path))
+
+        try backdate(recentURL, days: 8)
+        _ = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        #expect(!FileManager.default.fileExists(atPath: recentURL.path))
+    }
+
+    @Test func sweepNeverTouchesASidecarWhoseJournalIsStillPresent() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // An unrecoverable partial: recovery fails and retains everything, so
+        // the sidecar must survive the sweep despite being long expired.
+        let partial = fixture.url.appending(path: RecorderPartialFile.name)
+        try AtomicFile.write("not audio", to: partial)
+        let sidecarURL = try seedSystemAudioSidecar(
+            in: fixture.url, startFrame: 0, frameCount: 128
+        )
+        try backdate(sidecarURL, days: 30)
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        #expect(summary.failures.count == 1)
+        #expect(FileManager.default.fileExists(atPath: partial.path))
+        #expect(FileManager.default.fileExists(atPath: sidecarURL.path))
     }
 }

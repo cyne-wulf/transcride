@@ -11,9 +11,14 @@ struct InterruptedRecordingRecoveryOutcome: Equatable, Sendable {
     var microphoneHasSignal: Bool
     var microphoneFrames: Int64
     /// Usually identical to `microphoneHasSignal`. The only exception is a
-    /// crash after a validated universal mix was installed: Mac audio may make
-    /// the visible canonical file useful even though the mic itself failed.
+    /// crash after a validated universal mix was installed, or one this
+    /// recovery rendered itself: Mac audio may make the visible canonical file
+    /// useful even though the mic itself failed.
     var canonicalHasSignal: Bool
+    /// True when this recovery rendered the retained Mac-audio sidecar into the
+    /// canonical file it published, rather than recovering the microphone
+    /// journal alone.
+    var mixedSystemAudio: Bool = false
 
     var shouldQueueTranscription: Bool { canonicalHasSignal }
 }
@@ -73,6 +78,13 @@ enum InterruptedRecordingRecovery {
     /// packet granularity make exact equality unrealistic; ~93ms at 44.1kHz is
     /// far below any interrupted copy while remaining inaudible.
     static let adoptableFrameShortfall: Int64 = 4_096
+    /// How long an abandoned Mac-audio sidecar is kept once its microphone
+    /// journal is gone. Nothing consumes it automatically — its chunks are
+    /// positioned by frame index on a journal that no longer exists — but
+    /// destroying it the moment an offline mix fails turns one transient error
+    /// into permanent loss of half a meeting. The bytes are kept for a salvage
+    /// window and then swept so they cannot accumulate.
+    static let abandonedSystemAudioSalvageAge: TimeInterval = 7 * 24 * 3_600
 
     static func recoverAll(inVault vaultRoot: URL) async -> InterruptedRecordingRecoverySummary {
         var summary = InterruptedRecordingRecoverySummary()
@@ -81,18 +93,26 @@ enum InterruptedRecordingRecovery {
         // `.trash`, which the ordinary scan skips as a hidden directory, and
         // Empty Trash would then destroy the only copy of the audio. Rebuilding
         // it in place makes the recording restorable from Recently Deleted.
-        for entryURL in entryDirectoriesWithPartials(
+        for entryURL in scanEntryDirectories(
             inVault: vaultRoot.appending(
                 path: TrashStore.directoryName, directoryHint: .isDirectory
             )
-        ) {
+        ).withPartials {
             let relativePath = relativePath(of: entryURL, under: vaultRoot)
             guard let outcome = try? await recover(
                 entryURL: entryURL, relativePath: relativePath
             ) else { continue }
             summary.recoveredInTrash.append(outcome)
         }
-        for entryURL in entryDirectoriesWithPartials(inVault: vaultRoot) {
+        let scan = scanEntryDirectories(inVault: vaultRoot)
+        // Sidecars kept by a failed offline mix (their microphone journal is
+        // long retired) are swept once the salvage window has passed. Trashed
+        // entries are deliberately left alone: they are restorable as a unit,
+        // and Empty Trash removes the whole folder anyway.
+        for sidecarURL in scan.abandonedSystemAudio {
+            try? FileManager.default.removeItem(at: sidecarURL)
+        }
+        for entryURL in scan.withPartials {
             let relativePath = relativePath(of: entryURL, under: vaultRoot)
             do {
                 let outcome = try await recover(entryURL: entryURL, relativePath: relativePath)
@@ -179,10 +199,22 @@ enum InterruptedRecordingRecovery {
         let temporaryCAF = entryURL.appending(path: temporaryCAFFileName)
         try cleanupRecoveryStagingFiles(in: entryURL)
 
+        // A crashed meeting recording is the only moment the microphone journal
+        // and the sparse Mac-audio sidecar still coexist: the sidecar positions
+        // its chunks by frame index on that journal's timeline, and the journal
+        // is retired at the end of this function. A mix not performed here can
+        // never be performed at all.
+        let mixed = await mixSystemAudioSidecar(
+            entryURL: entryURL,
+            microphoneURL: partialURL,
+            microphoneFrames: microphoneInspection.frames
+        )
+        let sourceURL = mixed?.url ?? partialURL
+
         let stagedURL: URL
         let finalName: String
         do {
-            let asset = AVURLAsset(url: partialURL)
+            let asset = AVURLAsset(url: sourceURL)
             guard let exporter = AVAssetExportSession(
                 asset: asset, presetName: AVAssetExportPresetPassthrough
             ) else {
@@ -195,7 +227,16 @@ enum InterruptedRecordingRecovery {
         } catch {
             // Container conversion is optional for recovery. Preserve the
             // known-readable CAF bytes through a hidden staged copy.
-            try fm.copyItem(at: partialURL, to: temporaryCAF)
+            //
+            // A mixed render is itself derived and recreatable from the journal
+            // that is still on disk, so it is renamed rather than copied: a
+            // second full-length copy would hold four copies of a long meeting
+            // at once for no durability gain.
+            if mixed != nil {
+                try fm.moveItem(at: sourceURL, to: temporaryCAF)
+            } else {
+                try fm.copyItem(at: sourceURL, to: temporaryCAF)
+            }
             _ = try await validatedDuration(of: temporaryCAF)
             stagedURL = temporaryCAF
             finalName = "audio.caf"
@@ -224,8 +265,66 @@ enum InterruptedRecordingRecovery {
             duration: partialDuration,
             microphoneHasSignal: microphoneInspection.hasSignal,
             microphoneFrames: microphoneInspection.frames,
-            canonicalHasSignal: microphoneInspection.hasSignal
+            canonicalHasSignal: mixed?.hasSignal ?? microphoneInspection.hasSignal,
+            mixedSystemAudio: mixed != nil
         )
+    }
+
+    private struct RecoveredSystemAudioMix: Sendable {
+        var url: URL
+        var hasSignal: Bool
+    }
+
+    /// Renders the retained Mac-audio sidecar onto the microphone journal so a
+    /// crashed meeting recovers with both halves instead of the microphone
+    /// alone.
+    ///
+    /// Returns nil whenever anything is absent, unreadable, or fails
+    /// validation; the caller then recovers the microphone journal exactly as
+    /// it always has, byte for byte. The renderer refuses to emit anything it
+    /// has not proved — its output length is driven solely by the microphone
+    /// file, it drains and validates the whole sparse stream, and it reopens
+    /// and re-validates the staged result — so a failed mix costs launch time,
+    /// never audio. The mix is frame-exact with the journal, so duration,
+    /// waveform and transcript alignment are unaffected: it adds Mac audio at
+    /// the same frame indices, it never shifts the timeline.
+    private static func mixSystemAudioSidecar(
+        entryURL: URL,
+        microphoneURL: URL,
+        microphoneFrames: Int64
+    ) async -> RecoveredSystemAudioMix? {
+        let fm = FileManager.default
+        let sidecarURL = entryURL.appending(
+            path: UniversalRecordingArtifacts.systemAudioFileName
+        )
+        guard microphoneFrames > 0, fm.fileExists(atPath: sidecarURL.path) else { return nil }
+        let stagedURL = entryURL.appending(
+            path: UniversalRecordingArtifacts.mixedJournalFileName
+        )
+        do {
+            let result = try await Task.detached {
+                try UniversalRecordingFileMixer.render(
+                    microphoneURL: microphoneURL,
+                    systemJournalURL: sidecarURL,
+                    stagedURL: stagedURL
+                )
+            }.value
+            // The renderer already validated the staged file's own length and
+            // format. This ties it to the journal this recovery is actually
+            // publishing, and reports whether the canonical result is
+            // transcribable even when the microphone itself captured nothing.
+            guard result.frames == microphoneFrames else {
+                throw UniversalRecordingFileMixError.invalidOutput
+            }
+            let inspection = try MicrophoneJournalInspector.inspect(stagedURL)
+            guard inspection.frames == microphoneFrames else {
+                throw UniversalRecordingFileMixError.invalidOutput
+            }
+            return .init(url: stagedURL, hasSignal: inspection.hasSignal)
+        } catch {
+            try? fm.removeItem(at: stagedURL)
+            return nil
+        }
     }
 
     /// A visible file that is strictly shorter than the retained microphone
@@ -281,26 +380,46 @@ enum InterruptedRecordingRecovery {
         try waveform.write(to: WaveformData.url(inEntry: entryURL))
     }
 
-    private static func entryDirectoriesWithPartials(inVault root: URL) -> [URL] {
-        guard let enumerator = FileManager.default.enumerator(
+    /// One walk, two answers. `abandonedSystemAudio` holds Mac-audio sidecars
+    /// whose microphone journal is gone *and* whose bytes have outlived the
+    /// salvage window. Both conditions matter: a live capture always has its
+    /// `.recording.caf` in place (the sink journal is created at start, the
+    /// sidecar lazily at the first meaningful signal, strictly later), and the
+    /// age gate means even that ordering does not have to be trusted.
+    private static func scanEntryDirectories(
+        inVault root: URL
+    ) -> (withPartials: [URL], abandonedSystemAudio: [URL]) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else { return [] }
+        ) else { return ([], []) }
         var results: [URL] = []
+        var abandoned: [URL] = []
+        let cutoff = Date().addingTimeInterval(-abandonedSystemAudioSalvageAge)
         for case let url as URL in enumerator {
             guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
                   EntryFolderName(parsing: url.lastPathComponent) != nil else { continue }
             enumerator.skipDescendants()
-            if FileManager.default.fileExists(
+            let hasPartial = fm.fileExists(
                 atPath: url.appending(path: RecorderPartialFile.name).path
-            ), !FileManager.default.fileExists(
+            )
+            if hasPartial, !fm.fileExists(
                 atPath: url.appending(path: legacyMarkerFileName).path
             ) {
                 results.append(url)
             }
+            guard !hasPartial else { continue }
+            let sidecarURL = url.appending(
+                path: UniversalRecordingArtifacts.systemAudioFileName
+            )
+            let modified = (try? sidecarURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ))?.contentModificationDate
+            if let modified, modified < cutoff { abandoned.append(sidecarURL) }
         }
-        return results.sorted { $0.path < $1.path }
+        return (results.sorted { $0.path < $1.path }, abandoned.sorted { $0.path < $1.path })
     }
 
     private static func relativePath(of url: URL, under root: URL) -> RelativePath {
