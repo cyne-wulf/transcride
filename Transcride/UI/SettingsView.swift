@@ -1,3 +1,5 @@
+import AVFoundation
+import AppKit
 import SwiftUI
 
 /// Settings window: General, Recording, Keybinds, Transcription, and Storage.
@@ -121,6 +123,7 @@ private struct RecordingSettingsPane: View {
 
     var body: some View {
         Form {
+            PermissionsSection()
             Section("Recording") {
                 Picker("Microphone", selection: $preferredMicUID) {
                     Text("System Default").tag("")
@@ -139,6 +142,112 @@ private struct RecordingSettingsPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Explicit state for the two capture permissions Transcride uses: Microphone
+/// (required for every recording) and Screen & System Audio Recording (adds
+/// Mac audio to recordings). Statuses are re-read on a short loop so changes
+/// made in System Settings show up while the pane is open.
+private struct PermissionsSection: View {
+    @State private var micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    @State private var systemAudioGranted = CGPreflightScreenCaptureAccess()
+
+    var body: some View {
+        Section("Permissions") {
+            LabeledContent {
+                HStack(spacing: 12) {
+                    switch micStatus {
+                    case .notDetermined:
+                        Button("Request Access…") {
+                            Task {
+                                _ = await AVCaptureDevice.requestAccess(for: .audio)
+                                refresh()
+                            }
+                        }
+                    case .denied, .restricted:
+                        openSystemSettingsButton(pane: "Privacy_Microphone")
+                    default:
+                        EmptyView()
+                    }
+                    statusBadge(micStatusText, kind: micStatusKind)
+                }
+            } label: {
+                Text("Microphone")
+                Text("Required for every recording.")
+            }
+
+            LabeledContent {
+                HStack(spacing: 12) {
+                    if !systemAudioGranted {
+                        openSystemSettingsButton(pane: "Privacy_ScreenCapture")
+                    }
+                    statusBadge(
+                        systemAudioGranted ? "Granted" : "Not granted",
+                        kind: systemAudioGranted ? .granted : .pending
+                    )
+                }
+            } label: {
+                Text("System Audio Recording")
+                Text("Adds audio playing on this Mac to recordings. Listed as “Screen & System Audio Recording” in System Settings; without it, recordings are microphone-only.")
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                refresh()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private func refresh() {
+        micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        systemAudioGranted = CGPreflightScreenCaptureAccess()
+    }
+
+    private var micStatusText: String {
+        switch micStatus {
+        case .authorized: "Granted"
+        case .notDetermined: "Not requested yet"
+        case .denied: "Denied"
+        case .restricted: "Restricted"
+        @unknown default: "Unknown"
+        }
+    }
+
+    private enum StatusKind {
+        case granted, pending, blocked
+    }
+
+    private var micStatusKind: StatusKind {
+        switch micStatus {
+        case .authorized: .granted
+        case .notDetermined: .pending
+        default: .blocked
+        }
+    }
+
+    private func statusBadge(_ text: String, kind: StatusKind) -> some View {
+        Label {
+            Text(text)
+        } icon: {
+            switch kind {
+            case .granted:
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .pending:
+                Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+            case .blocked:
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+            }
+        }
+        .foregroundStyle(kind == .granted ? .primary : .secondary)
+    }
+
+    private func openSystemSettingsButton(pane: String) -> some View {
+        Button("Open System Settings…") {
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")
+            if let url { NSWorkspace.shared.open(url) }
+        }
     }
 }
 
