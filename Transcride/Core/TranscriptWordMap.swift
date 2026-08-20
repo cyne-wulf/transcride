@@ -51,18 +51,26 @@ enum TranscriptTimingRepair {
         }
 
         // A later word may overlap slightly with the previous one, but its
-        // start and end must never run backwards through the transcript.
+        // start must never run backwards through the transcript. A word whose
+        // end falls inside the previous word (an occasional nested TDT span)
+        // keeps its measured start and has its end clamped forward instead of
+        // being flagged: condemning it would discard real engine timing.
         var previousStart: TimeInterval?
         var previousEnd: TimeInterval?
         for index in words.indices where !bad[index] {
             if let previousStart,
-               words[index].start < previousStart - equalityTolerance
-                || words[index].end < (previousEnd ?? previousStart) - equalityTolerance {
+               words[index].start < previousStart - equalityTolerance {
                 bad[index] = true
-            } else {
-                previousStart = words[index].start
-                previousEnd = words[index].end
+                continue
             }
+            // The clamp is exact, not tolerance-based: even a floating-point
+            // epsilon inversion would fail the strict monotonicity check that
+            // gates the word map's binary-search lookup.
+            if let previousEnd, words[index].end < previousEnd {
+                words[index].end = previousEnd
+            }
+            previousStart = words[index].start
+            previousEnd = words[index].end
         }
 
         // WhisperKit's observed failure mode is a long run sharing one start
@@ -98,17 +106,29 @@ enum TranscriptTimingRepair {
                 let end = index
                 let lower = start > 0 ? repairedWords[start - 1].end : 0
                 let upper = end < words.count ? words[end].start : duration
-                guard lower.isFinite, upper.isFinite, upper > lower else {
-                    // There is no safe interval between the neighboring
-                    // anchors. Retiming the full stream is the only way to
-                    // guarantee positive, monotonic spans.
+                guard lower.isFinite, upper.isFinite else {
                     repairedWords = distribute(words: words, from: 0, to: duration)
                     globallyDegraded = true
                     break
                 }
-                let replacement = distribute(words: Array(words[start..<end]), from: lower, to: upper)
-                for (offset, word) in replacement.enumerated() {
-                    repairedWords[start + offset] = word
+                if upper > lower {
+                    let replacement = distribute(
+                        words: Array(words[start..<end]), from: lower, to: upper
+                    )
+                    for (offset, word) in replacement.enumerated() {
+                        repairedWords[start + offset] = word
+                    }
+                } else {
+                    // The neighboring anchors touch or overlap, leaving no
+                    // interval to distribute into. Pin the run to the anchor
+                    // seam: a zero-width span stays monotonic and simply never
+                    // highlights, whereas retiming the full stream would trade
+                    // one unusable word for every good timing in the file.
+                    let seam = min(lower, upper)
+                    for offset in start..<end {
+                        repairedWords[offset].start = seam
+                        repairedWords[offset].end = seam
+                    }
                 }
             }
         }

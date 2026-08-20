@@ -84,21 +84,65 @@ struct TranscriptTimingRepairTests {
         #expect(words[4].end == 3)
     }
 
-    @Test func decreasingEndTimeIsTreatedAsNonMonotonic() {
+    @Test func nestedEndIsClampedForwardKeepingTheMeasuredStart() {
         let segments = [segment([
             ("one", 0, 0.8),
-            ("backwards", 0.5, 0.6),
+            ("nested", 0.5, 0.6),
             ("three", 1.2, 1.5),
             ("four", 1.6, 1.9),
         ])]
         let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 2)
         let words = outcome.segments[0].words
 
+        #expect(outcome.didRepair)
         #expect(!outcome.globallyDegraded)
         #expect(words[0] == segments[0].words[0])
-        #expect(words[1].start == 0.8)
-        #expect(words[1].end == 1.2)
+        #expect(words[1].start == 0.5)
+        #expect(words[1].end == 0.8)
         #expect(words[2] == segments[0].words[2])
+        #expect(words[3] == segments[0].words[3])
+    }
+
+    @Test func oneNestedWordBetweenTouchingNeighborsLeavesTheRestUntouched() {
+        // Real Parakeet shape from a 54-minute vault entry: 'are' nested
+        // inside 'concerns.' whose end exactly equals the next word's start.
+        // The old repair condemned the word, found a zero-width anchor
+        // interval, and linearly retimed all 8,481 words in the file.
+        let segments = [segment([
+            ("privacy", 4.88, 5.52), ("compliance", 5.52, 6.08),
+            ("concerns.", 6.08, 6.80), ("are", 6.64, 6.72),
+            ("What", 6.80, 7.04), ("your", 7.20, 7.44),
+            ("thoughts", 7.44, 7.92), ("here?", 7.92, 8.24),
+        ])]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 10)
+        let words = outcome.segments[0].words
+
+        #expect(!outcome.globallyDegraded)
+        #expect(words[3].start == 6.64)
+        #expect(words[3].end == 6.80)
+        for index in [0, 1, 2, 4, 5, 6, 7] {
+            #expect(words[index] == segments[0].words[index])
+        }
+    }
+
+    @Test func degenerateAnchorIntervalPinsTheRunInsteadOfRetimingTheFile() {
+        let segments = [segment([
+            ("one", 0, 0.8),
+            ("two", 0.8, 1.2),
+            ("backwards", 0.2, 0.3),
+            ("four", 1.2, 1.5),
+            ("five", 1.6, 1.9),
+        ])]
+        let outcome = TranscriptTimingRepair.repair(segments: segments, duration: 2)
+        let words = outcome.segments[0].words
+
+        #expect(outcome.didRepair)
+        #expect(!outcome.globallyDegraded)
+        #expect(words[2].start == 1.2)
+        #expect(words[2].end == 1.2)
+        for index in [0, 1, 3, 4] {
+            #expect(words[index] == segments[0].words[index])
+        }
     }
 }
 
