@@ -351,7 +351,12 @@ final class UniversalSystemAudioCaptureService: NSObject, SCStreamOutput, SCStre
 
     @MainActor
     func pause() {
-        queue.sync { acceptingSamples = false }
+        queue.sync {
+            acceptingSamples = false
+            // No further appends trip the byte cadence while paused; push the
+            // partial barrier interval to media alongside the mic journal's.
+            journal.scheduleDurabilityBarrier()
+        }
     }
 
     @MainActor

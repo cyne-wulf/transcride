@@ -149,6 +149,10 @@ enum InterruptedRecordingRecovery {
         guard fm.fileExists(atPath: partialURL.path) else {
             throw InterruptedRecordingRecoveryError.unreadablePartial
         }
+        // A power cut during close()'s size patch leaves a bogus positive
+        // data-chunk size that AVFoundation trusts over physical EOF. Restore
+        // the crash sentinel before any consumer below opens the journal.
+        DurableAudioJournalWriter.repairDataChunkSize(at: partialURL)
 
         let existingNames = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
             .filter { !$0.hasPrefix(".") }
@@ -159,6 +163,11 @@ enum InterruptedRecordingRecovery {
                 throw InterruptedRecordingRecoveryError.visibleAudioConflict
             }
             let audioURL = entryURL.appending(path: existingAudio)
+            if existingAudio == "audio.caf" {
+                // The CAF fallback is a byte copy of a journal, so it can carry
+                // the same torn size patch. A no-op for any other CAF.
+                DurableAudioJournalWriter.repairDataChunkSize(at: audioURL)
+            }
             let microphoneInspection = try MicrophoneJournalInspector.inspect(partialURL)
             let visibleInspection = try? MicrophoneJournalInspector.inspect(audioURL)
             if await shouldRebuildTruncatedVisibleAudio(
@@ -303,10 +312,14 @@ enum InterruptedRecordingRecovery {
         )
         do {
             let result = try await Task.detached {
+                // Recovery reads what a crash or power cut left: a final
+                // sidecar record severed at EOF is expected there and must not
+                // forfeit the earlier, intact Mac audio.
                 try UniversalRecordingFileMixer.render(
                     microphoneURL: microphoneURL,
                     systemJournalURL: sidecarURL,
-                    stagedURL: stagedURL
+                    stagedURL: stagedURL,
+                    tailPolicy: .tolerateTruncatedTail
                 )
             }.value
             // The renderer already validated the staged file's own length and

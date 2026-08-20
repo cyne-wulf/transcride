@@ -327,11 +327,15 @@ enum RecordingExtensionRecovery {
         // present, it is also the yardstick for that segment. A committed file
         // shorter than its own source is an interrupted copy or encode, and
         // must never shadow the intact journal.
+        let journalURL = entryURL.appending(
+            path: RecordingExtensionArtifacts.partialFileName
+        )
+        // Undo a close-time size patch severed by power loss before anything
+        // reads the journal; a no-op for intact files.
+        DurableAudioJournalWriter.repairDataChunkSize(at: journalURL)
         let journalFrames: Int64? = fileNames.contains(
             RecordingExtensionArtifacts.partialFileName
-        ) ? readableFrameCount(
-            at: entryURL.appending(path: RecordingExtensionArtifacts.partialFileName)
-        ) : nil
+        ) ? readableFrameCount(at: journalURL) : nil
 
         for fileName in RecordingExtensionArtifacts.segmentCandidateFileNames
         where fileNames.contains(fileName) {

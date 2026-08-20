@@ -120,9 +120,11 @@ enum AtomicFile {
         case .standard:
             try handle.synchronize()
         case .full:
-            // Not every file system implements the barrier; where it is
-            // unsupported a plain fsync is the strongest guarantee available.
-            if fcntl(handle.fileDescriptor, F_FULLFSYNC) == -1 {
+            // FileDurability degrades through the strongest barrier the file
+            // system implements, but anything below a real F_FULLFSYNC is not
+            // yet durable — on those volumes fall back to fsync as well, which
+            // is what this path guaranteed before the barrier refactor.
+            if FileDurability.barrier(fileDescriptor: handle.fileDescriptor) != .full {
                 try handle.synchronize()
             }
         }
@@ -131,13 +133,7 @@ enum AtomicFile {
     /// Best effort: the rename has already succeeded, so the file is complete
     /// either way — this only makes the *name* durable sooner.
     private static func syncDirectory(_ url: URL) {
-        let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
-            guard let path else { return -1 }
-            return open(path, O_RDONLY)
-        }
-        guard descriptor >= 0 else { return }
-        defer { close(descriptor) }
-        _ = fsync(descriptor)
+        FileDurability.syncDirectory(at: url)
     }
 }
 

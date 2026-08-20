@@ -867,6 +867,9 @@ actor VaultService {
             }
             session = adoptingOrphanedReplacementTakes(from: directory, into: session)
             let partial = entryURL.appending(path: AudioReplacementArtifacts.partialFileName)
+            // Undo a close-time size patch severed by power loss before the
+            // journal is read; a no-op for intact files.
+            DurableAudioJournalWriter.repairDataChunkSize(at: partial)
             if FileManager.default.fileExists(atPath: partial.path),
                let file = try? AVAudioFile(forReading: partial) {
                 if let inspection = try? MicrophoneJournalInspector.inspect(partial) {

@@ -606,4 +606,134 @@ struct InterruptedRecordingRecoveryTests {
         #expect(FileManager.default.fileExists(atPath: partial.path))
         #expect(FileManager.default.fileExists(atPath: sidecarURL.path))
     }
+
+    // MARK: Unclosed journals — the true post-crash artifact
+
+    /// Writes what a SIGKILL/power cut actually leaves behind: a journal from
+    /// the production writer whose descriptor was severed without `close()`,
+    /// so the data-chunk size on disk is still -1.
+    private func seedUnclosedJournal(
+        in entryURL: URL, seconds: Double, amplitude: Float
+    ) throws -> URL {
+        let url = entryURL.appending(path: RecorderPartialFile.name)
+        let writer = try DurableAudioJournalWriter(url: url, barrier: { _ in .full })
+        let frameCount = Int(seconds * 44_100)
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 44_100, channels: 1, interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)
+        ))
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        if let channel = buffer.floatChannelData?[0] {
+            for index in 0..<frameCount {
+                channel[index] = amplitude * Float(sin(Double(index) * 0.03))
+            }
+        }
+        try writer.write(from: buffer)
+        writer.closeDiscarding()
+        return url
+    }
+
+    @Test func unclosedCrashJournalRecoversWithExactDuration() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try seedUnclosedJournal(in: fixture.url, seconds: 2.0, amplitude: 0.4)
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(abs(recovered.duration - 2.0) < 0.05)
+        #expect(recovered.microphoneHasSignal)
+        #expect(recovered.shouldQueueTranscription)
+        #expect(!FileManager.default.fileExists(
+            atPath: fixture.url.appending(path: RecorderPartialFile.name).path
+        ))
+        #expect(FileManager.default.fileExists(
+            atPath: fixture.url.appending(path: recovered.audioFileName).path
+        ))
+    }
+
+    @Test func tailTruncatedUnclosedJournalRecoversWholeFrames() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let url = try seedUnclosedJournal(in: fixture.url, seconds: 1.0, amplitude: 0.4)
+        // Sever mid-sample, as an interrupted sector write would.
+        let byteCount = try #require(
+            FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int
+        )
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(byteCount - 4_411))
+        try handle.close()
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(abs(recovered.duration - 0.95) < 0.05)
+        #expect(recovered.microphoneHasSignal)
+    }
+
+    @Test func headerOnlyUnclosedJournalCarriesNoFramesClassification() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let url = fixture.url.appending(path: RecorderPartialFile.name)
+        let writer = try DurableAudioJournalWriter(url: url, barrier: { _ in .full })
+        writer.closeDiscarding()
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let failure = try #require(summary.failures.first)
+        #expect(summary.recovered.isEmpty)
+        #expect(failure.microphoneFrames == 0)
+        #expect(failure.microphoneTerminalState == .noFrames)
+    }
+
+    @Test func unclosedJournalWithSidecarStillMixesMacAudio() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // A silent mic beside an audible sidecar — the crashed-meeting shape.
+        _ = try seedUnclosedJournal(in: fixture.url, seconds: 1.0, amplitude: 0)
+        try seedSystemAudioSidecar(in: fixture.url, startFrame: 4_410, frameCount: 8_820)
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(!recovered.microphoneHasSignal)
+        #expect(recovered.mixedSystemAudio)
+        #expect(recovered.shouldQueueTranscription)
+        #expect(abs(recovered.duration - 1.0) < 0.05)
+        expectNoUniversalArtifacts(in: fixture.url)
+    }
+
+    @Test func tornTailSidecarStillMixesTheIntactPrefix() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try seedUnclosedJournal(in: fixture.url, seconds: 1.0, amplitude: 0)
+        let sidecarURL = fixture.url.appending(
+            path: UniversalRecordingArtifacts.systemAudioFileName
+        )
+        let journal = SparseSystemAudioJournal(
+            url: sidecarURL, configuration: .init(preRollFrames: 0, releaseFrames: 0)
+        )
+        try journal.append(
+            samples: [Float](repeating: 0.6, count: 4_410), startFrame: 0, peak: 0.6
+        )
+        try journal.append(
+            samples: [Float](repeating: 0.6, count: 4_410), startFrame: 8_820, peak: 0.6
+        )
+        _ = journal.finish()
+        // Sever the second record mid-payload, as a power cut would.
+        let byteCount = try #require(
+            FileManager.default.attributesOfItem(atPath: sidecarURL.path)[.size] as? Int
+        )
+        let handle = try FileHandle(forWritingTo: sidecarURL)
+        try handle.truncate(atOffset: UInt64(byteCount - 100))
+        try handle.close()
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(recovered.mixedSystemAudio)
+        #expect(recovered.shouldQueueTranscription)
+        expectNoUniversalArtifacts(in: fixture.url)
+    }
 }

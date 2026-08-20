@@ -303,7 +303,11 @@ out of scope unless that device's audio is routed through the Mac.
   validates. The final render has exactly the microphone frame count and
   preserves mic samples outside system-audio overlap. Any failure installs the
   mic master instead. With no meaningful Mac audio, output is the ordinary
-  mic-only path with no retained sidecar or extra file growth.
+  mic-only path with no retained sidecar or extra file growth. The same
+  validate-or-fall-back rule governs crash and quit-and-recover recovery,
+  which re-render the retained sidecar; recovery additionally tolerates a
+  single truncated tail record (what a power cut leaves), while any other
+  sidecar defect still installs the pristine mic master.
 - Atomically install the validated mixed-or-mic-only canonical audio before
   queuing batch transcription. Live transcription remains a display-only mic
   preview, is cleared at stop, and is replaced by post-stop transcription of
@@ -343,7 +347,8 @@ out of scope unless that device's audio is routed through the Mac.
   failure; every no-buffer, prolonged-silence, stall, and sink-write episode;
   and every terminal zero-frame or perfectly silent microphone result before
   optional Mac audio can mask it. Stop, cancel, quit-and-recover, and crash
-  recovery use the same microphone-only classification. The ledger is local,
+  recovery use the same microphone-only classification; a recovered mix never
+  alters the microphone classification. The ledger is local,
   owner-readable only, and contains no vault paths, titles, audio samples,
   device names, raw hardware identifiers, or error descriptions.
 

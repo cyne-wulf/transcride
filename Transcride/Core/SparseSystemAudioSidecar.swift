@@ -40,6 +40,12 @@ final class SparseSystemAudioJournal {
 
     static let magic = Data("TRSYS001".utf8)
 
+    /// The power-loss bound, matching the microphone journal's cadence:
+    /// Float32 mono at 44.1 kHz for `durabilityBarrierInterval` seconds.
+    private static let barrierIntervalBytes =
+        Int(DurableAudioJournalWriter.durabilityBarrierInterval * 44_100)
+            * MemoryLayout<Float32>.size
+
     let meaningfulSignalThreshold: Float
     private let url: URL
     private let configuration: Configuration
@@ -51,6 +57,16 @@ final class SparseSystemAudioJournal {
     private var hasMeaningfulSignal = false
     private var lastRecordEnd: Int64?
     private var finished = false
+
+    /// Barriers run off the caller's (ScreenCaptureKit) queue; `fsync` beside
+    /// a concurrent `write` on the same descriptor is safe, and `finish()`
+    /// funnels its close through this queue so no barrier outlives the file.
+    private let barrierQueue = DispatchQueue(
+        label: "transcride.sidecar.durability", qos: .utility
+    )
+    private let barrierLock = NSLock()
+    private var bytesSinceBarrier = 0
+    private var barrierPending = false
 
     init(url: URL, configuration: Configuration = .init()) {
         precondition(configuration.meaningfulSignalThreshold.isFinite)
@@ -116,13 +132,37 @@ final class SparseSystemAudioJournal {
         finished = true
         preRoll.removeAll()
         preRollFrameCount = 0
-        try? handle?.close()
+        let closingHandle = handle
+        let keepBytes = hasMeaningfulSignal
         handle = nil
+        // Ordered after every scheduled barrier, so none touches a closed
+        // descriptor; a kept sidecar takes one final barrier on the way out.
+        barrierQueue.sync {
+            if keepBytes, let fd = closingHandle?.fileDescriptor {
+                _ = FileDurability.barrier(fileDescriptor: fd)
+            }
+            try? closingHandle?.close()
+        }
         guard hasMeaningfulSignal else {
             try? FileManager.default.removeItem(at: url)
             return nil
         }
         return url
+    }
+
+    /// Forces the partial barrier interval out to media — used at pause, when
+    /// no further appends would trip the byte-driven cadence.
+    func scheduleDurabilityBarrier() {
+        guard let handle else { return }
+        barrierLock.lock()
+        let due = bytesSinceBarrier > 0 && !barrierPending
+        if due {
+            barrierPending = true
+            bytesSinceBarrier = 0
+        }
+        barrierLock.unlock()
+        guard due else { return }
+        scheduleBarrier(descriptor: handle.fileDescriptor)
     }
 
     private func appendToPreRoll(_ chunk: UniversalRecordingAudioChunk) {
@@ -146,6 +186,18 @@ final class SparseSystemAudioJournal {
         FileManager.default.createFile(atPath: url.path, contents: Self.magic)
         handle = try FileHandle(forWritingTo: url)
         try handle?.seekToEnd()
+        // The sidecar's existence and magic must survive a power cut from the
+        // first meaningful sample, or recovery never learns Mac audio existed —
+        // but this runs on the ScreenCaptureKit callback, so the barrier is
+        // queued off-thread like every cadence barrier. The descriptor stays
+        // valid: `finish()` drains this queue before closing the handle.
+        if let fd = handle?.fileDescriptor {
+            let directory = url.deletingLastPathComponent()
+            barrierQueue.async {
+                _ = FileDurability.barrier(fileDescriptor: fd)
+                FileDurability.syncDirectory(at: directory)
+            }
+        }
     }
 
     private func write(_ chunk: UniversalRecordingAudioChunk) throws {
@@ -165,6 +217,29 @@ final class SparseSystemAudioJournal {
         for sample in chunk.samples { data.appendLittleEndian(sample.bitPattern) }
         try handle.write(contentsOf: data)
         lastRecordEnd = recordEnd
+
+        barrierLock.lock()
+        bytesSinceBarrier += data.count
+        let due = bytesSinceBarrier >= Self.barrierIntervalBytes && !barrierPending
+        if due {
+            barrierPending = true
+            bytesSinceBarrier = 0
+        }
+        barrierLock.unlock()
+        if due { scheduleBarrier(descriptor: handle.fileDescriptor) }
+    }
+
+    /// The captured descriptor stays valid for the block's lifetime: blocks
+    /// are queued only while the handle is open, and `finish()` closes it
+    /// behind them via `barrierQueue.sync`.
+    private func scheduleBarrier(descriptor: Int32) {
+        barrierQueue.async { [weak self] in
+            _ = FileDurability.barrier(fileDescriptor: descriptor)
+            guard let self else { return }
+            self.barrierLock.lock()
+            self.barrierPending = false
+            self.barrierLock.unlock()
+        }
     }
 }
 
@@ -233,6 +308,18 @@ enum UniversalRecordingFileMixError: Error {
     case invalidOutput
 }
 
+/// How a sidecar record severed at end-of-file is classified.
+enum SparseSidecarTailPolicy: Sendable {
+    /// Any short record is corruption. The finalize-time contract: a clean
+    /// stop writes whole records, so a torn tail there is a real defect.
+    case strict
+    /// A record severed at EOF ends the stream; the surviving prefix is used.
+    /// The recovery contract: with periodic barriers, a power cut is
+    /// *expected* to tear the final record, and that must not forfeit every
+    /// earlier record. Structural corruption still throws under both policies.
+    case tolerateTruncatedTail
+}
+
 /// Streaming offline render. The microphone journal is read-only, output is
 /// staged separately, and the staged CAF is reopened and length-validated
 /// before RecorderService may choose it for finalization.
@@ -241,7 +328,8 @@ enum UniversalRecordingFileMixer {
         microphoneURL: URL,
         systemJournalURL: URL,
         stagedURL: URL,
-        configuration: UniversalRecordingMixConfiguration = .init()
+        configuration: UniversalRecordingMixConfiguration = .init(),
+        tailPolicy: SparseSidecarTailPolicy = .strict
     ) throws -> UniversalRecordingFileMixResult {
         let microphone = try AVAudioFile(forReading: microphoneURL)
         guard microphone.length > 0,
@@ -252,7 +340,7 @@ enum UniversalRecordingFileMixer {
             throw UniversalRecordingFileMixError.invalidMicrophoneJournal
         }
         let totalFrames = Int64(microphone.length)
-        let sparse = try SparseSystemAudioReader(url: systemJournalURL)
+        let sparse = try SparseSystemAudioReader(url: systemJournalURL, tailPolicy: tailPolicy)
         guard let firstChunk = try sparse.nextChunk() else {
             throw UniversalRecordingFileMixError.invalidSystemJournal
         }
@@ -396,9 +484,11 @@ enum UniversalRecordingFileMixer {
 
 private final class SparseSystemAudioReader {
     private let handle: FileHandle
+    private let tailPolicy: SparseSidecarTailPolicy
     private var previousEnd: Int64?
 
-    init(url: URL) throws {
+    init(url: URL, tailPolicy: SparseSidecarTailPolicy = .strict) throws {
+        self.tailPolicy = tailPolicy
         handle = try FileHandle(forReadingFrom: url)
         guard try handle.readExactly(SparseSystemAudioJournal.magic.count)
             == SparseSystemAudioJournal.magic else {
@@ -414,6 +504,9 @@ private final class SparseSystemAudioReader {
         var header = firstByte
         header.append(try handle.readExactly(11))
         guard header.count == 12 else {
+            // `readExactly` comes up short only at EOF: the final record was
+            // severed mid-header, exactly what a power cut leaves.
+            if tailPolicy == .tolerateTruncatedTail { return nil }
             throw UniversalRecordingFileMixError.invalidSystemJournal
         }
         let startFrame = header.littleEndianInt64(at: 0)
@@ -422,17 +515,28 @@ private final class SparseSystemAudioReader {
         guard startFrame >= 0, count > 0, count <= 1_000_000, !frameEndOverflow else {
             throw UniversalRecordingFileMixError.invalidSystemJournal
         }
-        let endFrame = startFrame + Int64(count)
         if let previousEnd, startFrame < previousEnd {
             throw UniversalRecordingFileMixError.invalidSystemJournal
         }
-        let payload = try handle.readExactly(count * MemoryLayout<UInt32>.size)
-        guard payload.count == count * MemoryLayout<UInt32>.size else {
-            throw UniversalRecordingFileMixError.invalidSystemJournal
+        let requestedBytes = count * MemoryLayout<UInt32>.size
+        let payload = try handle.readExactly(requestedBytes)
+        var sampleCount = count
+        if payload.count < requestedBytes {
+            // Severed mid-payload at EOF — same torn-tail shape as above. The
+            // whole samples that did reach the file are genuine captured
+            // audio, so the surviving prefix is kept rather than forfeited.
+            // This also bounds what a corrupted count field can cost: every
+            // frame physically present is still recovered. Sample validation
+            // below still throws on structural corruption under both policies.
+            guard tailPolicy == .tolerateTruncatedTail else {
+                throw UniversalRecordingFileMixError.invalidSystemJournal
+            }
+            sampleCount = payload.count / MemoryLayout<UInt32>.size
+            guard sampleCount > 0 else { return nil }
         }
         var samples: [Float] = []
-        samples.reserveCapacity(count)
-        for index in 0..<count {
+        samples.reserveCapacity(sampleCount)
+        for index in 0..<sampleCount {
             let bits = payload.littleEndianUInt32(at: index * 4)
             let sample = Float(bitPattern: bits)
             guard sample.isFinite, abs(sample) <= 1 else {
@@ -440,7 +544,7 @@ private final class SparseSystemAudioReader {
             }
             samples.append(sample)
         }
-        previousEnd = endFrame
+        previousEnd = startFrame + Int64(sampleCount)
         return .init(startFrame: startFrame, samples: samples)
     }
 }

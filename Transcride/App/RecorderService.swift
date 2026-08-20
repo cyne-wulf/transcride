@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Foundation
 import Observation
@@ -213,6 +214,10 @@ final class RecorderService {
     /// rollback removes the provisional manifest/CAF; a hard crash naturally
     /// retains both so extension recovery can classify the partial capture.
     private var startupExtensionEntryURL: URL?
+    /// Registered once, on the first recording. A machine going to sleep may
+    /// never wake (battery death, panic), so the journal's partial barrier
+    /// interval is pushed to media before the lid closes.
+    private var sleepObserver: NSObjectProtocol?
 
     /// AppModel installs this only while a replacement attempt is active. The
     /// trigger comes from the sink's frame-derived elapsed time, never a UI timer.
@@ -426,6 +431,19 @@ final class RecorderService {
             recorderIsIdle: state == .idle
         ) == .begin else {
             throw RecorderError.recordingAlreadyActive
+        }
+        if sleepObserver == nil {
+            sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.state == .recording || self.state == .paused else { return }
+                    self.sink?.scheduleDurabilityBarrier()
+                }
+            }
         }
         // `start()` is actor-reentrant while Core Audio settles. Use the same
         // lifecycle lock as finalization so quit, vault switches, and a second
@@ -683,14 +701,13 @@ final class RecorderService {
         // discoverable by the existing interrupted-recording recovery scan.
         let attemptURL = canonicalJournalURL
         try? FileManager.default.removeItem(at: attemptURL)
-        let file: AVAudioFile
+        let file: DurableAudioJournalWriter
         do {
-            file = try AVAudioFile(
-                forWriting: attemptURL,
-                settings: CrashTolerantAudioJournal.fileSettings,
-                commonFormat: .pcmFormatFloat32,
-                interleaved: false
-            )
+            // The journal owns its file descriptor so the capture path can
+            // issue periodic F_FULLFSYNC barriers: a power loss or kernel
+            // panic costs at most the last barrier interval of audio, where
+            // AVAudioFile left the whole page-cache window exposed.
+            file = try DurableAudioJournalWriter(url: attemptURL)
         } catch {
             logMicrophoneFailure(
                 kind: .initializationFailed,
@@ -712,6 +729,11 @@ final class RecorderService {
             )
         }
         let targetFormat = file.processingFormat
+        if file.durabilityDegraded {
+            DebugLog.append(
+                "recorder: journal volume rejects F_FULLFSYNC; power-loss durability degraded to fsync"
+            )
+        }
         let timeline: UniversalRecordingTimeline? = switch target {
         case .newEntry:
             UniversalRecordingTimeline(sampleRate: targetFormat.sampleRate)
@@ -722,7 +744,7 @@ final class RecorderService {
         let gate = MicrophoneStartupGate()
         let sinkID = UUID()
         let sink = RecordingSink(
-            file: file,
+            journal: file,
             targetFormat: targetFormat
         ) { [weak self] elapsed, peaksTail, error, inputFormatChanged, framesWritten, bufferPeak in
             Task { @MainActor [weak self] in
@@ -1293,6 +1315,9 @@ final class RecorderService {
         systemAudioCapture?.pause()
         engine?.pause()
         recordingTimeline?.endSegment(atFrame: sink?.frameCount ?? 0)
+        // No more audio arrives while paused, so the byte-driven barrier
+        // cadence stalls; push the partial interval to media now.
+        sink?.scheduleDurabilityBarrier()
         state = .paused
         captureHealthTask?.cancel()
         captureHealthTask = nil
@@ -2065,9 +2090,11 @@ final class RecorderService {
         if let result = sink?.finish() {
             logTerminalMicrophoneFailure(result, stage: .recoveryPreservation)
         }
-        // Recovery is intentionally microphone-only. The sparse companion is
-        // not a canonical file and must not survive as an ambiguous artifact.
-        _ = finishOptionalSystemAudioCapture(discard: true)
+        // Startup recovery consumes the sparse companion the same way a crash
+        // does — mixing it into the recovered audio when it validates, and
+        // sweeping it either way — so quit-and-recover keeps it. Discarding
+        // here would make politely quitting lose the Mac audio a crash keeps.
+        _ = finishOptionalSystemAudioCapture(discard: false)
         engine = nil
         sink = nil
         activeSinkID = nil
@@ -2187,7 +2214,8 @@ final class RecorderService {
         if let data = try? encoder.encode(extensionSession) {
             try? AtomicFile.write(
                 data,
-                to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+                to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName),
+                durability: .full
             )
         }
     }
@@ -2201,9 +2229,12 @@ final class RecorderService {
     ) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // `.full`: the journal itself now survives power loss, so the manifest
+        // that classifies it must reach media too, name and all.
         try AtomicFile.write(
             try encoder.encode(session),
-            to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+            to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName),
+            durability: .full
         )
     }
 
@@ -2672,7 +2703,7 @@ private final class RecordingSink: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let file: AVAudioFile
+    private let journal: DurableAudioJournalWriter
     private var sourceFormat: AVAudioFormat?
     private let targetFormat: AVAudioFormat
     private let normalizer: RecordingAudioNormalizer
@@ -2693,13 +2724,13 @@ private final class RecordingSink: @unchecked Sendable {
     ) -> Void
 
     init(
-        file: AVAudioFile,
+        journal: DurableAudioJournalWriter,
         targetFormat: AVAudioFormat,
         onUpdate: @escaping @Sendable (
             Double, [Float], Error?, Bool, Int64, Float
         ) -> Void
     ) {
-        self.file = file
+        self.journal = journal
         self.targetFormat = targetFormat
         self.normalizer = RecordingAudioNormalizer(targetFormat: targetFormat)
         self.builder = WaveformBuilder(sampleRate: targetFormat.sampleRate)
@@ -2740,7 +2771,7 @@ private final class RecordingSink: @unchecked Sendable {
 
         guard output.frameLength > 0 else { return nil }
         do {
-            try file.write(from: output)
+            try journal.write(from: output)
             framesWritten += Int64(output.frameLength)
             var canonicalPeak: Float = 0
             if let channel = output.floatChannelData?[0] {
@@ -2796,6 +2827,13 @@ private final class RecordingSink: @unchecked Sendable {
 
     var targetAudioFormat: AVAudioFormat { targetFormat }
 
+    /// Forces the partial barrier interval out to media — used at pause and
+    /// system sleep, when the byte-driven cadence would otherwise stall.
+    /// The journal serializes internally; no sink lock needed.
+    func scheduleDurabilityBarrier() {
+        journal.scheduleDurabilityBarrier()
+    }
+
     /// Idempotent; closes the file so the finalizer can read it.
     @discardableResult
     func finish() -> Result {
@@ -2804,7 +2842,7 @@ private final class RecordingSink: @unchecked Sendable {
         if !finished {
             finished = true
             builder.finish()
-            file.close()
+            journal.close()
         }
         return Result(
             frames: framesWritten,
