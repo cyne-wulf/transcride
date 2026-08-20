@@ -291,7 +291,7 @@ struct AudioReplacementApplier: Sendable {
             }
             throw error
         }
-        try? EntryMetadata.setDuration(duration, inEntry: entryURL)
+        try? EntryMetadata.setDuration(duration, inEntry: entryURL, editedAt: date)
         try? TranscriptAlignmentState.markStale(inEntry: entryURL)
         return Outcome(
             trashedName: trashedName, audioFileName: destinationName, duration: duration

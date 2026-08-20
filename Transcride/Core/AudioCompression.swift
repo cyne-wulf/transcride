@@ -336,7 +336,7 @@ struct AudioCompressionApplier: Sendable {
             }
             throw error
         }
-        try? EntryMetadata.setDuration(compressedDuration, inEntry: entryURL)
+        try? EntryMetadata.setDuration(compressedDuration, inEntry: entryURL, editedAt: date)
         try? TranscriptAlignmentState.markStale(inEntry: entryURL)
         return .init(
             trashedName: trashedName,

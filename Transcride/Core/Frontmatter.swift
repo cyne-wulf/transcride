@@ -147,6 +147,14 @@ extension FrontmatterDocument {
         set { setValue(newValue.map(FrontmatterDate.format), for: "created") }
     }
 
+    /// When the entry's audio was last edited (trim, extend, replace,
+    /// compress, or a version restore). Absent until the first audio edit,
+    /// so untouched recordings never carry it.
+    var audioEdited: Date? {
+        get { value(for: "audio_edited").flatMap(FrontmatterDate.parse) }
+        set { setValue(newValue.map(FrontmatterDate.format), for: "audio_edited") }
+    }
+
     var duration: Double? {
         get { value(for: "duration").flatMap(Double.init) }
         set { setValue(newValue.map { String(format: "%.2f", $0) }, for: "duration") }

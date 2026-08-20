@@ -157,7 +157,7 @@ actor VaultService {
         }
         let waveform = try await WaveformGenerator.generate(fromAudioAt: audioURL)
         try waveform.write(to: WaveformData.url(inEntry: entryURL))
-        try EntryMetadata.setDuration(duration, inEntry: entryURL)
+        try EntryMetadata.setDuration(duration, inEntry: entryURL, editedAt: Date())
         RecordingExtensionRecovery.removeArtifacts(in: entryURL)
         synchronizeSearchIndex(relativePaths: [recovery.entryRelativePath])
         recordClipEdit(
@@ -1209,7 +1209,7 @@ actor VaultService {
         }
         let audioURL = entryURL.appending(path: audioName)
         let duration = try await AudioImportFormat.probeDuration(of: audioURL)
-        try? EntryMetadata.setDuration(duration, inEntry: entryURL)
+        try? EntryMetadata.setDuration(duration, inEntry: entryURL, editedAt: Date())
         try? TranscriptAlignmentState.markStale(inEntry: entryURL)
         do {
             let waveform = try await WaveformGenerator.generate(fromAudioAt: audioURL)

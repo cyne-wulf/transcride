@@ -400,7 +400,9 @@ struct TrashStore: Sendable {
                 || item.kind == .preReplacementAudio
                 || legacyAudioVersion),
            let waveform = WaveformData.load(from: WaveformData.url(inEntry: entryURL)) {
-            try? EntryMetadata.setDuration(waveform.duration, inEntry: entryURL)
+            try? EntryMetadata.setDuration(
+                waveform.duration, inEntry: entryURL, editedAt: Date()
+            )
             if item.kind == .preExtensionAudio {
                 try? ExtensionTranscriptState(
                     knownTranscriptDuration: priorTranscriptDuration ?? waveform.duration,

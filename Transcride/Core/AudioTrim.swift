@@ -246,12 +246,19 @@ enum AudioTrimExport {
 /// Frontmatter touch-ups shared by the trim paths.
 enum EntryMetadata {
     /// Rewrites the entry's frontmatter `duration`, leaving everything else
-    /// alone. A no-op when the entry has no transcript file.
-    static func setDuration(_ duration: Double, inEntry entryURL: URL) throws {
+    /// alone. A no-op when the entry has no transcript file. `editedAt` is
+    /// passed by audio *edits* (trim, extend, replace, compress, restore) and
+    /// stamps `audio_edited`; recording finalization/recovery leaves it nil.
+    static func setDuration(
+        _ duration: Double, inEntry entryURL: URL, editedAt: Date? = nil
+    ) throws {
         guard let url = TranscriptFile.url(inEntry: entryURL),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return }
         var doc = FrontmatterDocument.parse(text)
         doc.duration = duration
+        if let editedAt {
+            doc.audioEdited = editedAt
+        }
         try AtomicFile.write(doc.serialized(), to: url)
     }
 
@@ -305,7 +312,7 @@ struct TrimApplier: Sendable {
         try FileManager.default.moveItem(at: trimmedURL, to: entryURL.appending(path: fileName))
         // Stale metadata must not fail the trim — the files are already
         // consistent, and the next retranscription refreshes the note anyway.
-        try? EntryMetadata.setDuration(newDuration, inEntry: entryURL)
+        try? EntryMetadata.setDuration(newDuration, inEntry: entryURL, editedAt: date)
         try? TranscriptAlignmentState.markStale(inEntry: entryURL)
         return Outcome(trashedName: trashedName, audioFileName: fileName, newDuration: newDuration)
     }

@@ -213,6 +213,29 @@ struct AudioTrimTests {
         #expect(!FileManager.default.fileExists(atPath: replacementHistory.path))
     }
 
+    @Test func applierStampsAudioEditedDateAndPlainSetDurationDoesNot() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        let trimmedURL = try makeTrimmedFile()
+        defer { try? FileManager.default.removeItem(at: trimmedURL.deletingLastPathComponent()) }
+
+        // Finalization-style duration updates (no editedAt) never add the key.
+        try EntryMetadata.setDuration(9.5, inEntry: entryURL)
+        #expect(!(try transcriptText(inEntry: entryURL).contains("audio_edited")))
+
+        let editDate = FrontmatterDate.parse("2026-08-20T12:34:56-07:00")!
+        _ = try TrimApplier(vaultRoot: root).apply(
+            trimmedFileAt: trimmedURL, fileName: "audio.m4a",
+            newDuration: 4.5, toEntryAt: entryRelPath, date: editDate
+        )
+
+        // The raw scalar is written in the local zone, so compare instants.
+        let doc = FrontmatterDocument.parse(try transcriptText(inEntry: entryURL))
+        #expect(doc.audioEdited == editDate)
+        #expect(doc.value(for: "audio_edited") != nil)
+    }
+
     @Test func applierWithoutAudioThrows() throws {
         let (root, entryRelPath) = try makeVault()
         defer { try? FileManager.default.removeItem(at: root) }

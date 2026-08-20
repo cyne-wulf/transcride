@@ -177,7 +177,7 @@ struct AudioExtensionApplier: Sendable {
             }
             throw error
         }
-        try? EntryMetadata.setDuration(combinedDuration, inEntry: entryURL)
+        try? EntryMetadata.setDuration(combinedDuration, inEntry: entryURL, editedAt: date)
         try ExtensionTranscriptState(
             knownTranscriptDuration: previousTranscriptDuration,
             combinedAudioDuration: combinedDuration,
