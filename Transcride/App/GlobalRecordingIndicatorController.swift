@@ -12,6 +12,7 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
     private var observers: [NSObjectProtocol] = []
     private var isRestoringPosition = false
     private var isDismissed = false
+    private var isShutdown = false
     private var wasCaptureActive = false
     private var lastAnnouncedState: String?
 
@@ -49,7 +50,12 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
         observeModel()
     }
 
+    /// Latches the observation loop as well as the notification observers:
+    /// `withObservationTracking` re-arms itself, so without the flag any model
+    /// mutation after termination begins would re-show the panel.
     func shutdown() {
+        guard !isShutdown else { return }
+        isShutdown = true
         panel.orderOut(nil)
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers.removeAll()
@@ -95,20 +101,25 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
     }
 
     private func observeModel() {
+        guard !isShutdown else { return }
         withObservationTracking {
             _ = model.globalShortcutPreferences
             _ = model.globalRecordingPresentationState
             _ = model.isGlobalIndicatorRetentionActive
         } onChange: { [weak self] in
             Task { @MainActor in
-                self?.updateVisibility()
-                self?.observeModel()
+                guard let self, !self.isShutdown else { return }
+                self.updateVisibility()
+                self.observeModel()
             }
         }
         updateVisibility()
     }
 
     private func updateVisibility() {
+        // Also latches notification handlers whose main-actor hop was already
+        // scheduled when `shutdown()` removed the observers.
+        guard !isShutdown else { return }
         let preferences = model.globalShortcutPreferences
         let presentationState = model.globalRecordingPresentationState
         let isCaptureActive = presentationState.isCaptureActive

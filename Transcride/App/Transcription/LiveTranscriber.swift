@@ -23,8 +23,17 @@ final class LiveTranscriber {
     /// always live when the model allows.
     static let enabledKey = "liveTranscriptionEnabled"
 
+    /// One tap buffer is `RecorderService.liveUpdateInterval` (100 ms) of
+    /// audio, so this bounds the queue at ~3 seconds / ~530 KB. Without a
+    /// bound, a stalled or not-yet-downloaded model accumulates ~176 KB/s
+    /// indefinitely.
+    private static let maxBufferedChunks = 30
+
     private(set) var status: Status = .idle
     private(set) var transcript = LiveTranscript()
+    /// True once this session had to discard queued audio to stay current.
+    /// Display-only: the recording never reads this stream.
+    private(set) var isAudioBacklogDropping = false
 
     /// True only while a recording is feeding audio. Model preparation may
     /// continue independently between recordings.
@@ -91,8 +100,18 @@ final class LiveTranscriber {
         transcript = LiveTranscript()
         confirmedText = ""
 
-        let (stream, continuation) = AsyncStream.makeStream(of: LiveAudioChunk.self)
+        isAudioBacklogDropping = false
+        // `.bufferingNewest` discards the *oldest* queued chunk, which is the
+        // right trade for a "what am I saying right now" ticker: latency stays
+        // bounded and the text tracks current speech. The consumer loop below
+        // only starts after model preparation finishes, so a first-run model
+        // download would otherwise queue the entire download's worth of audio.
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: LiveAudioChunk.self,
+            bufferingPolicy: .bufferingNewest(Self.maxBufferedChunks)
+        )
         feed = continuation
+        let dropTracker = DropTracker()
         let manager = self.manager
         let preparation = self.preparation
         sessionGeneration += 1
@@ -143,9 +162,14 @@ final class LiveTranscriber {
             }
         }
 
-        return { @Sendable buffer in
+        return { @Sendable [weak self] buffer in
             guard let chunk = Self.chunk(from: buffer) else { return }
-            continuation.yield(chunk)
+            guard case .dropped = continuation.yield(chunk) else { return }
+            // One main-actor hop per lag episode, not one per dropped buffer.
+            guard let transcriber = self, dropTracker.claimReport() else { return }
+            Task { @MainActor in
+                transcriber.noteAudioBacklogDropped(generation: generation, tracker: dropTracker)
+            }
         }
     }
 
@@ -174,6 +198,7 @@ final class LiveTranscriber {
         feed = nil
         transcript = LiveTranscript()
         confirmedText = ""
+        isAudioBacklogDropping = false
         if preparation != nil {
             status = .preparing(nil)
         } else if modelsReady {
@@ -228,6 +253,22 @@ final class LiveTranscriber {
         }
     }
 
+    /// Queued audio was discarded to keep the live text current. Drops before
+    /// the decoder is listening are expected — the consumer loop starts only
+    /// after the model finishes downloading/loading — so those re-arm the
+    /// tracker instead of alarming the user.
+    private func noteAudioBacklogDropped(generation: Int, tracker: DropTracker) {
+        guard sessionGeneration == generation else { return }
+        guard status == .listening else {
+            tracker.rearm()
+            return
+        }
+        if !isAudioBacklogDropping {
+            isAudioBacklogDropping = true
+        }
+        DebugLog.append("live transcription dropped queued audio to catch up")
+    }
+
     private func applyPartial(_ partial: String, generation: Int) {
         guard sessionGeneration == generation, status == .listening else { return }
         transcript = LiveTranscript.resolve(partial: partial, confirmed: confirmedText)
@@ -272,5 +313,28 @@ final class LiveTranscriber {
         }
         buffer.frameLength = AVAudioFrameCount(chunk.samples.count)
         return buffer
+    }
+}
+
+/// Lets the audio thread report a backlog drop exactly once per session
+/// instead of once per discarded buffer (~10/s while stalled). Lock-backed
+/// like the recorder's other audio-thread rendezvous points.
+private final class DropTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var canReport = true
+
+    /// True for the first caller after each `rearm()`.
+    func claimReport() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard canReport else { return false }
+        canReport = false
+        return true
+    }
+
+    func rearm() {
+        lock.lock()
+        canReport = true
+        lock.unlock()
     }
 }

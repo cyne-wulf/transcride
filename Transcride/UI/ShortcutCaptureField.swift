@@ -31,6 +31,12 @@ struct ShortcutCaptureField: NSViewRepresentable {
         nsView.chord = chord
     }
 
+    /// A SwiftUI teardown that never moves the view between windows must not
+    /// strand `isShortcutCaptureActive` at true.
+    static func dismantleNSView(_ nsView: ShortcutCaptureNSView, coordinator: Coordinator) {
+        nsView.teardown()
+    }
+
     @MainActor
     final class Coordinator {
         var onCapture: (ShortcutChord?) -> Void
@@ -61,6 +67,7 @@ final class ShortcutCaptureNSView: NSView {
     var onCaptureStateChange: ((Bool) -> Void)?
 
     private let label = NSTextField(labelWithString: "")
+    private var windowKeyObserver: NSObjectProtocol?
     private var isCapturing = false {
         didSet {
             guard isCapturing != oldValue else { return }
@@ -111,7 +118,51 @@ final class ShortcutCaptureNSView: NSView {
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
+        removeWindowKeyObserver()
         if newWindow == nil { isCapturing = false }
+    }
+
+    /// First-responder status is per window: AppKit leaves this view as the
+    /// Settings window's first responder when that window merely stops being
+    /// key (the user clicks the main window, switches apps, ⌘-tabs). Without
+    /// this observer, capture mode — and the app-wide command suppression it
+    /// drives through `isShortcutCaptureActive` — would stay armed until the
+    /// user returned to Settings and clicked elsewhere.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        windowKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.endCapture() }
+        }
+    }
+
+    /// A tab switch can hide this view without removing it from the window.
+    override func viewDidHide() {
+        super.viewDidHide()
+        endCapture()
+    }
+
+    /// Routes through the responder chain so the normal `resignFirstResponder`
+    /// path runs; the assignment is idempotent (the `didSet` guards on change)
+    /// and covers the windowless case.
+    func endCapture() {
+        guard isCapturing else { return }
+        window?.makeFirstResponder(nil)
+        isCapturing = false
+        updateLabel()
+    }
+
+    func teardown() {
+        removeWindowKeyObserver()
+        endCapture()
+    }
+
+    private func removeWindowKeyObserver() {
+        guard let windowKeyObserver else { return }
+        NotificationCenter.default.removeObserver(windowKeyObserver)
+        self.windowKeyObserver = nil
     }
 
     /// AppKit offers every key-down to the key window's view tree and then the

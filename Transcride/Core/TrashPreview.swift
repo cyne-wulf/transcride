@@ -30,6 +30,16 @@ struct TrashPreview: Equatable, Sendable {
 /// deleted payload. Missing waveforms are generated in memory only.
 struct TrashPreviewResolver: Sendable {
     let vaultRoot: URL
+    /// Deleted payloads carry no `waveform.json` of their own unless one was
+    /// trashed with them, so without this every re-selection re-decoded the
+    /// whole audio file. Process-lifetime and self-invalidating; the resolver
+    /// still never writes into `.trash`.
+    let waveformCache: TrashWaveformCache
+
+    init(vaultRoot: URL, waveformCache: TrashWaveformCache = .shared) {
+        self.vaultRoot = vaultRoot
+        self.waveformCache = waveformCache
+    }
 
     private var trashDirectory: URL {
         vaultRoot.appending(path: TrashStore.directoryName, directoryHint: .isDirectory)
@@ -163,8 +173,14 @@ struct TrashPreviewResolver: Sendable {
         if let cached = WaveformData.load(from: WaveformData.url(inEntry: containerURL)) {
             return (cached, nil)
         }
+        let key = TrashWaveformCache.Key(audioAt: audioURL)
+        if let key, let memoized = await waveformCache.value(for: key) {
+            return (memoized, nil)
+        }
         do {
-            return (try await WaveformGenerator.generate(fromAudioAt: audioURL), nil)
+            let generated = try await WaveformGenerator.generate(fromAudioAt: audioURL)
+            if let key { await waveformCache.store(generated, for: key) }
+            return (generated, nil)
         } catch is CancellationError {
             return (nil, nil)
         } catch {
@@ -190,5 +206,101 @@ struct TrashPreviewResolver: Sendable {
 
     private func displayTitle(fromSlug slug: String) -> String {
         slug.split(separator: "-").joined(separator: " ").capitalized
+    }
+}
+
+/// In-memory LRU of waveforms generated for deleted payloads, which cannot be
+/// cached on disk (nothing may be written inside `.trash`).
+///
+/// The key is derived from the audio file's identity *and* its size and
+/// modification date, never from `trashedName` alone: `TrashStore` reuses a
+/// trashed name once its previous holder is restored or emptied, so a
+/// name-only key could serve one deleted recording's peaks for another's
+/// audio. Content-derived keys make the cache self-invalidating — an emptied
+/// or restored item's entry is simply never read again and ages out.
+actor TrashWaveformCache {
+    static let shared = TrashWaveformCache()
+
+    struct Key: Hashable, Sendable {
+        var path: String
+        var size: Int64
+        var modified: TimeInterval
+
+        init(path: String, size: Int64, modified: TimeInterval) {
+            self.path = path
+            self.size = size
+            self.modified = modified
+        }
+
+        /// Nil when the file cannot be stat'd, in which case the caller
+        /// generates without caching rather than risking a stale hit.
+        init?(audioAt url: URL) {
+            guard let values = try? url.resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey]
+            ), let size = values.fileSize, let modified = values.contentModificationDate
+            else { return nil }
+            self.init(
+                path: url.standardizedFileURL.path,
+                size: Int64(size),
+                modified: modified.timeIntervalSinceReferenceDate
+            )
+        }
+    }
+
+    /// A `WaveformData` costs ~12 bytes per peak (the peaks plus the display
+    /// cache's prefix sums), i.e. ~240 bytes per second of audio at the
+    /// standard 20 peaks/s. The budget caps the cache near 24 MB / ~28 hours
+    /// of audio; the entry count keeps a handful of ordinary previews warm.
+    private let maxEntries: Int
+    private let maxPeaks: Int
+    private var entries: [Key: WaveformData] = [:]
+    /// Least recently used first.
+    private var order: [Key] = []
+    private var totalPeaks = 0
+
+    init(maxEntries: Int = 6, maxPeaks: Int = 2_000_000) {
+        self.maxEntries = max(1, maxEntries)
+        self.maxPeaks = max(1, maxPeaks)
+    }
+
+    var count: Int { entries.count }
+
+    func value(for key: Key) -> WaveformData? {
+        guard let waveform = entries[key] else { return nil }
+        touch(key)
+        return waveform
+    }
+
+    func store(_ waveform: WaveformData, for key: Key) {
+        if let existing = entries[key] {
+            totalPeaks -= existing.peaks.count
+        }
+        entries[key] = waveform
+        totalPeaks += waveform.peaks.count
+        touch(key)
+        // The most recent entry is always retained, even if it alone exceeds
+        // the budget: re-selecting one very long recording must stay fast.
+        while order.count > 1, entries.count > maxEntries || totalPeaks > maxPeaks {
+            evictLeastRecentlyUsed()
+        }
+    }
+
+    func removeAll() {
+        entries.removeAll()
+        order.removeAll()
+        totalPeaks = 0
+    }
+
+    private func touch(_ key: Key) {
+        order.removeAll { $0 == key }
+        order.append(key)
+    }
+
+    private func evictLeastRecentlyUsed() {
+        guard !order.isEmpty else { return }
+        let key = order.removeFirst()
+        if let removed = entries.removeValue(forKey: key) {
+            totalPeaks -= removed.peaks.count
+        }
     }
 }

@@ -6,6 +6,13 @@ import SwiftUI
 struct ZenLiveTranscriptView: View {
     let transcriber: LiveTranscriber
 
+    /// The visible box is 640 × 200 at `.title3` — roughly 8 lines of ~85
+    /// characters. Rendering the whole session instead makes every partial
+    /// (~6/s) re-lay out an O(session) string on the main actor, so the text
+    /// is windowed to a few viewports of scrollback: what is on screen is
+    /// identical, the layout cost is constant.
+    private static let windowCharacters = 4000
+
     var body: some View {
         switch transcriber.status {
         case .idle:
@@ -40,10 +47,11 @@ struct ZenLiveTranscriptView: View {
                     .foregroundStyle(.tertiary)
                     .accessibilityIdentifier("zen-live-transcript-listening")
             } else {
+                let windowed = transcriber.transcript.tail(Self.windowCharacters)
                 ScrollViewReader { proxy in
                     ScrollView {
-                        (Text(transcriber.transcript.confirmed)
-                            + Text(transcriber.transcript.volatile)
+                        (Text(windowed.confirmed)
+                            + Text(windowed.volatile)
                             .foregroundStyle(.secondary))
                             .font(.title3)
                             .lineSpacing(5)
@@ -54,7 +62,7 @@ struct ZenLiveTranscriptView: View {
                     // Run after the new text has participated in layout.
                     // `onChange` fired in the same update transaction and
                     // often scrolled using the previous content height.
-                    .task(id: transcriber.transcript) {
+                    .task(id: windowed) {
                         try? await Task.sleep(for: .milliseconds(20))
                         guard !Task.isCancelled else { return }
                         proxy.scrollTo("zen-live-end", anchor: .bottom)
@@ -82,8 +90,7 @@ struct LiveTranscriptStrip: View {
     var body: some View {
         if transcriber.status != .idle {
             HStack(spacing: 10) {
-                Image(systemName: "waveform.and.mic")
-                    .foregroundStyle(.secondary)
+                statusIcon
                 content
                 Spacer(minLength: 0)
             }
@@ -93,6 +100,20 @@ struct LiveTranscriptStrip: View {
             .frame(maxWidth: .infinity)
             .background(.bar)
             .overlay(alignment: .top) { Divider() }
+        }
+    }
+
+    /// Turns amber only when live transcription fell behind far enough to
+    /// skip audio. Display-only feedback: the recording keeps every sample.
+    @ViewBuilder
+    private var statusIcon: some View {
+        if transcriber.isAudioBacklogDropping {
+            Image(systemName: "waveform.and.mic")
+                .foregroundStyle(.orange)
+                .help("Live text skipped ahead to keep up. The recording is unaffected.")
+        } else {
+            Image(systemName: "waveform.and.mic")
+                .foregroundStyle(.secondary)
         }
     }
 
