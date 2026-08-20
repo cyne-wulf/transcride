@@ -1,27 +1,33 @@
 # Transcride project state
 
-Last updated: 2026-07-12
+Last updated: 2026-08-20
 Release line: 1.2.0 (build 3)
-Verified gate: Milestone 7, 17/17 human checks
+Verified gate: Milestone 8, human-verified 2026-08-20
 Platform: macOS 15+, Apple silicon, Swift 6, SwiftUI
 
 ## Product state
 
-Milestones 1–7 are complete. Version 1.2 delivers the complete local workflow:
+Milestones 1–8 are complete. Version 1.2 delivers the complete local workflow:
 record or import audio, transcribe it on-device, review it against synchronized
 playback, edit a Markdown layer, search the vault, export or copy the knowledge,
 optionally delete the audio while retaining the note, and safely extend an existing
 recording with full retranscription and version recovery. Milestone 7 adds
 duration-preserving replacement of a selected audio region with multiple takes,
 contextual audition, recoverable versions, and non-destructive retained sources.
+Milestone 8 adds recording from anywhere — global hotkeys, a menu bar item, and a
+floating background indicator over one serialized command surface — plus a complete
+in-app shortcut remapper, Quick Move, optional Mac-system-audio capture mixed onto
+the microphone, a durable microphone-failure ledger, and power-loss durability
+barriers for live recording journals.
 
 The vault is the product's source of truth. It remains useful without Transcride:
 notes are Markdown, audio uses ordinary media formats, timed transcripts are JSON,
 and entry/folder names are human-readable. The SQLite search index and waveform
 files are derived caches.
 
-The next gated milestone is `PRD-8.md`. Read `PRD-8-start-here.md` first and do not
-begin it merely because the handoff exists; follow the milestone gate in
+No next milestone is currently defined: PRD-9 was removed from the roadmap at
+milestone-8 closeout. When the next milestone is specified, read
+`milestone-8-handoff.md` first and follow the milestone gate in
 `CLAUDE.md`/`AGENTS.md`.
 
 ## Architecture
@@ -160,6 +166,38 @@ by occurrence ordinal; user-authored text absent from the original has no time c
 - `RecentlyDeletedView`, `ExportMarkdownSheet`, `VocabularyReapplySheet`: lifecycle
   and export workflows.
 - `AppCommands`, `KeyboardShortcutsView`, `AboutView`: complete command/help polish.
+- `TranscrideMenuBar`, `GlobalShortcutSettings`, `AppShortcutSettings`,
+  `ShortcutCaptureField`, `QuickMoveView`: milestone-8 control surfaces.
+
+### Global recording controls and shortcuts (milestone 8)
+
+- `GlobalShortcutService` registers the two global hotkeys (⌥R start/stop-and-save,
+  ⌥P pause/resume) with Carbon `RegisterEventHotKey` — no event tap, no
+  Accessibility or Input Monitoring permission. Registration is atomic with
+  rollback; per-action status (`registered`/`failed(reason)`) is surfaced in
+  Settings. Preferences persist as JSON under `globalShortcutPreferencesV2`.
+- Every recording entry point (in-app, hotkey, menu bar, indicator, termination)
+  funnels through `AppModel.performRecordingCommand` guarded by
+  `RecordingCommandGate`: one command in flight, repeats suppressed, a
+  (command × availability-state) matrix produces canned unavailable reasons, and a
+  second gate serializes extension/replacement starts across awaits.
+- `GlobalRecordingPresentationState` is the one state model for the background
+  indicator and the menu bar item. The indicator is a 72×72 borderless
+  non-activating floating panel that joins all Spaces, is shown only while the app
+  is inactive during a session or retention window, toggles recording on click,
+  opens the app on long-press, and persists its position as a normalized per-display
+  anchor under `globalIndicatorScreenAnchorV1`. The app's activation policy is never
+  changed; it simply keeps running windowless.
+- `AppShortcuts` defines the 59-action, two-slot in-app catalog with reserved keys,
+  duplicate/global-conflict validation, visible shadowing (never silent drops), and
+  `appShortcutPreferencesV1` persistence. One local keyDown monitor dispatches
+  through `AppShortcutEventMatcher`; global chords always outrank local bindings,
+  and text editing always wins for deferring actions.
+- Live-capture durability: `DurableAudioJournalWriter` (hand-rolled CAF, verified
+  close-time size patch, recovery-side `repairDataChunkSize`) and `FileDurability`
+  bound power-loss audio loss to ~5 s via coalesced `F_FULLFSYNC` barriers off the
+  capture thread; the sparse Mac-audio sidecar shares the cadence, and recovery
+  salvages torn tails. Do not reintroduce `AVAudioFile` for live journal writes.
 
 ## Milestone deviations and user-approved additions
 
@@ -227,6 +265,27 @@ by occurrence ordinal; user-authored text absent from the original has no time c
 - Replacement capture starts directly without the optional countdown. Debug builds
   include explicit one-shot render and safe-swap failure commands.
 
+### Milestone 8
+
+- The in-app shortcut remapper (59 actions, two slots), Quick Move (⌥M), optional
+  universal recording (Mac system audio via ScreenCaptureKit mixed onto the
+  microphone journal), and the durable microphone-failure ledger were added by
+  user-approved addenda inside PRD-8.md.
+- A 34-finding pre-flight audit-fix program ran after implementation. The ⌥M
+  "types µ in text fields" finding is expected behavior: Quick Move defers to text
+  editing by design.
+- Power-loss durability hardening was a user-approved standalone addition; an
+  adversarial durability audit followed, and every refuted claim (torn close-time
+  size patch, capture-callback sync, `AtomicFile` fsync fallback, stale degraded
+  flag, discarded torn-tail sidecar records) was remediated before the gate.
+- Zen mode gained spacebar control (start when idle, pause/resume while active;
+  Space never stops a take), and Settings → Recording gained an explicit
+  two-permission status section, both at user request.
+- Quit-and-recover now preserves an active Mac-audio sidecar so recovery can mix
+  it, matching crash recovery.
+- PRD-9 was removed from the roadmap at closeout; the milestone-8 handoff is
+  `milestone-8-handoff.md` rather than a `PRD-9-start-here.md`.
+
 ## Known issues and technical debt
 
 ### P1 — release/distribution blockers
@@ -235,8 +294,8 @@ by occurrence ordinal; user-authored text absent from the original has no time c
    `project.yml` intentionally produces ad-hoc signed local builds. A downloadable
    app must be Developer-ID signed, notarized, and stapled before strangers can run
    it without Gatekeeper warnings.
-2. **No repeatable distribution script exists.** Add the notarized DMG pipeline
-   described by `PRD-9.md` once credentials and the intended distribution URL exist.
+2. **No repeatable distribution script exists.** Add a notarized DMG pipeline once
+   credentials and the intended distribution URL exist.
 
 ### P2 — product/runtime debt
 
@@ -274,9 +333,12 @@ The detailed post-v1 sequence is already written:
   replacement uses the shared trim selector, explicit replacement recording target,
   retained-source recipe, safe swap, and full retranscription without shifting later
   timeline positions.
-- `PRD-8.md`: next gated milestone; global recording controls from the menu bar and system-wide shortcut,
-  reusing the single-recorder and crash-recovery contracts.
-- `PRD-9.md`: an editor workbench for note structure and presentation.
+- `PRD-8.md`: complete and human-verified on 2026-08-20. Global recording controls
+  from the menu bar, system-wide shortcuts, and a background indicator over the
+  single-recorder contract, plus the shortcut remapper, Quick Move, universal
+  recording, failure ledger, and durability additions logged above.
+- PRD-9 (editor workbench for note structure and presentation) was removed from
+  the roadmap at milestone-8 closeout; its content is not planned.
 - `PRD-10.md`: a third Original / Edited / Summary layer backed by a basic,
   local-only summarization model. The implementation must benchmark below 8 GB peak
   resident memory, store Summary as a separate derived Markdown artifact, preserve
