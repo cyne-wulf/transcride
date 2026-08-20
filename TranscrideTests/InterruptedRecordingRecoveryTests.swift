@@ -241,6 +241,126 @@ struct InterruptedRecordingRecoveryTests {
         #expect(recovered.shouldQueueTranscription)
     }
 
+    @Test func truncatedVisibleAudioIsRebuiltFromTheIntactJournal() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let complete = try TestAudio.makeWAV(seconds: 1.2, amplitude: 0.35)
+        let torn = try TestAudio.makeWAV(seconds: 0.3, amplitude: 0.35)
+        defer {
+            try? FileManager.default.removeItem(at: complete.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: torn.deletingLastPathComponent())
+        }
+        let partialURL = fixture.url.appending(path: RecorderPartialFile.name)
+        try FileManager.default.copyItem(at: complete, to: partialURL)
+        // A finalize copy interrupted a quarter of the way through: readable,
+        // shorter than its own source, and not yet accompanied by a transcript.
+        try FileManager.default.copyItem(
+            at: torn,
+            to: fixture.url.appending(path: "audio.caf")
+        )
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(abs(recovered.duration - 1.2) < 0.1)
+        #expect(!FileManager.default.fileExists(atPath: partialURL.path))
+        let names = try FileManager.default.contentsOfDirectory(atPath: fixture.url.path)
+        #expect(names.filter { $0 == "audio.m4a" || $0 == "audio.caf" }.count == 1)
+        let canonical = fixture.url.appending(path: recovered.audioFileName)
+        #expect(try await AudioImportFormat.probeDuration(of: canonical) > 1.1)
+    }
+
+    @Test func shorterVisibleAudioOfAFinishedEntryIsNeverDiscarded() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let journal = try TestAudio.makeWAV(seconds: 1.2, amplitude: 0.35)
+        let trimmed = try TestAudio.makeWAV(seconds: 0.3, amplitude: 0.35)
+        defer {
+            try? FileManager.default.removeItem(at: journal.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: trimmed.deletingLastPathComponent())
+        }
+        try FileManager.default.copyItem(
+            at: journal,
+            to: fixture.url.appending(path: RecorderPartialFile.name)
+        )
+        let visibleURL = fixture.url.appending(path: "audio.caf")
+        try FileManager.default.copyItem(at: trimmed, to: visibleURL)
+        let trimmedBytes = try Data(contentsOf: visibleURL)
+        // A finished entry always carries a transcript. Its audio may be
+        // legitimately shorter than a stale journal — after a trim, say — and
+        // recovery must converge onto it rather than "restore" the old tail.
+        try EntryCreator.writeRecordingStub(
+            entryURL: fixture.url, created: .now, duration: 0.3
+        )
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(recovered.audioFileName == "audio.caf")
+        #expect(try Data(contentsOf: visibleURL) == trimmedBytes)
+        #expect(!FileManager.default.fileExists(
+            atPath: fixture.url.appending(path: RecorderPartialFile.name).path
+        ))
+    }
+
+    @Test func unusableJournalNeverDiscardsTheOnlyReadableAudio() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let short = try TestAudio.makeWAV(seconds: 0.3, amplitude: 0.35)
+        defer { try? FileManager.default.removeItem(at: short.deletingLastPathComponent()) }
+        // Nothing can be rebuilt from an unreadable journal, so a shorter but
+        // readable visible file is still the best audio this entry has and must
+        // survive untouched.
+        let partial = fixture.url.appending(path: RecorderPartialFile.name)
+        try AtomicFile.write("not audio", to: partial)
+        let visibleURL = fixture.url.appending(path: "audio.caf")
+        try FileManager.default.copyItem(at: short, to: visibleURL)
+        let visibleBytes = try Data(contentsOf: visibleURL)
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        #expect(summary.recovered.isEmpty)
+        #expect(summary.failures.count == 1)
+        #expect(try Data(contentsOf: visibleURL) == visibleBytes)
+        #expect(FileManager.default.fileExists(atPath: partial.path))
+    }
+
+    @Test func undeletableTemporaryArtifactStillCompletesRecovery() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = try TestAudio.makeWAV(seconds: 0.7, amplitude: 0.3)
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let partial = fixture.url.appending(path: RecorderPartialFile.name)
+        try FileManager.default.copyItem(at: source, to: partial)
+        try seedUniversalArtifacts(in: fixture.url)
+        var lockedURL = fixture.url.appending(
+            path: UniversalRecordingArtifacts.mixedJournalFileName
+        )
+        var locked = URLResourceValues()
+        locked.isUserImmutable = true
+        try lockedURL.setResourceValues(locked)
+        defer {
+            var unlocked = URLResourceValues()
+            unlocked.isUserImmutable = false
+            try? lockedURL.setResourceValues(unlocked)
+        }
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        // The undeletable artifact is stranded, but the entry is fully
+        // recovered and its journal is retired, so relaunching cannot repeat
+        // this failure forever.
+        #expect(!FileManager.default.fileExists(atPath: partial.path))
+        #expect(FileManager.default.fileExists(
+            atPath: fixture.url.appending(path: recovered.audioFileName).path
+        ))
+        #expect(TranscriptFile.url(inEntry: fixture.url) != nil)
+        #expect(FileManager.default.fileExists(atPath: lockedURL.path))
+
+        let second = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+        #expect(second == InterruptedRecordingRecoverySummary())
+    }
+
     @Test func legacyPacketizedPartialIsAcknowledgedOnceWithoutDeletingBytes() async throws {
         let fixture = try makeEntry()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

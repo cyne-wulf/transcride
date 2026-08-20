@@ -9,6 +9,7 @@ struct UniversalRecordingIntegrationTests {
         case afterVisibleInstall
         case derivedCleanup
         case extensionPromotion
+        case cafStaging
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -749,5 +750,172 @@ struct UniversalRecordingIntegrationTests {
         #expect(canonical.length == 44_100)
         canonical.close()
         #expect(TranscriptFile.url(inEntry: entryURL) != nil)
+    }
+
+    @Test func interruptedCAFFallbackNeverPublishesTruncatedCanonicalAudio() async throws {
+        let vaultRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: vaultRoot) }
+        let entryPath = "Journal/transcride-2026-08-20T09-15-00"
+        let entryURL = vaultRoot.appendingRelativePath(entryPath)
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+        let microphoneURL = entryURL.appending(path: RecorderService.partialFileName)
+        try writeJournal([Float](repeating: 0.25, count: 44_100), to: microphoneURL)
+        let microphoneBytes = try Data(contentsOf: microphoneURL)
+
+        // `frames: 1` rejects the encoded stage and selects the lossless
+        // fallback; the injected failure then stands in for a crash between the
+        // staged copy and its promotion.
+        await #expect(throws: InjectedFinalizationFailure.self) {
+            try await RecorderService.finalize(
+                entryURL: entryURL,
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                frames: 1,
+                duration: 1,
+                peaks: [0.25],
+                quality: .lossless,
+                journalURL: microphoneURL,
+                microphoneJournalURL: microphoneURL,
+                afterStagedCAFCopied: { _ in
+                    throw InjectedFinalizationFailure.cafStaging
+                }
+            )
+        }
+
+        // Nothing visible was published, and the journal is untouched.
+        #expect(!FileManager.default.fileExists(
+            atPath: entryURL.appending(path: "audio.caf").path
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: entryURL.appending(path: "audio.m4a").path
+        ))
+        #expect(try Data(contentsOf: microphoneURL) == microphoneBytes)
+
+        // Startup recovery therefore rebuilds the complete recording and sweeps
+        // the staged copy instead of adopting a truncated one.
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: vaultRoot)
+        let recovered = try #require(summary.recovered.first)
+        #expect(summary.failures.isEmpty)
+        #expect(abs(recovered.duration - 1) < 0.05)
+        #expect(!FileManager.default.fileExists(atPath: microphoneURL.path))
+        #expect(!FileManager.default.fileExists(
+            atPath: entryURL.appending(
+                path: UniversalRecordingArtifacts.stagedCanonicalCAFFileName
+            ).path
+        ))
+        let canonical = try AVAudioFile(
+            forReading: entryURL.appending(path: recovered.audioFileName)
+        )
+        #expect(canonical.length == 44_100)
+        canonical.close()
+    }
+
+    @Test func successfulCAFFallbackLeavesNoStagedCopyBehind() async throws {
+        let entryURL = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: entryURL) }
+        let microphoneURL = entryURL.appending(path: RecorderService.partialFileName)
+        try writeJournal([Float](repeating: 0.25, count: 22_050), to: microphoneURL)
+        let microphoneBytes = try Data(contentsOf: microphoneURL)
+
+        try await RecorderService.finalize(
+            entryURL: entryURL,
+            created: Date(timeIntervalSince1970: 1_700_000_000),
+            frames: 1,
+            duration: 0.5,
+            peaks: [0.25],
+            quality: .lossless,
+            journalURL: microphoneURL,
+            microphoneJournalURL: microphoneURL
+        )
+
+        #expect(try Data(contentsOf: entryURL.appending(path: "audio.caf")) == microphoneBytes)
+        #expect(!FileManager.default.fileExists(
+            atPath: entryURL.appending(
+                path: UniversalRecordingArtifacts.stagedCanonicalCAFFileName
+            ).path
+        ))
+        #expect(!FileManager.default.fileExists(atPath: microphoneURL.path))
+    }
+
+    @Test func interruptedSegmentCAFFallbackNeverShadowsTheIntactPartial() async throws {
+        let vaultRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: vaultRoot) }
+        let entryURL = vaultRoot.appending(
+            path: "transcride-2026-08-20T09-45-00", directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+        let frames: Int64 = 22_050
+        let partialURL = entryURL.appending(
+            path: RecordingExtensionArtifacts.partialFileName
+        )
+        try writeJournal([Float](repeating: 0.3, count: Int(frames)), to: partialURL)
+        let partialBytes = try Data(contentsOf: partialURL)
+        let session = RecordingExtensionSession(
+            target: .init(
+                entryRelativePath: entryURL.lastPathComponent,
+                sourceAudioFileName: "audio.m4a",
+                sourceDuration: 10
+            ),
+            phase: .finalizingSegment
+        )
+        try JSONEncoder().encode(session).write(
+            to: entryURL.appending(path: RecordingExtensionArtifacts.manifestFileName)
+        )
+
+        await #expect(throws: InjectedFinalizationFailure.self) {
+            _ = try await RecorderService.finalizeExtensionSegment(
+                entryURL: entryURL,
+                frames: frames,
+                duration: 0.5,
+                quality: .lossless,
+                afterStagedM4AValidated: { _ in
+                    throw InjectedFinalizationFailure.extensionPromotion
+                },
+                afterStagedCAFCopied: { _ in
+                    throw InjectedFinalizationFailure.cafStaging
+                }
+            )
+        }
+
+        // No committed candidate was published, and the journal is intact, so
+        // discovery still offers the full segment for recovery.
+        #expect(!FileManager.default.fileExists(atPath: entryURL.appending(
+            path: RecordingExtensionArtifacts.segmentCAFFileName
+        ).path))
+        #expect(!FileManager.default.fileExists(atPath: entryURL.appending(
+            path: RecordingExtensionArtifacts.stagedSegmentCAFFileName
+        ).path))
+        #expect(try Data(contentsOf: partialURL) == partialBytes)
+
+        let discovery = RecordingExtensionRecovery.discover(inVault: vaultRoot)
+        let recoverable = try #require(discovery.recoverable.first)
+        #expect(recoverable.phase == .partialCapture)
+        #expect(recoverable.segmentFileName == RecordingExtensionArtifacts.partialFileName)
+    }
+
+    @Test func aMixedPrefixNeverUpgradesADegradedSystemAudioStatus() {
+        // A stall, invalid timing, or a sidecar-write failure stops the stream
+        // but keeps the chunks already qualified, so the offline render still
+        // succeeds over a prefix. That must not be reported as full capture.
+        for reason in [
+            OptionalSystemAudioFallbackReason.stalled,
+            .invalidTiming,
+            .sidecarWriteFailed,
+        ] {
+            #expect(
+                RecorderService.systemAudioStatusAfterSuccessfulMix(
+                    .microphoneOnly(reason)
+                ) == .microphoneOnly(reason)
+            )
+        }
+        for status in [
+            OptionalSystemAudioCaptureStatus.capturing,
+            .captured,
+            .notRequested,
+            .starting,
+        ] {
+            #expect(
+                RecorderService.systemAudioStatusAfterSuccessfulMix(status) == .captured
+            )
+        }
     }
 }

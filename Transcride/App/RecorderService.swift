@@ -611,9 +611,13 @@ final class RecorderService {
                     resolvedSignature: Self.inputSignature(for: engine),
                     enginePhase: .created
                 )
+                // A selected microphone that is not in the device list will not
+                // appear by rebuilding the graph. Failing on the first attempt
+                // keeps eyes-off feedback immediate instead of spending the
+                // retry budget before the indicator can say what is wrong.
                 throw MicrophoneStartupAttemptFailure(
                     underlying: RecorderError.selectedInputUnavailable,
-                    retryable: true
+                    retryable: false
                 )
             }
             requestedDeviceID = device.deviceID
@@ -1874,7 +1878,10 @@ final class RecorderService {
                         "recorder: optional Mac audio mix failed; preserving microphone"
                     )
                 } else {
-                    systemAudioStatus = .captured
+                    let degradedDuringCapture = systemAudioStatus
+                    systemAudioStatus = Self.systemAudioStatusAfterSuccessfulMix(
+                        systemAudioStatus
+                    )
                     captureResult = Self.classifyCaptureResult(
                         frames: result.frames,
                         microphoneHasSignal: result.hasSignal,
@@ -1884,6 +1891,12 @@ final class RecorderService {
                         "recorder: mixed Mac audio from canonical frame "
                             + "\(selection.firstSystemFrame ?? 0)"
                     )
+                    if case .microphoneOnly(let reason) = degradedDuringCapture {
+                        DebugLog.append(
+                            "recorder: mixed Mac audio is partial; capture had "
+                                + "already degraded (\(reason))"
+                        )
+                    }
                 }
             } else {
                 try? FileManager.default.removeItem(at: stagedURL)
@@ -2210,7 +2223,11 @@ final class RecorderService {
         /// Internal deterministic fault boundary used by integration tests.
         /// Production callers leave this nil. It deliberately runs only after
         /// visible audio is installed and outside the encode-fallback scope.
-        afterVisibleAudioInstalled: (@Sendable (URL) throws -> Void)? = nil
+        afterVisibleAudioInstalled: (@Sendable (URL) throws -> Void)? = nil,
+        /// Internal deterministic crash boundary for the lossless fallback,
+        /// between the staged copy and its atomic promotion. Production callers
+        /// leave this nil.
+        afterStagedCAFCopied: (@Sendable (URL) throws -> Void)? = nil
     ) async throws {
         let fm = FileManager.default
         let m4aURL = entryURL.appending(path: "audio.m4a")
@@ -2218,6 +2235,9 @@ final class RecorderService {
             path: UniversalRecordingArtifacts.stagedCanonicalAudioFileName
         )
         let cafURL = entryURL.appending(path: "audio.caf")
+        let stagedCAFURL = entryURL.appending(
+            path: UniversalRecordingArtifacts.stagedCanonicalCAFFileName
+        )
 
         var encodingError: Error?
         do {
@@ -2241,11 +2261,19 @@ final class RecorderService {
 
         let visibleAudioURL: URL
         if let encodingError {
-            try Self.removeIfPresent(cafURL, using: fm)
             // The source may be the mixed journal, but `.recording.caf` is the
             // recovery marker and microphone master. Copying keeps both hidden
             // journals authoritative until visible audio and metadata are safe.
-            try fm.copyItem(at: journalURL, to: cafURL)
+            //
+            // The copy lands on a hidden staging name first: a crash mid-copy
+            // would otherwise leave a truncated-but-readable `audio.caf` that
+            // startup recovery adopts before deleting the intact journal. Only
+            // the same-directory rename below publishes canonical audio.
+            try Self.removeIfPresent(stagedCAFURL, using: fm)
+            try fm.copyItem(at: journalURL, to: stagedCAFURL)
+            try afterStagedCAFCopied?(stagedCAFURL)
+            try Self.removeIfPresent(cafURL, using: fm)
+            try fm.moveItem(at: stagedCAFURL, to: cafURL)
             visibleAudioURL = cafURL
             DebugLog.append(
                 "recorder: encode to m4a failed (copied PCM audio.caf): \(encodingError)"
@@ -2272,6 +2300,19 @@ final class RecorderService {
         ) { url in
             try Self.removeIfPresent(url, using: fm)
         }
+    }
+
+    /// A stall, invalid timing, or a sidecar-write failure stops the optional
+    /// stream but deliberately keeps the chunks already qualified before it, so
+    /// the offline render still succeeds. Its success proves only that the
+    /// retained prefix was mixed — not that Mac audio was captured for the
+    /// whole recording. Promoting such a session to `.captured` would claim
+    /// exactly that, so a degradation reached during capture is preserved.
+    nonisolated static func systemAudioStatusAfterSuccessfulMix(
+        _ status: OptionalSystemAudioCaptureStatus
+    ) -> OptionalSystemAudioCaptureStatus {
+        if case .microphoneOnly = status { return status }
+        return .captured
     }
 
     /// Removes derived finalization files first and the microphone recovery
@@ -2315,7 +2356,11 @@ final class RecorderService {
         quality: RecordingQuality,
         /// Internal deterministic promotion-failure boundary. Production
         /// callers leave this nil.
-        afterStagedM4AValidated: (@Sendable (URL) throws -> Void)? = nil
+        afterStagedM4AValidated: (@Sendable (URL) throws -> Void)? = nil,
+        /// Internal deterministic crash boundary for the lossless fallback,
+        /// between the staged copy and its atomic promotion. Production callers
+        /// leave this nil.
+        afterStagedCAFCopied: (@Sendable (URL) throws -> Void)? = nil
     ) async throws -> URL {
         guard duration >= AudioExtensionComposer.minimumSegmentDuration else {
             throw RecordingExtensionError.segmentTooShort
@@ -2327,6 +2372,9 @@ final class RecorderService {
         )
         let m4aURL = entryURL.appending(path: RecordingExtensionArtifacts.segmentM4AFileName)
         let cafURL = entryURL.appending(path: RecordingExtensionArtifacts.segmentCAFFileName)
+        let stagedCAFURL = entryURL.appending(
+            path: RecordingExtensionArtifacts.stagedSegmentCAFFileName
+        )
 
         var m4aFailure: Error?
         do {
@@ -2360,16 +2408,24 @@ final class RecorderService {
                 // valid PCM journal under its committed fallback name.
                 try Self.removeIfPresent(stagedM4AURL, using: fm)
                 try Self.removeIfPresent(m4aURL, using: fm)
-                try Self.removeIfPresent(cafURL, using: fm)
+                try Self.removeIfPresent(stagedCAFURL, using: fm)
                 // Copy instead of move: a failed copy or validation must leave
-                // `.extension-recording.caf` discoverable for recovery.
-                try fm.copyItem(at: partialURL, to: cafURL)
+                // `.extension-recording.caf` discoverable for recovery. The
+                // copy lands on a hidden staging name because a crash mid-copy
+                // would otherwise leave a truncated file under the committed
+                // candidate name, where recovery would prefer it over the
+                // intact journal it came from.
+                try fm.copyItem(at: partialURL, to: stagedCAFURL)
+                try afterStagedCAFCopied?(stagedCAFURL)
                 try Self.validateFinalizedExtensionSegment(
-                    cafURL, expectedFrames: frames
+                    stagedCAFURL, expectedFrames: frames
                 )
+                try Self.removeIfPresent(cafURL, using: fm)
+                try fm.moveItem(at: stagedCAFURL, to: cafURL)
             } catch {
                 // Best effort prevents an invalid committed-looking candidate;
                 // the authoritative partial is deliberately never removed.
+                try? fm.removeItem(at: stagedCAFURL)
                 try? fm.removeItem(at: cafURL)
                 throw error
             }
@@ -2383,6 +2439,7 @@ final class RecorderService {
         // A pre-existing fallback is not authoritative once a validated M4A
         // has committed. Any cleanup failure occurs before the partial marker,
         // so extension recovery can finish the transaction idempotently.
+        try Self.removeIfPresent(stagedCAFURL, using: fm)
         try Self.removeIfPresent(cafURL, using: fm)
         try Self.removeIfPresent(partialURL, using: fm)
         return m4aURL

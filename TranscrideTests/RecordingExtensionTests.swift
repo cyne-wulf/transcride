@@ -306,6 +306,89 @@ struct RecordingExtensionTests {
         #expect(observation.inspection.terminalState == .perfectlySilent)
     }
 
+    @Test func truncatedCommittedSegmentDoesNotShadowIntactPartial() throws {
+        let fixture = try makeRecoveryEntry(
+            timestamp: "2026-07-11T06-30-00",
+            phase: .finalizingSegment
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // A committed CAF copy interrupted a third of the way through: readable
+        // end to end, but shorter than the journal it was copied from.
+        try writeValidAudio(
+            to: fixture.entry.appending(
+                path: RecordingExtensionArtifacts.segmentCAFFileName
+            ),
+            seconds: 0.3
+        )
+        try writeValidAudio(
+            to: fixture.entry.appending(
+                path: RecordingExtensionArtifacts.partialFileName
+            ),
+            seconds: 1.0
+        )
+
+        let discovery = RecordingExtensionRecovery.discover(inVault: fixture.root)
+        let recovered = try #require(discovery.recoverable.first)
+        #expect(recovered.phase == .partialCapture)
+        #expect(recovered.segmentFileName == RecordingExtensionArtifacts.partialFileName)
+        #expect(recovered.microphoneObservation != nil)
+    }
+
+    @Test func committedSegmentIsStillSelectedWhenItMatchesTheJournal() throws {
+        let fixture = try makeRecoveryEntry(
+            timestamp: "2026-07-11T06-45-00",
+            phase: .segmentReady
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let segmentURL = fixture.entry.appending(
+            path: RecordingExtensionArtifacts.segmentM4AFileName
+        )
+        let partialURL = fixture.entry.appending(
+            path: RecordingExtensionArtifacts.partialFileName
+        )
+        for url in [segmentURL, partialURL] {
+            try writeValidAudio(to: url, seconds: 1.0)
+        }
+        // The shortfall tolerance exists for container/packet granularity, but
+        // the AAC round-trip is in fact frame-exact — which is what production
+        // finalization validates. Pin that so a future encoder change cannot
+        // quietly start eating into the tolerance.
+        let segmentFrames = try AVAudioFile(forReading: segmentURL).length
+        let journalFrames = try AVAudioFile(forReading: partialURL).length
+        #expect(segmentFrames == journalFrames)
+
+        let discovery = RecordingExtensionRecovery.discover(inVault: fixture.root)
+        let recovered = try #require(discovery.recoverable.first)
+        #expect(recovered.phase == .finalizedSegment)
+        #expect(recovered.segmentFileName == RecordingExtensionArtifacts.segmentM4AFileName)
+    }
+
+    @Test func stagedSegmentCAFIsNeverACandidateButIsAlwaysCleanedUp() throws {
+        #expect(!RecordingExtensionArtifacts.segmentCandidateFileNames.contains(
+            RecordingExtensionArtifacts.stagedSegmentCAFFileName
+        ))
+        #expect(RecordingExtensionArtifacts.cleanupFileNames.contains(
+            RecordingExtensionArtifacts.stagedSegmentCAFFileName
+        ))
+        let fixture = try makeRecoveryEntry(
+            timestamp: "2026-07-11T08-30-00",
+            phase: .finalizingSegment
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stagedURL = fixture.entry.appending(
+            path: RecordingExtensionArtifacts.stagedSegmentCAFFileName
+        )
+        try writeValidAudio(to: stagedURL)
+
+        let discovery = RecordingExtensionRecovery.discover(inVault: fixture.root)
+        let recovered = try #require(discovery.recoverable.first)
+        #expect(recovered.phase == .abandonedOutput)
+        #expect(recovered.segmentFileName == nil)
+
+        RecordingExtensionRecovery.removeArtifacts(in: fixture.entry)
+        #expect(!FileManager.default.fileExists(atPath: stagedURL.path))
+    }
+
     @Test func corruptOnlyArtifactsRemainSurfacedAsAbandoned() throws {
         let fixture = try makeRecoveryEntry(
             timestamp: "2026-07-11T07-00-00",
@@ -396,9 +479,10 @@ struct RecordingExtensionTests {
 
     private func writeValidAudio(
         to destination: URL,
-        amplitude: Float = 0.25
+        amplitude: Float = 0.25,
+        seconds: Double = 0.2
     ) throws {
-        let source = try TestAudio.makeWAV(seconds: 0.2, amplitude: amplitude)
+        let source = try TestAudio.makeWAV(seconds: seconds, amplitude: amplitude)
         defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
         if destination.pathExtension.lowercased() == "m4a" {
             try CrashTolerantAudioJournal.encodeM4A(

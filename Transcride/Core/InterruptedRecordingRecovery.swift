@@ -62,6 +62,11 @@ enum InterruptedRecordingRecovery {
     static let temporaryCAFFileName = ".recording-recovery.caf"
     static let minimumDuration = 0.05
     static let legacyMarkerFileName = ".recording-recovery-legacy.json"
+    /// Frame shortfall tolerated when deciding whether an already-visible file
+    /// is a completed install rather than a torn finalize copy. Container and
+    /// packet granularity make exact equality unrealistic; ~93ms at 44.1kHz is
+    /// far below any interrupted copy while remaining inaudible.
+    static let adoptableFrameShortfall: Int64 = 4_096
 
     static func recoverAll(inVault vaultRoot: URL) async -> InterruptedRecordingRecoverySummary {
         var summary = InterruptedRecordingRecoverySummary()
@@ -112,25 +117,38 @@ enum InterruptedRecordingRecovery {
                 throw InterruptedRecordingRecoveryError.visibleAudioConflict
             }
             let audioURL = entryURL.appending(path: existingAudio)
-            let duration = try await validatedDuration(of: audioURL)
             let microphoneInspection = try MicrophoneJournalInspector.inspect(partialURL)
-            let canonicalInspection = try MicrophoneJournalInspector.inspect(audioURL)
-            try await finishMetadata(
-                entryURL: entryURL, audioURL: audioURL, duration: duration
-            )
-            // The partial is also the discovery/retry marker. Retire it only
-            // after every hidden continuation artifact is gone; otherwise a
-            // crash or deletion failure here would strand those files forever.
-            try cleanupTemporaryFiles(in: entryURL)
-            try fm.removeItem(at: partialURL)
-            return .init(
-                entryRelativePath: relativePath,
-                audioFileName: existingAudio,
-                duration: duration,
-                microphoneHasSignal: microphoneInspection.hasSignal,
+            let visibleInspection = try? MicrophoneJournalInspector.inspect(audioURL)
+            if await shouldRebuildTruncatedVisibleAudio(
+                entryURL: entryURL,
+                partialURL: partialURL,
                 microphoneFrames: microphoneInspection.frames,
-                canonicalHasSignal: canonicalInspection.hasSignal
-            )
+                visibleFrames: visibleInspection?.frames
+            ) {
+                // The visible file is a strict prefix of the retained journal,
+                // so removing it loses nothing and the rebuild below restores
+                // the missing tail.
+                try fm.removeItem(at: audioURL)
+            } else {
+                let duration = try await validatedDuration(of: audioURL)
+                let canonicalInspection = try visibleInspection
+                    ?? MicrophoneJournalInspector.inspect(audioURL)
+                try await finishMetadata(
+                    entryURL: entryURL, audioURL: audioURL, duration: duration
+                )
+                // The partial is also the discovery/retry marker. Retire it
+                // only after hidden continuation artifacts have been swept.
+                cleanupTemporaryFiles(in: entryURL)
+                try fm.removeItem(at: partialURL)
+                return .init(
+                    entryRelativePath: relativePath,
+                    audioFileName: existingAudio,
+                    duration: duration,
+                    microphoneHasSignal: microphoneInspection.hasSignal,
+                    microphoneFrames: microphoneInspection.frames,
+                    canonicalHasSignal: canonicalInspection.hasSignal
+                )
+            }
         }
 
         let partialDuration = try await validatedDuration(of: partialURL)
@@ -174,9 +192,8 @@ enum InterruptedRecordingRecovery {
         try fm.moveItem(at: stagedURL, to: finalURL)
         try waveform.write(to: WaveformData.url(inEntry: entryURL))
         // Keep the authoritative microphone journal discoverable until the
-        // visible copy, metadata, and all hidden artifacts are safe. Partial
-        // cleanup is idempotent, so any removal error leaves a retry path.
-        try cleanupTemporaryFiles(in: entryURL)
+        // visible copy, metadata, and all hidden artifacts are safe.
+        cleanupTemporaryFiles(in: entryURL)
         try fm.removeItem(at: partialURL)
 
         return .init(
@@ -187,6 +204,32 @@ enum InterruptedRecordingRecovery {
             microphoneFrames: microphoneInspection.frames,
             canonicalHasSignal: microphoneInspection.hasSignal
         )
+    }
+
+    /// A visible file that is strictly shorter than the retained microphone
+    /// journal is a torn finalize copy, not a completed install: adopting it
+    /// would publish a truncated recording and then delete the only complete
+    /// audio. Rebuilding from the journal restores the missing tail.
+    private static func shouldRebuildTruncatedVisibleAudio(
+        entryURL: URL,
+        partialURL: URL,
+        microphoneFrames: Int64,
+        visibleFrames: Int64?
+    ) async -> Bool {
+        // Only the unfinished-finalize window is eligible. Finalization writes
+        // the transcript stub after the visible audio, so a torn copy never has
+        // one — while a finished entry's audio may legitimately be shorter than
+        // a stale journal (after a trim, for example) and must be left alone.
+        guard TranscriptFile.url(inEntry: entryURL) == nil else { return false }
+        if let visibleFrames,
+           visibleFrames + adoptableFrameShortfall >= microphoneFrames {
+            return false
+        }
+        // Never discard the only file that opens: a short visible copy beside
+        // an unusable journal is still the best audio this entry has.
+        guard microphoneFrames > 0,
+              (try? await validatedDuration(of: partialURL)) != nil else { return false }
+        return true
     }
 
     private static func validatedDuration(of url: URL) async throws -> Double {
@@ -252,14 +295,18 @@ enum InterruptedRecordingRecovery {
     }
 
     /// Terminal cleanup for every interrupted universal-recording
-    /// continuation. This must succeed before `.recording.caf` is removed,
-    /// because recovery discovery deliberately keys on that mic journal.
-    private static func cleanupTemporaryFiles(in entryURL: URL) throws {
-        try removeFilesIfPresent(
-            named: [temporaryM4AFileName, temporaryCAFFileName]
-                + UniversalRecordingArtifacts.interruptedRecoveryCleanupFileNames,
-            in: entryURL
-        )
+    /// continuation. Deliberately best-effort: by the time it runs, the visible
+    /// audio and its metadata are already durable, so one undeletable hidden
+    /// artifact must not abort recovery — that would leave `.recording.caf` in
+    /// place and re-run the same failure on every launch, permanently. A
+    /// stranded hidden artifact is inert (nothing discovers it once the journal
+    /// is gone); an entry that can never finish recovering is not.
+    private static func cleanupTemporaryFiles(in entryURL: URL) {
+        let fileNames = [temporaryM4AFileName, temporaryCAFFileName]
+            + UniversalRecordingArtifacts.interruptedRecoveryCleanupFileNames
+        for fileName in fileNames {
+            try? FileManager.default.removeItem(at: entryURL.appending(path: fileName))
+        }
     }
 
     private static func removeFilesIfPresent(
@@ -321,10 +368,15 @@ enum UniversalRecordingArtifacts {
     static let systemAudioFileName = ".recording-system-audio.sparse"
     static let mixedJournalFileName = ".recording-mixed.caf"
     static let stagedCanonicalAudioFileName = ".audio-finalizing.m4a"
+    /// Staging name for the lossless fallback. The visible `audio.caf` is only
+    /// ever created by renaming this file, so an interrupted copy can never
+    /// masquerade as installed canonical audio.
+    static let stagedCanonicalCAFFileName = ".audio-finalizing.caf"
 
     static let interruptedRecoveryCleanupFileNames = [
         systemAudioFileName,
         mixedJournalFileName,
         stagedCanonicalAudioFileName,
+        stagedCanonicalCAFFileName,
     ]
 }

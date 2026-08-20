@@ -116,7 +116,17 @@ enum RecordingExtensionArtifacts {
     /// committed M4A name. Recovery never treats this file as a usable segment.
     static let stagedSegmentM4AFileName = ".extension-segment-finalizing.m4a"
     static let segmentCAFFileName = ".extension-segment.caf"
+    /// Copy destination used before the lossless fallback is promoted to the
+    /// committed CAF name, so an interrupted copy can never shadow the intact
+    /// journal it was copied from. Never a recovery candidate.
+    static let stagedSegmentCAFFileName = ".extension-segment-finalizing.caf"
     static let combinedFileName = ".extension-combined.m4a"
+
+    /// Frame shortfall tolerated when a committed segment is compared with the
+    /// journal it was derived from. Container/packet granularity makes exact
+    /// equality unrealistic; ~93ms at 44.1kHz stays far below any interrupted
+    /// copy while remaining inaudible.
+    static let segmentFrameShortfallTolerance: Int64 = 4_096
 
     /// Committed recovery candidates, in preference order. A failed M4A
     /// encode may leave both its destination and the still-valid CAF journal;
@@ -128,11 +138,13 @@ enum RecordingExtensionArtifacts {
     ]
 
     /// Every hidden artifact that makes an entry relevant to recovery. The
-    /// staging M4A is included so an interrupted encode is surfaced, but it is
-    /// deliberately absent from `segmentCandidateFileNames` because it was
-    /// never validated and committed by the recorder.
+    /// staging files are included so an interrupted encode or copy is
+    /// surfaced, but they are deliberately absent from
+    /// `segmentCandidateFileNames` because the recorder never validated and
+    /// committed them.
     static let cleanupFileNames = [
         stagedSegmentM4AFileName,
+        stagedSegmentCAFFileName,
         combinedFileName,
         segmentM4AFileName,
         segmentCAFFileName,
@@ -311,6 +323,16 @@ enum RecordingExtensionRecovery {
         fileNames: Set<String>,
         sessionID: UUID
     ) -> ValidSegmentCandidate? {
+        // While the journal that a committed segment was derived from is still
+        // present, it is also the yardstick for that segment. A committed file
+        // shorter than its own source is an interrupted copy or encode, and
+        // must never shadow the intact journal.
+        let journalFrames: Int64? = fileNames.contains(
+            RecordingExtensionArtifacts.partialFileName
+        ) ? readableFrameCount(
+            at: entryURL.appending(path: RecordingExtensionArtifacts.partialFileName)
+        ) : nil
+
         for fileName in RecordingExtensionArtifacts.segmentCandidateFileNames
         where fileNames.contains(fileName) {
             let url = entryURL.appending(path: fileName)
@@ -326,17 +348,27 @@ enum RecordingExtensionRecovery {
                     )
                 )
             }
-            guard isReadableAudio(at: url) else { continue }
+            guard let frames = readableFrameCount(at: url) else { continue }
+            if let journalFrames,
+               frames + RecordingExtensionArtifacts.segmentFrameShortfallTolerance
+                   < journalFrames {
+                continue
+            }
             return .init(fileName: fileName, microphoneObservation: nil)
         }
         return nil
     }
 
-    /// Synchronously checks a bounded prefix and suffix. Opening alone is not
-    /// sufficient for a truncated M4A whose header still advertises frames;
-    /// reading the tail catches that case without decoding an hours-long clip
-    /// during vault discovery.
     private static func isReadableAudio(at url: URL) -> Bool {
+        readableFrameCount(at: url) != nil
+    }
+
+    /// Synchronously checks a bounded prefix and suffix and reports the frame
+    /// count of a file that passes. Opening alone is not sufficient for a
+    /// truncated M4A whose header still advertises frames; reading the tail
+    /// catches that case without decoding an hours-long clip during vault
+    /// discovery.
+    private static func readableFrameCount(at url: URL) -> Int64? {
         do {
             let input = try AVAudioFile(forReading: url)
             defer { input.close() }
@@ -347,20 +379,20 @@ enum RecordingExtensionRecovery {
                   let buffer = AVAudioPCMBuffer(
                     pcmFormat: input.processingFormat,
                     frameCapacity: 4_096
-                  ) else { return false }
+                  ) else { return nil }
 
             try input.read(into: buffer, frameCount: 4_096)
-            guard buffer.frameLength > 0 else { return false }
+            guard buffer.frameLength > 0 else { return nil }
 
             if input.length > 4_096 {
                 input.framePosition = max(0, input.length - 4_096)
                 buffer.frameLength = 0
                 try input.read(into: buffer, frameCount: 4_096)
-                guard buffer.frameLength > 0 else { return false }
+                guard buffer.frameLength > 0 else { return nil }
             }
-            return true
+            return Int64(input.length)
         } catch {
-            return false
+            return nil
         }
     }
 
