@@ -254,9 +254,14 @@ actor VaultService {
         let existed = FileManager.default.fileExists(atPath: databaseURL.path)
         let index = try VaultSearchIndex(vaultRoot: rootURL, databaseURL: databaseURL)
         // VaultSearchIndex builds a brand-new cache during initialization.
-        // An existing cache is rebuilt on every open so missed events from a
-        // prior process can never leave stale search results.
-        if existed { try index.rebuild() }
+        // An existing cache is reconciled against the vault: every entry
+        // carries a fingerprint of the files it was built from, so entries
+        // untouched since the last launch are left alone and only genuinely
+        // changed ones are re-read. A reconcile that cannot complete falls
+        // back to the full rebuild, which is always correct.
+        if existed {
+            do { try index.reconcile() } catch { try index.rebuild() }
+        }
         searchIndex = index
     }
 
@@ -266,6 +271,11 @@ actor VaultService {
         }
         do {
             return try searchIndex.search(query, fuzzy: fuzzy, limit: limit)
+        } catch is CancellationError {
+            // A superseded keystroke abandoning its scan is not damage; without
+            // this the abort would be read as a corrupt cache and trigger a
+            // full rebuild of the entire vault on every fast typist.
+            throw CancellationError()
         } catch {
             _ = try searchIndex.recoverIfNeeded()
             return try searchIndex.search(query, fuzzy: fuzzy, limit: limit)
@@ -289,10 +299,25 @@ actor VaultService {
         }
     }
 
+    /// Single-entry refresh for in-app writes (autosave). A known entry path
+    /// needs no vault walk — re-read exactly that entry — which matters
+    /// because this runs on every save, not once per external event.
     func synchronizeSearchEntry(at relativePath: RelativePath) {
-        synchronizeSearchIndex(relativePaths: [relativePath])
+        guard let searchIndex else { return }
+        do {
+            try searchIndex.upsertEntry(at: relativePath)
+        } catch {
+            do {
+                _ = try searchIndex.recoverIfNeeded()
+                try searchIndex.upsertEntry(at: relativePath)
+            } catch {
+                DebugLog.append("search index entry sync FAILED: \(error)")
+            }
+        }
     }
 
+    /// Multi-path and whole-vault reconciliation stay on the conservative
+    /// walk: a rename or move changes paths the caller cannot enumerate.
     private func synchronizeSearchIndex(relativePaths: [RelativePath]) {
         synchronizeSearchIndex(changedAbsolutePaths: relativePaths.map {
             rootURL.appendingRelativePath($0).path

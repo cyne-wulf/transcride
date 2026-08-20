@@ -15,12 +15,40 @@ struct VaultScanner {
     }
 
     private var cache: [RelativePath: CachedEntry] = [:]
+    private var availability = AvailabilityCache()
+    private let availabilityCacheURL: URL?
+
+    /// `availabilityCacheURL` overrides the per-vault default; tests pass a
+    /// temporary location so a scan never touches Application Support.
+    init(availabilityCacheURL: URL? = nil) {
+        self.availabilityCacheURL = availabilityCacheURL
+    }
 
     mutating func scan(root: URL) -> VaultSnapshot {
+        availability.open(at: availabilityCacheURL ?? Self.defaultAvailabilityCacheURL(forVault: root))
         var seen = Set<RelativePath>()
         let rootNode = scanFolder(at: root, relativePath: "", name: root.lastPathComponent, seen: &seen)
         cache = cache.filter { seen.contains($0.key) }
+        availability.prune(to: seen)
+        availability.saveIfDirty()
         return VaultSnapshot(root: rootNode)
+    }
+
+    /// Stable per-vault location outside the vault's own files, matching what
+    /// the search cache does. Nothing is ever written into an entry folder.
+    static func defaultAvailabilityCacheURL(forVault vaultURL: URL) -> URL {
+        let canonical = vaultURL.standardizedFileURL.path
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in canonical.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        return base
+            .appending(path: "Transcride/Scan", directoryHint: .isDirectory)
+            .appending(path: String(hash, radix: 16) + ".json")
     }
 
     private mutating func scanFolder(
@@ -96,11 +124,8 @@ struct VaultScanner {
         }
 
         let audioFileName = Self.audioFile(in: fileNames)
-        let original = TranscriptOriginal.load(from: TranscriptOriginal.url(inEntry: url))
-        let speechAvailability = SpeechSilencePlanner.availability(
-            transcript: original,
-            audioDuration: duration,
-            alignmentIsStale: TranscriptAlignmentState.isStale(inEntry: url)
+        let speechAvailability = speechAvailability(
+            entryURL: url, relativePath: relativePath, duration: duration
         )
         let entry = Entry(
             relativePath: relativePath,
@@ -124,6 +149,143 @@ struct VaultScanner {
             entry: entry
         )
         return entry
+    }
+
+    /// Speech availability is the only part of a scan that has to decode
+    /// `transcript.original.json`, and that file is the largest thing in the
+    /// vault — a 12-hour entry is ~15 MB of JSON. Two of the answers never
+    /// depended on the words at all (stale alignment, no transcript file) and
+    /// are settled from file metadata; the remaining answer is memoized across
+    /// launches by the identity of the JSON that produced it, so a cold start
+    /// re-decodes only what actually changed.
+    private mutating func speechAvailability(
+        entryURL: URL, relativePath: RelativePath, duration: Double?
+    ) -> SpeechTranscriptAvailability {
+        if TranscriptAlignmentState.isStale(inEntry: entryURL) { return .stale }
+        let originalURL = TranscriptOriginal.url(inEntry: entryURL)
+        guard let values = try? originalURL.resourceValues(
+                  forKeys: [.contentModificationDateKey, .fileSizeKey]
+              ),
+              let modified = values.contentModificationDate,
+              let size = values.fileSize else { return .missing }
+
+        let stamp = modified.timeIntervalSince1970
+        if let cached = availability.value(
+            for: relativePath, modified: stamp, size: size, duration: duration
+        ) { return cached }
+
+        let resolved = SpeechSilencePlanner.availability(
+            transcript: TranscriptOriginal.load(from: originalURL),
+            audioDuration: duration,
+            alignmentIsStale: false
+        )
+        availability.store(
+            resolved, for: relativePath, modified: stamp, size: size, duration: duration
+        )
+        return resolved
+    }
+
+    /// Cross-launch memo for the decode-derived half of
+    /// `speechTranscriptAvailability`. A pure cache: the vault stays the source
+    /// of truth, an unreadable or stale-keyed cache is simply ignored, and
+    /// losing the file costs one slow launch and nothing else. Keys are
+    /// (modification date, byte size, the duration the answer was computed
+    /// against), so an entry edited outside the app re-decodes.
+    private struct AvailabilityCache {
+        private struct Record: Codable {
+            var modified: Double
+            var size: Int
+            var duration: Double?
+            var availability: String
+        }
+
+        private struct Payload: Codable {
+            var version: Int
+            var records: [RelativePath: Record]
+        }
+
+        private static let version = 1
+
+        private var url: URL?
+        private var records: [RelativePath: Record] = [:]
+        private var dirty = false
+
+        /// Reads the cache the first time a given vault is scanned. Later
+        /// scans of the same vault reuse what is already in memory.
+        mutating func open(at url: URL) {
+            guard self.url != url else { return }
+            self.url = url
+            records = [:]
+            dirty = false
+            guard let data = try? Data(contentsOf: url),
+                  let payload = try? JSONDecoder().decode(Payload.self, from: data),
+                  payload.version == Self.version else { return }
+            records = payload.records
+        }
+
+        func value(
+            for relativePath: RelativePath, modified: Double, size: Int, duration: Double?
+        ) -> SpeechTranscriptAvailability? {
+            guard let record = records[relativePath],
+                  record.modified == modified,
+                  record.size == size,
+                  record.duration == duration else { return nil }
+            return Self.availability(named: record.availability)
+        }
+
+        mutating func store(
+            _ availability: SpeechTranscriptAvailability,
+            for relativePath: RelativePath, modified: Double, size: Int, duration: Double?
+        ) {
+            guard let name = Self.name(of: availability) else { return }
+            records[relativePath] = Record(
+                modified: modified, size: size, duration: duration, availability: name
+            )
+            dirty = true
+        }
+
+        mutating func prune(to seen: Set<RelativePath>) {
+            let kept = records.filter { seen.contains($0.key) }
+            guard kept.count != records.count else { return }
+            records = kept
+            dirty = true
+        }
+
+        mutating func saveIfDirty() {
+            guard dirty, let url else { return }
+            dirty = false
+            guard !records.isEmpty else {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            guard let data = try? JSONEncoder().encode(
+                Payload(version: Self.version, records: records)
+            ) else { return }
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try? AtomicFile.write(data, to: url)
+        }
+
+        /// Only the answers that cost a decode are worth persisting; `.stale`
+        /// and `.regenerating` are decided elsewhere and never stored.
+        private static func name(of value: SpeechTranscriptAvailability) -> String? {
+            switch value {
+            case .available: "available"
+            case .malformed: "malformed"
+            case .missing: "missing"
+            case .stale, .regenerating: nil
+            }
+        }
+
+        private static func availability(named name: String) -> SpeechTranscriptAvailability? {
+            switch name {
+            case "available": .available
+            case "malformed": .malformed
+            case "missing": .missing
+            default: nil
+            }
+        }
     }
 
     /// Picks the entry's audio file: prefers the canonical `audio.*`, else the

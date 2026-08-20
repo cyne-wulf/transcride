@@ -100,6 +100,10 @@ final class VaultSearchIndex: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         try transaction {
             for record in records { try upsertUnlocked(record) }
+            // Records injected directly do not come from a known set of files,
+            // so no fingerprint can describe them. Dropping the entry's
+            // fingerprint keeps `reconcile()` from trusting a stale one.
+            for path in Set(records.map(\.entryPath)) { try deleteFingerprintUnlocked(path) }
         }
     }
 
@@ -111,19 +115,27 @@ final class VaultSearchIndex: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let entryURL = vaultRoot.appendingRelativePath(relativePath)
         guard FileManager.default.fileExists(atPath: entryURL.path) else {
-            try removeEntryUnlocked(relativePath)
+            try transaction {
+                try removeEntryUnlocked(relativePath)
+                try deleteFingerprintUnlocked(relativePath)
+            }
             return
         }
+        let fingerprint = Self.fingerprint(at: entryURL)
         let records = recordsForEntry(at: entryURL, relativePath: relativePath)
         try transaction {
             try removeEntryUnlocked(relativePath)
             for record in records { try upsertUnlocked(record) }
+            try writeFingerprintUnlocked(relativePath, fingerprint: fingerprint)
         }
     }
 
     func removeEntry(_ relativePath: RelativePath) throws {
         lock.lock(); defer { lock.unlock() }
-        try removeEntryUnlocked(relativePath)
+        try transaction {
+            try removeEntryUnlocked(relativePath)
+            try deleteFingerprintUnlocked(relativePath)
+        }
     }
 
     /// Reconciles the index after a coalesced filesystem event. Existing
@@ -156,18 +168,67 @@ final class VaultSearchIndex: @unchecked Sendable {
             })
         }
 
+        let refreshed = affectedPaths.map { relativePath in
+            let entryURL = vaultRoot.appendingRelativePath(relativePath)
+            return (
+                relativePath,
+                Self.fingerprint(at: entryURL),
+                recordsForEntry(at: entryURL, relativePath: relativePath)
+            )
+        }
         try transaction {
             for stalePath in indexedPaths.subtracting(currentPaths) {
                 try removeEntryUnlocked(stalePath)
+                try deleteFingerprintUnlocked(stalePath)
             }
-            for relativePath in affectedPaths {
+            for (relativePath, fingerprint, records) in refreshed {
                 try removeEntryUnlocked(relativePath)
-                for record in recordsForEntry(
-                    at: vaultRoot.appendingRelativePath(relativePath),
-                    relativePath: relativePath
-                ) {
-                    try upsertUnlocked(record)
-                }
+                for record in records { try upsertUnlocked(record) }
+                try writeFingerprintUnlocked(relativePath, fingerprint: fingerprint)
+            }
+        }
+    }
+
+    /// Brings an existing cache up to date without re-parsing the corpus.
+    ///
+    /// Every entry carries a fingerprint of the files its records were built
+    /// from; entries whose fingerprint still matches are left untouched, so a
+    /// vault that did not change between launches costs two `stat` calls per
+    /// entry instead of a full decode-and-reindex of every transcript. A
+    /// database written before fingerprints existed simply has none, which
+    /// reconciles as "everything changed" once and is fast from then on.
+    func reconcile() throws {
+        guard let vaultRoot else {
+            throw SearchIndexError.sqlite("reconcile requires a vault root")
+        }
+        lock.lock(); defer { lock.unlock() }
+
+        let currentPaths = entryPaths(in: vaultRoot)
+        let stored = try storedFingerprintsUnlocked()
+        let stalePaths = Set(stored.keys).subtracting(currentPaths)
+        // Reading the changed entries outside the transaction keeps the write
+        // lock short even when a sync client rewrote a large part of the vault.
+        let changed = currentPaths.compactMap { relativePath -> (RelativePath, String, [SearchRecord])? in
+            let entryURL = vaultRoot.appendingRelativePath(relativePath)
+            let fingerprint = Self.fingerprint(at: entryURL)
+            guard stored[relativePath] != fingerprint else { return nil }
+            return (
+                relativePath,
+                fingerprint,
+                recordsForEntry(at: entryURL, relativePath: relativePath)
+            )
+        }
+        guard !changed.isEmpty || !stalePaths.isEmpty else { return }
+
+        try transaction {
+            for stalePath in stalePaths {
+                try removeEntryUnlocked(stalePath)
+                try deleteFingerprintUnlocked(stalePath)
+            }
+            for (relativePath, fingerprint, records) in changed {
+                try removeEntryUnlocked(relativePath)
+                for record in records { try upsertUnlocked(record) }
+                try writeFingerprintUnlocked(relativePath, fingerprint: fingerprint)
             }
         }
     }
@@ -205,6 +266,7 @@ final class VaultSearchIndex: @unchecked Sendable {
         // queries; Swift then verifies the literal substring and computes its
         // precise UTF-16 range. Very short and fuzzy queries scan the cached
         // records because FTS trigrams cannot represent them.
+        let fuzzyQuery = fuzzy ? FuzzyQuery(query: query) : nil
         let usesFTSCandidates = !fuzzy && query.count >= 3
         let statement = try prepare(usesFTSCandidates ? """
             SELECT r.entry_path, r.layer, r.title, r.content
@@ -217,15 +279,20 @@ final class VaultSearchIndex: @unchecked Sendable {
             try bind(quoted, to: statement, at: 1)
         }
         while sqlite3_step(statement) == SQLITE_ROW {
+            // A superseded keystroke must be able to abandon its scan: the
+            // caller's task is already cancelled by then, and without these
+            // checks the stale scan runs to completion on the vault actor and
+            // everything queued behind it — autosaves included — waits.
+            try Task.checkCancellation()
             let record = SearchRecord(
                 entryPath: columnText(statement, 0),
                 layer: SearchLayer(rawValue: columnText(statement, 1)) ?? .original,
                 title: columnText(statement, 2),
                 content: columnText(statement, 3)
             )
-            if let match = Self.match(query, in: record.content, fuzzy: fuzzy) {
+            if let match = try Self.match(query, fuzzy: fuzzyQuery, in: record.content) {
                 hits.append(Self.hit(for: record, match: match, kind: .content))
-            } else if let match = Self.match(query, in: record.title, fuzzy: fuzzy) {
+            } else if let match = try Self.match(query, fuzzy: fuzzyQuery, in: record.title) {
                 hits.append(Self.hit(for: record, match: match, kind: .title))
             }
         }
@@ -285,6 +352,10 @@ final class VaultSearchIndex: @unchecked Sendable {
           title TEXT NOT NULL,
           content TEXT NOT NULL,
           PRIMARY KEY(entry_path, layer)
+        );
+        CREATE TABLE IF NOT EXISTS search_meta (
+          entry_path TEXT PRIMARY KEY,
+          fingerprint TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
           title, content, entry_path UNINDEXED, layer UNINDEXED, tokenize='trigram'
@@ -347,17 +418,69 @@ final class VaultSearchIndex: @unchecked Sendable {
         guard let vaultRoot else {
             throw SearchIndexError.sqlite("rebuild requires a vault root")
         }
-        let paths = entryPaths(in: vaultRoot)
-        var records: [SearchRecord] = []
-        for path in paths {
-            records += recordsForEntry(
-                at: vaultRoot.appendingRelativePath(path), relativePath: path
-            )
+        let rebuilt = entryPaths(in: vaultRoot).map { path -> (RelativePath, String, [SearchRecord]) in
+            let entryURL = vaultRoot.appendingRelativePath(path)
+            return (path, Self.fingerprint(at: entryURL), recordsForEntry(at: entryURL, relativePath: path))
         }
         try transaction {
             try execute("DELETE FROM search_records")
-            for record in records { try upsertUnlocked(record) }
+            try execute("DELETE FROM search_meta")
+            for (path, fingerprint, records) in rebuilt {
+                for record in records { try upsertUnlocked(record) }
+                try writeFingerprintUnlocked(path, fingerprint: fingerprint)
+            }
         }
+    }
+
+    // MARK: - Fingerprints
+
+    /// Identity of everything `recordsForEntry` reads: the markdown file's
+    /// name, size and modification date, and the same for the original
+    /// transcript. The entry folder's own name is the key these are stored
+    /// under, so a rename is a different row rather than a missed change.
+    private static func fingerprint(at entryURL: URL) -> String {
+        func stamp(_ url: URL?) -> String {
+            guard let url,
+                  let values = try? url.resourceValues(
+                      forKeys: [.contentModificationDateKey, .fileSizeKey]
+                  ),
+                  let modified = values.contentModificationDate,
+                  let size = values.fileSize else { return "-" }
+            return "\(url.lastPathComponent)|\(modified.timeIntervalSince1970)|\(size)"
+        }
+        let markdownURL = TranscriptFile.url(inEntry: entryURL)
+        return stamp(markdownURL) + "::" + stamp(TranscriptOriginal.url(inEntry: entryURL))
+    }
+
+    private func storedFingerprintsUnlocked() throws -> [RelativePath: String] {
+        let statement = try prepare("SELECT entry_path, fingerprint FROM search_meta")
+        defer { sqlite3_finalize(statement) }
+        var result: [RelativePath: String] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result[columnText(statement, 0)] = columnText(statement, 1)
+        }
+        try checkStep(statement)
+        return result
+    }
+
+    private func writeFingerprintUnlocked(
+        _ relativePath: RelativePath, fingerprint: String
+    ) throws {
+        let statement = try prepare("""
+        INSERT INTO search_meta(entry_path, fingerprint) VALUES (?, ?)
+        ON CONFLICT(entry_path) DO UPDATE SET fingerprint=excluded.fingerprint
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(relativePath, to: statement, at: 1)
+        try bind(fingerprint, to: statement, at: 2)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+    }
+
+    private func deleteFingerprintUnlocked(_ relativePath: RelativePath) throws {
+        let statement = try prepare("DELETE FROM search_meta WHERE entry_path = ?")
+        defer { sqlite3_finalize(statement) }
+        try bind(relativePath, to: statement, at: 1)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
     }
 
     private func recordsForEntry(at entryURL: URL, relativePath: RelativePath) -> [SearchRecord] {
@@ -434,28 +557,128 @@ final class VaultSearchIndex: @unchecked Sendable {
         var score: Int
     }
 
-    private static func match(_ query: String, in content: String, fuzzy: Bool) -> Match? {
+    /// The query as the fuzzy scan needs it: tokenized once for the whole
+    /// search rather than per record.
+    private struct FuzzyQuery {
+        /// Number of content words one window spans.
+        var windowSize: Int
+        /// Query words lowercased and joined by single spaces.
+        var normalized: [Character]
+        var threshold: Int
+
+        init?(query: String) {
+            let words = tokens(in: query)
+            guard !words.isEmpty else { return nil }
+            let text = words.map(\.text).joined(separator: " ").lowercased()
+            windowSize = words.count
+            normalized = Array(text)
+            threshold = text.count >= 8 ? 2 : 1
+        }
+    }
+
+    private static func match(
+        _ query: String, fuzzy: FuzzyQuery?, in content: String
+    ) throws -> Match? {
         if let range = content.range(of: query, options: [.caseInsensitive]) {
             return Match(range: utf16Range(range, in: content), score: 0)
         }
-        guard fuzzy else { return nil }
-
-        let queryWords = tokens(in: query)
-        guard !queryWords.isEmpty else { return nil }
+        guard let fuzzy else { return nil }
         let contentWords = tokens(in: content)
-        guard contentWords.count >= queryWords.count else { return nil }
-        let normalizedQuery = queryWords.map(\.text).joined(separator: " ").lowercased()
-        let threshold = normalizedQuery.count >= 8 ? 2 : 1
+        guard contentWords.count >= fuzzy.windowSize else { return nil }
+        return try windowMatch(contentWords: contentWords, query: fuzzy)
+    }
+
+    /// Slides a query-sized word window across the record.
+    ///
+    /// The comparison text — the window's words lowercased and joined by
+    /// single spaces — is materialized once as a flat character buffer, so a
+    /// window is a contiguous slice instead of a freshly joined, lowercased
+    /// string. Two lower bounds on Damerau-Levenshtein distance then reject
+    /// almost every window before the distance matrix runs: the length must be
+    /// reachable within `threshold` insertions or deletions, and the
+    /// character-bag difference must be reachable at all (a substitution moves
+    /// the bag by 2, an insertion or deletion by 1, a transposition by 0, so
+    /// distance is at least half the bag difference). Neither bound can
+    /// discard a window that would have matched, so the surviving results are
+    /// exactly the ones the exhaustive scan produced.
+    private static func windowMatch(
+        contentWords: [Token], query: FuzzyQuery
+    ) throws -> Match? {
+        let windowSize = query.windowSize
+        var flat: [Character] = []
+        flat.reserveCapacity(contentWords.reduce(contentWords.count) { $0 + $1.text.count })
+        var starts: [Int] = []
+        var ends: [Int] = []
+        starts.reserveCapacity(contentWords.count)
+        ends.reserveCapacity(contentWords.count)
+        for (offset, token) in contentWords.enumerated() {
+            if offset > 0 { flat.append(" ") }
+            starts.append(flat.count)
+            flat.append(contentsOf: token.text.lowercased())
+            ends.append(flat.count)
+        }
+
+        var bag = CharacterBag(query: query.normalized)
+        var low = starts[0]
+        var high = ends[windowSize - 1]
+        for index in low..<high { bag.add(flat[index]) }
+
         var best: Match?
-        for start in 0...(contentWords.count - queryWords.count) {
-            let end = start + queryWords.count - 1
-            let candidate = contentWords[start...end].map(\.text).joined(separator: " ").lowercased()
-            let distance = damerauLevenshtein(candidate, normalizedQuery, maximum: threshold)
-            guard distance <= threshold else { continue }
-            let range = contentWords[start].range.lowerBound..<contentWords[end].range.upperBound
-            if best == nil || distance < best!.score { best = Match(range: range, score: distance) }
+        for start in 0...(contentWords.count - windowSize) {
+            if start > 0 {
+                let nextLow = starts[start]
+                let nextHigh = ends[start + windowSize - 1]
+                for index in low..<nextLow { bag.remove(flat[index]) }
+                for index in high..<nextHigh { bag.add(flat[index]) }
+                low = nextLow
+                high = nextHigh
+            }
+            if start & 0xFFF == 0 { try Task.checkCancellation() }
+            guard abs((high - low) - query.normalized.count) <= query.threshold,
+                  bag.difference <= 2 * query.threshold else { continue }
+            let distance = damerauLevenshtein(
+                flat[low..<high], query.normalized, maximum: query.threshold
+            )
+            guard distance <= query.threshold, best == nil || distance < best!.score else { continue }
+            let end = start + windowSize - 1
+            best = Match(
+                range: contentWords[start].range.lowerBound..<contentWords[end].range.upperBound,
+                score: distance
+            )
+            // The earliest window holding the smallest distance wins, and
+            // nothing beats zero — so this is the answer the full scan reached.
+            if distance == 0 { break }
         }
         return best
+    }
+
+    /// Running per-character count difference between the current window and
+    /// the query, updated as the window slides rather than recomputed. ASCII
+    /// uses a flat table; anything else falls back to a dictionary.
+    private struct CharacterBag {
+        private var asciiDelta = [Int](repeating: 0, count: 128)
+        private var otherDelta: [Character: Int] = [:]
+        private(set) var difference = 0
+
+        init(query: [Character]) {
+            for character in query { adjust(character, by: -1) }
+        }
+
+        mutating func add(_ character: Character) { adjust(character, by: 1) }
+        mutating func remove(_ character: Character) { adjust(character, by: -1) }
+
+        private mutating func adjust(_ character: Character, by delta: Int) {
+            if let ascii = character.asciiValue {
+                let index = Int(ascii)
+                let previous = asciiDelta[index]
+                asciiDelta[index] = previous + delta
+                difference += abs(previous + delta) - abs(previous)
+            } else {
+                let previous = otherDelta[character] ?? 0
+                otherDelta[character] = previous + delta
+                difference += abs(previous + delta) - abs(previous)
+            }
+        }
     }
 
     private struct Token {
@@ -473,27 +696,32 @@ final class VaultSearchIndex: @unchecked Sendable {
         return tokens
     }
 
-    private static func damerauLevenshtein(_ lhs: String, _ rhs: String, maximum: Int) -> Int {
-        let a = Array(lhs)
-        let b = Array(rhs)
+    /// Rows are recycled across iterations and both operands arrive as
+    /// character arrays, so a window costs no allocation at all.
+    private static func damerauLevenshtein(
+        _ a: ArraySlice<Character>, _ b: [Character], maximum: Int
+    ) -> Int {
         if abs(a.count - b.count) > maximum { return maximum + 1 }
+        guard !a.isEmpty, !b.isEmpty else { return max(a.count, b.count) }
+        let base = a.startIndex
         var previousPrevious = Array(0...b.count)
         var previous = previousPrevious
+        var current = previousPrevious
         for i in 1...a.count {
-            var current = Array(repeating: 0, count: b.count + 1)
             current[0] = i
             var rowMinimum = i
+            let left = a[base + i - 1]
             for j in 1...b.count {
-                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                let cost = left == b[j - 1] ? 0 : 1
                 current[j] = min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost)
-                if i > 1, j > 1, a[i - 1] == b[j - 2], a[i - 2] == b[j - 1] {
+                if i > 1, j > 1, left == b[j - 2], a[base + i - 2] == b[j - 1] {
                     current[j] = min(current[j], previousPrevious[j - 2] + 1)
                 }
                 rowMinimum = min(rowMinimum, current[j])
             }
             if rowMinimum > maximum { return maximum + 1 }
-            previousPrevious = previous
-            previous = current
+            swap(&previousPrevious, &previous)
+            swap(&previous, &current)
         }
         return previous[b.count]
     }
