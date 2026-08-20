@@ -157,24 +157,38 @@ struct AudioExtensionApplier: Sendable {
         date: Date = Date()
     ) throws -> Outcome {
         let entryURL = vaultRoot.appendingRelativePath(relPath)
-        let visibleNames = ((try? FileManager.default.contentsOfDirectory(atPath: entryURL.path)) ?? [])
-            .filter { !$0.hasPrefix(".") }
-        guard VaultScanner.audioFile(in: visibleNames) == expectedSourceFileName else {
+        guard AudioVersionInstaller.currentAudioFileName(inEntry: entryURL) == expectedSourceFileName
+        else {
             throw RecordingExtensionError.sourceChanged
         }
 
-        let trash = TrashStore(vaultRoot: vaultRoot)
-        let trashedName = try trash.trashPreExtensionAudio(atEntryPath: relPath, deletedAt: date)
+        // The composer already wrote the combined file into the entry under a
+        // hidden name, so staging only flushes it. The exchange then publishes
+        // it and displaces the old version, which is trashed afterwards: the
+        // entry is never without a complete audio file.
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: expectedSourceFileName, finalFileName: fileName
+        )
+        let staged = try installer.stage(combinedURL)
+        let displaced: AudioVersionInstaller.Displaced
         do {
-            try FileManager.default.moveItem(
-                at: combinedURL, to: entryURL.appending(path: fileName)
+            displaced = try installer.publish(stagedAt: staged)
+        } catch {
+            installer.discard(stagedAt: staged)
+            throw error
+        }
+        let trash = TrashStore(vaultRoot: vaultRoot)
+        let trashedName: String
+        do {
+            trashedName = try trash.trashPreExtensionAudio(
+                atEntryPath: relPath, deletedAt: date,
+                sourceFileName: displaced.fileName, storedAs: displaced.originalName
             )
         } catch {
             // Best-effort rollback restores the known-good version. If this
-            // itself is interrupted, the trash wrapper remains recoverable.
-            if let item = try? trash.items().first(where: { $0.trashedName == trashedName }) {
-                _ = try? trash.restore(item)
-            }
+            // itself is interrupted, both versions are still complete and
+            // present in the entry.
+            installer.rollBack(displaced)
             throw error
         }
         try? EntryMetadata.setDuration(combinedDuration, inEntry: entryURL, editedAt: date)

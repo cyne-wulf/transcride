@@ -405,4 +405,80 @@ struct TrashStoreTests {
         // Emptying an already-empty trash is a harmless no-op.
         #expect(try store.deleteAllPermanently() == 0)
     }
+
+    // MARK: - Trashing a named file (audio edits publish before they trash)
+
+    @Test func trashesTheNamedFileAndFilesItUnderTheNameItHadWhileVisible() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        // The state an audio edit leaves behind after its atomic exchange: the
+        // new version is already the entry's audio, the old one is hidden.
+        try AtomicFile.write("new bytes", to: entryURL.appending(path: "audio.m4a"))
+        try AtomicFile.write(
+            "old bytes", to: entryURL.appending(path: ".audio.m4a.installing")
+        )
+        try WaveformData(duration: 10, peaks: [0.5]).write(to: WaveformData.url(inEntry: entryURL))
+        let store = TrashStore(vaultRoot: root)
+
+        let trashedName = try store.trashPreTrimAudio(
+            atEntryPath: entryRelPath,
+            sourceFileName: ".audio.m4a.installing",
+            storedAs: "audio.m4a"
+        )
+
+        // The published version stayed put; only the named file moved.
+        #expect(try String(contentsOf: entryURL.appending(path: "audio.m4a"), encoding: .utf8)
+            == "new bytes")
+        #expect(!FileManager.default.fileExists(
+            atPath: entryURL.appending(path: ".audio.m4a.installing").path
+        ))
+        let wrapper = store.trashDirectory.appending(path: trashedName)
+        // Stored under its visible name, so restore stays symmetric.
+        #expect(try String(contentsOf: wrapper.appending(path: "audio.m4a"), encoding: .utf8)
+            == "old bytes")
+        // The stale waveform cache went with the version it described.
+        #expect(FileManager.default.fileExists(
+            atPath: wrapper.appending(path: WaveformData.fileName).path
+        ))
+        #expect(!FileManager.default.fileExists(atPath: WaveformData.url(inEntry: entryURL).path))
+
+        // And the wrapper restores as an ordinary audio version.
+        let item = try #require(try store.items().first(where: { $0.trashedName == trashedName }))
+        _ = try store.restore(item)
+        #expect(try String(contentsOf: entryURL.appending(path: "audio.m4a"), encoding: .utf8)
+            == "old bytes")
+    }
+
+    @Test func namedTrashRefusesWhenTheNamedFileIsMissing() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        try AtomicFile.write("new bytes", to: entryURL.appending(path: "audio.m4a"))
+        let store = TrashStore(vaultRoot: root)
+
+        #expect(throws: VaultError.self) {
+            try store.trashPreCompressionAudio(
+                atEntryPath: entryRelPath, sourceFileName: ".audio.m4a.installing"
+            )
+        }
+        // A refusal leaves no half-built wrapper behind.
+        #expect(try store.items().isEmpty)
+        #expect(try String(contentsOf: entryURL.appending(path: "audio.m4a"), encoding: .utf8)
+            == "new bytes")
+    }
+
+    @Test func namedTrashDefaultsToTheVisibleAudioAndItsOwnName() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        try AtomicFile.write("only bytes", to: entryURL.appending(path: "voice.wav"))
+        let store = TrashStore(vaultRoot: root)
+
+        let trashedName = try store.trashPreReplacementAudio(atEntryPath: entryRelPath)
+
+        let wrapper = store.trashDirectory.appending(path: trashedName)
+        #expect(try String(contentsOf: wrapper.appending(path: "voice.wav"), encoding: .utf8)
+            == "only bytes")
+    }
 }

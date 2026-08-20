@@ -107,6 +107,53 @@ struct AudioExtensionTests {
         #expect(FileManager.default.fileExists(atPath: output.path))
     }
 
+    @Test func applyPublishesBeforeTrashingAndLeavesNoArtifacts() throws {
+        let fixture = try makeVault()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let output = fixture.entryURL.appending(path: RecordingExtensionArtifacts.combinedFileName)
+        try AtomicFile.write("combined", to: output)
+
+        let outcome = try AudioExtensionApplier(vaultRoot: fixture.root).apply(
+            combinedFileAt: output, fileName: "audio.m4a", combinedDuration: 12.5,
+            previousTranscriptDuration: 10, normalizedToM4A: false,
+            expectedSourceFileName: "audio.m4a", toEntryAt: fixture.entryPath
+        )
+
+        // The composed file was exchanged in place — no staging copy is left,
+        // and the displaced version reached the trash under its own name.
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: fixture.entryURL.path)
+            .filter { $0.hasSuffix(".installing") || $0.hasSuffix(".previous") }
+        #expect(leftovers.isEmpty)
+        #expect(!FileManager.default.fileExists(
+            atPath: fixture.entryURL.appending(
+                path: RecordingExtensionArtifacts.combinedFileName
+            ).path
+        ))
+        let wrapper = TrashStore(vaultRoot: fixture.root).trashDirectory
+            .appending(path: outcome.trashedName)
+        #expect(try String(contentsOf: wrapper.appending(path: "audio.m4a"), encoding: .utf8) == "old")
+    }
+
+    @Test func sourceMismatchLeavesTheComposedFileForARetry() throws {
+        let fixture = try makeVault()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let output = fixture.entryURL.appending(path: RecordingExtensionArtifacts.combinedFileName)
+        try AtomicFile.write("combined", to: output)
+
+        #expect(throws: RecordingExtensionError.self) {
+            try AudioExtensionApplier(vaultRoot: fixture.root).apply(
+                combinedFileAt: output, fileName: "audio.m4a", combinedDuration: 12.5,
+                previousTranscriptDuration: 10, normalizedToM4A: false,
+                expectedSourceFileName: "different.m4a", toEntryAt: fixture.entryPath
+            )
+        }
+        #expect(try String(
+            contentsOf: fixture.entryURL.appending(path: "audio.m4a"), encoding: .utf8
+        ) == "old")
+        #expect(try String(contentsOf: output, encoding: .utf8) == "combined")
+        #expect(try TrashStore(vaultRoot: fixture.root).items().isEmpty)
+    }
+
     @Test func failureInjectorIsOneShotAndPhaseSpecific() {
         let injector = AudioExtensionFailureInjector()
         injector.arm(.beforeSafeSwap)

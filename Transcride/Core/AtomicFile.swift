@@ -52,6 +52,65 @@ enum AtomicFile {
         try write(Data(string.utf8), to: url, durability: durability)
     }
 
+    /// Pushes a file that was produced *outside* `write` — a rendered audio
+    /// export, say — out of the page cache, so that a later rename cannot
+    /// publish bytes the device never received.
+    static func flushFile(at url: URL, durability: Durability = .standard) throws {
+        try flush(url, durability: durability)
+    }
+
+    /// Publishes an already-written file onto `destination` by one rename,
+    /// flushing it first. Both paths must be in the same directory: the point
+    /// of this call is that the destination name flips from the old contents
+    /// to the new complete contents in a single, uninterruptible step.
+    static func install(
+        fileAt url: URL, to destination: URL, durability: Durability = .standard
+    ) throws {
+        try flush(url, durability: durability)
+        try renameItem(url, to: destination)
+        if durability == .full { syncDirectory(destination.deletingLastPathComponent()) }
+    }
+
+    /// `rename(2)`, which — unlike `FileManager.moveItem` — replaces an
+    /// existing destination instead of failing.
+    static func renameItem(_ url: URL, to destination: URL) throws {
+        let result = url.withUnsafeFileSystemRepresentation { source in
+            destination.withUnsafeFileSystemRepresentation { dest in
+                Darwin.rename(source!, dest!)
+            }
+        }
+        guard result == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+                NSLocalizedDescriptionKey: "Rename failed: \(String(cString: strerror(errno)))",
+                NSFilePathErrorKey: destination.path,
+            ])
+        }
+    }
+
+    /// Atomically exchanges the contents of two existing paths. After a
+    /// successful call `first` holds what `second` held and vice versa, with no
+    /// instant in which either name is missing or partial.
+    ///
+    /// Returns false when the file system does not implement the exchange
+    /// (`ENOTSUP` — some network and FAT volumes); every other failure throws.
+    /// Callers must have a non-atomic fallback for the false case.
+    static func exchange(_ first: URL, _ second: URL) throws -> Bool {
+        let result = first.withUnsafeFileSystemRepresentation { source in
+            second.withUnsafeFileSystemRepresentation { dest in
+                renamex_np(source!, dest!, UInt32(RENAME_SWAP))
+            }
+        }
+        if result == 0 { return true }
+        if errno == ENOTSUP || errno == ENOSYS || errno == EINVAL { return false }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+            NSLocalizedDescriptionKey: "Atomic exchange failed: \(String(cString: strerror(errno)))",
+            NSFilePathErrorKey: second.path,
+        ])
+    }
+
+    /// fsyncs a directory so renames performed inside it become durable.
+    static func syncDirectory(at url: URL) { syncDirectory(url) }
+
     /// Pushes the freshly written temp file out of the page cache. A write that
     /// cannot be flushed must not report success, so failures propagate.
     private static func flush(_ url: URL, durability: Durability) throws {

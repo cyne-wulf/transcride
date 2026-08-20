@@ -134,4 +134,64 @@ struct AudioCompressionTests {
         #expect(!FileManager.default.fileExists(atPath: entry.appending(path: "audio-2.m4a").path))
         #expect(try store.items().contains(where: { $0.kind == .audioVersion }))
     }
+
+    @Test func applierStagesInsideTheEntryAndLeavesNoArtifacts() throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "transcride-compress-staging-\(UUID().uuidString)", directoryHint: .isDirectory
+        )
+        let path = "transcride-2026-07-11T06-00-00-compress"
+        let entry = root.appendingRelativePath(path)
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try AtomicFile.write("original", to: entry.appending(path: "audio.m4a"))
+        // The renderer writes to its own temp directory, which on an external
+        // vault is a different volume; the applier must not copy across that
+        // boundary onto a visible name.
+        let outputDir = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-rendered-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outputDir) }
+        let output = outputDir.appending(path: "audio.m4a")
+        try AtomicFile.write("compressed", to: output)
+
+        _ = try AudioCompressionApplier(vaultRoot: root).apply(
+            renderedFileAt: output, expectedSourceFileName: "audio.m4a",
+            sourceDuration: 8, compressedDuration: 5, removedDuration: 3, toEntryAt: path
+        )
+
+        let names = try FileManager.default.contentsOfDirectory(atPath: entry.path)
+        #expect(names.filter { $0.hasSuffix(".installing") || $0.hasSuffix(".previous") }.isEmpty)
+        #expect(names.filter { !$0.hasPrefix(".") } == ["audio.m4a"])
+        #expect(try String(contentsOf: entry.appending(path: "audio.m4a"), encoding: .utf8)
+            == "compressed")
+    }
+
+    @Test func mismatchedSourceLeavesEverythingUntouched() throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "transcride-compress-guard-\(UUID().uuidString)", directoryHint: .isDirectory
+        )
+        let path = "transcride-2026-07-11T06-00-00-compress"
+        let entry = root.appendingRelativePath(path)
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try AtomicFile.write("original", to: entry.appending(path: "audio.m4a"))
+        let outputDir = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-rendered-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outputDir) }
+        let output = outputDir.appending(path: "audio.m4a")
+        try AtomicFile.write("compressed", to: output)
+
+        #expect(throws: VaultError.self) {
+            try AudioCompressionApplier(vaultRoot: root).apply(
+                renderedFileAt: output, expectedSourceFileName: "other.m4a",
+                sourceDuration: 8, compressedDuration: 5, removedDuration: 3, toEntryAt: path
+            )
+        }
+        #expect(try String(contentsOf: entry.appending(path: "audio.m4a"), encoding: .utf8)
+            == "original")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: entry.path) == ["audio.m4a"])
+        // The render survives for a retry.
+        #expect(FileManager.default.fileExists(atPath: output.path))
+    }
 }

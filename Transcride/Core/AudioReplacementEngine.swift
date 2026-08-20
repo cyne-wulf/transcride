@@ -16,7 +16,8 @@ enum AudioReplacementError: LocalizedError {
         case .invalidRecipe: return "The replacement edit history is invalid."
         case .missingSource(let name): return "The retained replacement source \(name) is missing."
         case .exporterUnavailable: return "The replacement audio could not be rendered on this system."
-        case .sourceChanged: return "The entry audio changed before the replacement could be installed."
+        case .sourceChanged:
+            return "The entry audio changed before the replacement could be installed. If this entry's audio is missing, restore it from Recently Deleted and try again."
         case .durationMismatch(let expected, let actual):
             return "The rendered audio duration was \(actual) seconds; expected \(expected) seconds."
         case .diskSpace(let required, let available):
@@ -268,18 +269,38 @@ struct AudioReplacementApplier: Sendable {
     ) throws -> Outcome {
         let fm = FileManager.default
         let entryURL = vaultRoot.appendingRelativePath(relPath)
-        let names = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
-            .filter { !$0.hasPrefix(".") }
-        guard VaultScanner.audioFile(in: names) == expectedSourceFileName else {
+        guard AudioVersionInstaller.currentAudioFileName(inEntry: entryURL) == expectedSourceFileName
+        else {
             throw AudioReplacementError.sourceChanged
         }
-        let trash = TrashStore(vaultRoot: vaultRoot)
-        let trashedName = try trash.trashPreReplacementAudio(
-            atEntryPath: relPath, deletedAt: date
-        )
         let destinationName = (expectedSourceFileName as NSString).deletingPathExtension + ".m4a"
+        // The renderer already wrote the candidate into the entry under a
+        // hidden name. Exchange it for the canonical file, then trash the
+        // displaced version and move its matching history in behind it.
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: expectedSourceFileName,
+            finalFileName: destinationName
+        )
+        let staged = try installer.stage(renderedURL)
+        let displaced: AudioVersionInstaller.Displaced
         do {
-            try fm.moveItem(at: renderedURL, to: entryURL.appending(path: destinationName))
+            displaced = try installer.publish(stagedAt: staged)
+        } catch {
+            installer.discard(stagedAt: staged)
+            throw error
+        }
+        let trash = TrashStore(vaultRoot: vaultRoot)
+        let trashedName: String
+        do {
+            trashedName = try trash.trashPreReplacementAudio(
+                atEntryPath: relPath, deletedAt: date,
+                sourceFileName: displaced.fileName, storedAs: displaced.originalName
+            )
+        } catch {
+            installer.rollBack(displaced)
+            throw error
+        }
+        do {
             let historyDestination = entryURL.appending(
                 path: AudioReplacementArtifacts.directoryName, directoryHint: .isDirectory
             )

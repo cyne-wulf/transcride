@@ -434,7 +434,7 @@ enum RecordingExtensionError: LocalizedError, Equatable {
         case .segmentTooShort:
             return "The added recording is too short to append."
         case .sourceChanged:
-            return "The entry's audio changed while it was being extended."
+            return "The entry's audio changed while it was being extended. If this entry's audio is missing, restore it from Recently Deleted and try again."
         case .invalidCombinedDuration(let expected, let actual):
             return "The combined audio duration was invalid (expected about \(expected), got \(actual))."
         }

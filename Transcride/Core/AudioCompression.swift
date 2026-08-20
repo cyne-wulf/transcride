@@ -317,23 +317,35 @@ struct AudioCompressionApplier: Sendable {
         date: Date = Date()
     ) throws -> Outcome {
         let entryURL = vaultRoot.appendingRelativePath(entryPath)
-        let visible = ((try? FileManager.default.contentsOfDirectory(atPath: entryURL.path)) ?? [])
-            .filter { !$0.hasPrefix(".") }
-        guard VaultScanner.audioFile(in: visible) == expectedSourceFileName else {
+        guard AudioVersionInstaller.currentAudioFileName(inEntry: entryURL) == expectedSourceFileName
+        else {
             throw VaultError.notFound(entryPath.appendingComponent(expectedSourceFileName))
         }
-        let trash = TrashStore(vaultRoot: vaultRoot)
-        let trashedName = try trash.trashPreCompressionAudio(
-            atEntryPath: entryPath, deletedAt: date
-        )
         let base = (expectedSourceFileName as NSString).deletingPathExtension
         let finalName = (base.isEmpty ? "audio" : base) + ".m4a"
+        // Stage the render inside the entry, exchange it for the source, and
+        // only then hand the displaced version to Recently Deleted: the entry
+        // holds a complete audio file at every instant.
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: expectedSourceFileName, finalFileName: finalName
+        )
+        let staged = try installer.stage(renderedURL)
+        let displaced: AudioVersionInstaller.Displaced
         do {
-            try FileManager.default.moveItem(at: renderedURL, to: entryURL.appending(path: finalName))
+            displaced = try installer.publish(stagedAt: staged)
         } catch {
-            if let item = try? trash.items().first(where: { $0.trashedName == trashedName }) {
-                _ = try? trash.restore(item)
-            }
+            installer.discard(stagedAt: staged)
+            throw error
+        }
+        let trash = TrashStore(vaultRoot: vaultRoot)
+        let trashedName: String
+        do {
+            trashedName = try trash.trashPreCompressionAudio(
+                atEntryPath: entryPath, deletedAt: date,
+                sourceFileName: displaced.fileName, storedAs: displaced.originalName
+            )
+        } catch {
+            installer.rollBack(displaced)
             throw error
         }
         try? EntryMetadata.setDuration(compressedDuration, inEntry: entryURL, editedAt: date)

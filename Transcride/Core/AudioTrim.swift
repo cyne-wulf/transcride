@@ -249,42 +249,187 @@ enum EntryMetadata {
     /// alone. A no-op when the entry has no transcript file. `editedAt` is
     /// passed by audio *edits* (trim, extend, replace, compress, restore) and
     /// stamps `audio_edited`; recording finalization/recovery leaves it nil.
+    ///
+    /// A duration refresh never creates a note, and an entry whose transcript
+    /// is absent or unreadable is not a reason to fail an audio operation
+    /// whose files are already consistent — nor, ever, a reason to fabricate a
+    /// replacement note. Both cases return quietly; the next retranscription
+    /// refreshes the metadata.
     static func setDuration(
         _ duration: Double, inEntry entryURL: URL, editedAt: Date? = nil
     ) throws {
-        guard let url = TranscriptFile.url(inEntry: entryURL),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        var doc = FrontmatterDocument.parse(text)
-        doc.duration = duration
-        if let editedAt {
-            doc.audioEdited = editedAt
+        do {
+            try EntryFrontmatter.update(inEntry: entryURL, createIfMissing: false) { doc in
+                doc.duration = duration
+                if let editedAt {
+                    doc.audioEdited = editedAt
+                }
+            }
+        } catch VaultError.unreadableTranscript, VaultError.notFound {
+            return
         }
-        try AtomicFile.write(doc.serialized(), to: url)
     }
 
     /// Atomic, line-preserving per-entry silence selector update.
+    ///
+    /// Goes through `EntryFrontmatter`, so a transcript that exists but cannot
+    /// be read throws instead of being replaced by a stub: flipping a settings
+    /// toggle must never be able to destroy a note.
     static func setSilenceDetectionMode(
         _ mode: SilenceDetectionMode, inEntry entryURL: URL
     ) throws {
-        let url = TranscriptFile.url(inEntry: entryURL)
-            ?? entryURL.appending(path: TranscriptFile.defaultName)
-        var doc: FrontmatterDocument
-        if let text = try? String(contentsOf: url, encoding: .utf8) {
-            doc = FrontmatterDocument.parse(text)
-        } else {
-            doc = FrontmatterDocument(fields: [], body: "")
-            doc.created = EntryFolderName(parsing: entryURL.lastPathComponent)?.date
+        try EntryFrontmatter.update(inEntry: entryURL) { doc in
+            doc.silenceDetectionMode = mode
         }
-        doc.silenceDetectionMode = mode
-        try AtomicFile.write(doc.serialized(), to: url)
     }
 }
 
-/// The file dance after a successful trim export: pre-trim audio (and its
-/// stale waveform cache) to Recently Deleted, trimmed file in, frontmatter
-/// duration updated. Ordered so a crash at any point leaves the entry either
-/// intact or as a plain note with the original audio restorable — never
-/// without valid audio somewhere.
+/// Publishes an edited audio file into an entry folder.
+///
+/// Two invariants, both of which the earlier trash-then-move ordering broke:
+///
+/// - **Nothing partial is ever visible.** New bytes are staged under a hidden
+///   name inside the *entry* — the same volume as the vault — so the copy that
+///   `FileManager.moveItem` degrades to when the vault lives on another volume
+///   can no longer leave a truncated `audio.m4a` behind. The staged file is
+///   flushed to the device before it is published.
+/// - **The entry always has audio.** The previous version is displaced by an
+///   atomic exchange and only then handed to Recently Deleted, so no crash can
+///   land in a window where the entry has no audio at all.
+struct AudioVersionInstaller: Sendable {
+    /// How the previous version was moved out of the way.
+    enum Mode: Equatable, Sendable {
+        /// `RENAME_SWAP`: the names traded contents in one uninterruptible step.
+        case exchanged
+        /// The fallback for volumes without `RENAME_SWAP`: two renames, with a
+        /// brief window in which the visible audio name is absent.
+        case renamedAside
+        /// The new version has a different name, so it was published beside the
+        /// old one and nothing had to move.
+        case sideBySide
+    }
+
+    /// Where the previous version's bytes ended up, and what to call them.
+    struct Displaced: Sendable {
+        /// The file inside the entry that now holds the previous version.
+        var fileName: String
+        /// The name it carried while it was the entry's audio. Recently
+        /// Deleted files it under this name so restore stays symmetric.
+        var originalName: String
+        var mode: Mode
+    }
+
+    let entryURL: URL
+    /// The entry's current visible audio file.
+    let sourceFileName: String
+    /// The name the new version takes.
+    let finalFileName: String
+
+    var stagedFileName: String { ".\(finalFileName).installing" }
+    private var displacedFileName: String { ".\(finalFileName).previous" }
+
+    /// Moves freshly rendered audio into the entry under a hidden name.
+    /// Nothing visible changes, so a failure here leaves the entry untouched.
+    func stage(_ url: URL) throws -> URL {
+        let fm = FileManager.default
+        // Already staged: the extension composer and the replacement renderer
+        // write straight into the entry under their own hidden names, which is
+        // exactly what this would produce, minus a pointless copy.
+        if url.deletingLastPathComponent().standardizedFileURL == entryURL.standardizedFileURL,
+           url.lastPathComponent.hasPrefix(".") {
+            return url
+        }
+        let staged = entryURL.appending(path: stagedFileName)
+        try? fm.removeItem(at: staged)
+        do {
+            try fm.moveItem(at: url, to: staged)
+        } catch {
+            // A cross-volume move that fails partway leaves a partial file.
+            try? fm.removeItem(at: staged)
+            throw error
+        }
+        return staged
+    }
+
+    /// Makes the staged version the entry's audio and reports where the
+    /// previous version went. The caller trashes that file afterwards.
+    func publish(stagedAt staged: URL) throws -> Displaced {
+        let fm = FileManager.default
+        let final = entryURL.appending(path: finalFileName)
+        guard finalFileName == sourceFileName else {
+            // Different names: publishing cannot touch the old file, so the new
+            // version appears beside it. Both are complete for the couple of
+            // syscalls until the old one is trashed.
+            try AtomicFile.install(fileAt: staged, to: final, durability: .full)
+            return Displaced(
+                fileName: sourceFileName, originalName: sourceFileName, mode: .sideBySide
+            )
+        }
+        // Same name: the two files must trade places, or the old bytes would be
+        // overwritten before they ever reached Recently Deleted.
+        try AtomicFile.flushFile(at: staged, durability: .full)
+        if try AtomicFile.exchange(staged, final) {
+            AtomicFile.syncDirectory(at: entryURL)
+            return Displaced(
+                fileName: staged.lastPathComponent, originalName: sourceFileName, mode: .exchanged
+            )
+        }
+        // This volume has no atomic exchange. Move the old version aside and
+        // publish over the name it vacated: two renames, with a window of a few
+        // microseconds in which the entry has no visible audio. The displaced
+        // copy is complete and next to it the whole time.
+        let aside = entryURL.appending(path: displacedFileName)
+        try? fm.removeItem(at: aside)
+        try AtomicFile.renameItem(final, to: aside)
+        do {
+            try AtomicFile.install(fileAt: staged, to: final, durability: .full)
+        } catch {
+            try? AtomicFile.renameItem(aside, to: final)
+            throw error
+        }
+        return Displaced(
+            fileName: displacedFileName, originalName: sourceFileName, mode: .renamedAside
+        )
+    }
+
+    /// Best-effort return to the pre-publish state, for a failure between the
+    /// publish and the trash. The previous version goes back under its own
+    /// name and the new version is dropped.
+    func rollBack(_ displaced: Displaced) {
+        let fm = FileManager.default
+        let final = entryURL.appending(path: finalFileName)
+        let displacedURL = entryURL.appending(path: displaced.fileName)
+        switch displaced.mode {
+        case .exchanged:
+            if (try? AtomicFile.exchange(displacedURL, final)) == true {
+                try? fm.removeItem(at: displacedURL)
+            }
+        case .renamedAside:
+            try? fm.removeItem(at: final)
+            try? AtomicFile.renameItem(displacedURL, to: final)
+        case .sideBySide:
+            try? fm.removeItem(at: final)
+        }
+    }
+
+    /// Drops a staged file that never became visible.
+    func discard(stagedAt staged: URL) {
+        try? FileManager.default.removeItem(at: staged)
+    }
+
+    /// The entry's current visible audio, or nil when it has none.
+    static func currentAudioFileName(inEntry entryURL: URL) -> String? {
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: entryURL.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
+        return VaultScanner.audioFile(in: names)
+    }
+}
+
+/// The file dance after a successful trim export: the trimmed file is staged
+/// inside the entry, exchanged for the pre-trim audio, and only then is that
+/// pre-trim version (with its stale waveform cache) handed to Recently Deleted
+/// and the frontmatter duration updated. A crash at any point leaves the entry
+/// holding one complete version of its audio.
 struct TrimApplier: Sendable {
     let vaultRoot: URL
 
@@ -307,9 +452,31 @@ struct TrimApplier: Sendable {
         guard FileManager.default.fileExists(atPath: entryURL.path) else {
             throw VaultError.notFound(relPath)
         }
+        guard let sourceName = AudioVersionInstaller.currentAudioFileName(inEntry: entryURL) else {
+            throw VaultError.notFound(relPath.appendingComponent("audio"))
+        }
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: sourceName, finalFileName: fileName
+        )
+        let staged = try installer.stage(trimmedURL)
+        let displaced: AudioVersionInstaller.Displaced
+        do {
+            displaced = try installer.publish(stagedAt: staged)
+        } catch {
+            installer.discard(stagedAt: staged)
+            throw error
+        }
         let trash = TrashStore(vaultRoot: vaultRoot)
-        let trashedName = try trash.trashPreTrimAudio(atEntryPath: relPath, deletedAt: date)
-        try FileManager.default.moveItem(at: trimmedURL, to: entryURL.appending(path: fileName))
+        let trashedName: String
+        do {
+            trashedName = try trash.trashPreTrimAudio(
+                atEntryPath: relPath, deletedAt: date,
+                sourceFileName: displaced.fileName, storedAs: displaced.originalName
+            )
+        } catch {
+            installer.rollBack(displaced)
+            throw error
+        }
         // Stale metadata must not fail the trim — the files are already
         // consistent, and the next retranscription refreshes the note anyway.
         try? EntryMetadata.setDuration(newDuration, inEntry: entryURL, editedAt: date)

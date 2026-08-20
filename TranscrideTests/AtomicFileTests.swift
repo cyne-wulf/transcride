@@ -85,6 +85,65 @@ struct AtomicFileTests {
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
     }
+
+    // MARK: - Publishing files produced elsewhere
+
+    @Test func installReplacesAnExistingDestinationAndConsumesTheSource() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let staged = dir.appending(path: ".audio.m4a.installing")
+        let destination = dir.appending(path: "audio.m4a")
+        try AtomicFile.write("new bytes", to: staged)
+        try AtomicFile.write("old bytes", to: destination)
+
+        try AtomicFile.install(fileAt: staged, to: destination, durability: .full)
+
+        #expect(try String(contentsOf: destination, encoding: .utf8) == "new bytes")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test func exchangeSwapsContentsOfBothPaths() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let staged = dir.appending(path: ".audio.m4a.installing")
+        let visible = dir.appending(path: "audio.m4a")
+        try AtomicFile.write("new bytes", to: staged)
+        try AtomicFile.write("old bytes", to: visible)
+
+        // False would mean this file system has no RENAME_SWAP and the callers
+        // fell back to the two-rename path; on APFS it must be available.
+        #expect(try AtomicFile.exchange(staged, visible))
+        #expect(try String(contentsOf: visible, encoding: .utf8) == "new bytes")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "old bytes")
+    }
+
+    @Test func exchangeThrowsWhenEitherPathIsMissing() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let present = dir.appending(path: "audio.m4a")
+        try AtomicFile.write("bytes", to: present)
+
+        #expect(throws: (any Error).self) {
+            _ = try AtomicFile.exchange(present, dir.appending(path: "missing.m4a"))
+        }
+        // The surviving file is untouched.
+        #expect(try String(contentsOf: present, encoding: .utf8) == "bytes")
+    }
+
+    @Test func renameItemOverwritesWhereMoveItemWouldFail() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appending(path: "source")
+        let destination = dir.appending(path: "destination")
+        try AtomicFile.write("source", to: source)
+        try AtomicFile.write("destination", to: destination)
+
+        #expect(throws: (any Error).self) {
+            try FileManager.default.moveItem(at: source, to: destination)
+        }
+        try AtomicFile.renameItem(source, to: destination)
+        #expect(try String(contentsOf: destination, encoding: .utf8) == "source")
+    }
 }
 
 /// The read-else-stub trap: a transcript that exists but cannot be read must

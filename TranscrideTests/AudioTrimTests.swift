@@ -342,4 +342,232 @@ struct AudioTrimTests {
         // AAC priming/packet boundaries make the crop approximate.
         #expect(abs(duration - 2.0) < 0.3)
     }
+
+    // MARK: - Installer (staging, exchange, rollback)
+
+    /// Non-dot entries: what the library and the trash can actually see.
+    private func visibleNames(inEntry entryURL: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: entryURL.path)
+            .filter { !$0.hasPrefix(".") }
+    }
+
+    private func hiddenNames(inEntry entryURL: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: entryURL.path)
+            .filter { $0.hasPrefix(".") }
+    }
+
+    /// Half-published audio: what a crash between staging and trashing would
+    /// leave, and what a completed edit must never leave.
+    private func stagingLeftovers(inEntry entryURL: URL) throws -> [String] {
+        try hiddenNames(inEntry: entryURL).filter {
+            $0.hasSuffix(".installing") || $0.hasSuffix(".previous")
+        }
+    }
+
+    @Test func stagingLandsInsideTheEntryUnderAnInvisibleName() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        let trimmedURL = try makeTrimmedFile()
+        defer { try? FileManager.default.removeItem(at: trimmedURL.deletingLastPathComponent()) }
+
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: "audio.m4a", finalFileName: "audio.m4a"
+        )
+        let staged = try installer.stage(trimmedURL)
+
+        // The cross-volume copy lands on a hidden, non-audio name, so nothing
+        // that reads the entry can mistake a partial file for its audio.
+        #expect(staged.lastPathComponent.hasPrefix("."))
+        #expect(staged.deletingLastPathComponent().standardizedFileURL == entryURL.standardizedFileURL)
+        #expect(try visibleNames(inEntry: entryURL).sorted()
+            == ["audio.m4a", "transcript.md", "waveform.json"])
+        #expect(VaultScanner.audioFile(in: try visibleNames(inEntry: entryURL)) == "audio.m4a")
+        #expect(try String(contentsOf: entryURL.appending(path: "audio.m4a"), encoding: .utf8)
+            == "original audio bytes")
+        #expect(!FileManager.default.fileExists(atPath: trimmedURL.path))
+    }
+
+    @Test func stagingLeavesAnAlreadyHiddenInEntryFileWhereItIs() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        let composed = entryURL.appending(path: ".extension-combined.m4a")
+        try AtomicFile.write("combined", to: composed)
+
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: "audio.m4a", finalFileName: "audio.m4a"
+        )
+        #expect(try installer.stage(composed) == composed)
+        #expect(try String(contentsOf: composed, encoding: .utf8) == "combined")
+    }
+
+    @Test func publishExchangesSoTheEntryIsNeverWithoutAudio() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        let trimmedURL = try makeTrimmedFile()
+        defer { try? FileManager.default.removeItem(at: trimmedURL.deletingLastPathComponent()) }
+
+        let installer = AudioVersionInstaller(
+            entryURL: entryURL, sourceFileName: "audio.m4a", finalFileName: "audio.m4a"
+        )
+        let staged = try installer.stage(trimmedURL)
+        let displaced = try installer.publish(stagedAt: staged)
+
+        // On APFS this is the atomic exchange, not the two-rename fallback.
+        #expect(displaced.mode == .exchanged)
+        #expect(displaced.originalName == "audio.m4a")
+        #expect(try String(contentsOf: entryURL.appending(path: "audio.m4a"), encoding: .utf8)
+            == "trimmed audio bytes")
+        // The previous version is intact, waiting to be trashed.
+        #expect(try String(
+            contentsOf: entryURL.appending(path: displaced.fileName), encoding: .utf8
+        ) == "original audio bytes")
+
+        installer.rollBack(displaced)
+        #expect(try String(contentsOf: entryURL.appending(path: "audio.m4a"), encoding: .utf8)
+            == "original audio bytes")
+        #expect(try hiddenNames(inEntry: entryURL).isEmpty)
+    }
+
+    @Test func applierLeavesNoStagingArtifactsBehind() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        let trimmedURL = try makeTrimmedFile()
+        defer { try? FileManager.default.removeItem(at: trimmedURL.deletingLastPathComponent()) }
+
+        _ = try TrimApplier(vaultRoot: root).apply(
+            trimmedFileAt: trimmedURL, fileName: "audio.m4a",
+            newDuration: 4.5, toEntryAt: entryRelPath
+        )
+
+        #expect(try stagingLeftovers(inEntry: entryURL).isEmpty)
+        #expect(try visibleNames(inEntry: entryURL).sorted() == ["audio.m4a", "transcript.md"])
+    }
+
+    @Test func trimToADifferentContainerKeepsBothVersionsComplete() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-vault-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryRelPath = "transcride-2026-07-01T10-00-00-voice"
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+        try AtomicFile.write("original wav bytes", to: entryURL.appending(path: "voice.wav"))
+        let trimmedURL = try makeTrimmedFile(named: "voice.m4a")
+        defer { try? FileManager.default.removeItem(at: trimmedURL.deletingLastPathComponent()) }
+
+        let outcome = try TrimApplier(vaultRoot: root).apply(
+            trimmedFileAt: trimmedURL, fileName: "voice.m4a",
+            newDuration: 4.5, toEntryAt: entryRelPath
+        )
+
+        // Re-encoding renames the file, so the old one is trashed by name
+        // rather than exchanged — and is filed under the name it had.
+        #expect(try visibleNames(inEntry: entryURL) == ["voice.m4a"])
+        #expect(try String(contentsOf: entryURL.appending(path: "voice.m4a"), encoding: .utf8)
+            == "trimmed audio bytes")
+        #expect(try stagingLeftovers(inEntry: entryURL).isEmpty)
+        let wrapper = TrashStore(vaultRoot: root).trashDirectory
+            .appending(path: outcome.trashedName)
+        #expect(try String(contentsOf: wrapper.appending(path: "voice.wav"), encoding: .utf8)
+            == "original wav bytes")
+    }
+
+    @Test func failureBeforeAnythingIsPublishedLeavesTheEntryUntouched() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        try FileManager.default.removeItem(at: entryURL.appending(path: "audio.m4a"))
+        let trimmedURL = try makeTrimmedFile()
+        defer { try? FileManager.default.removeItem(at: trimmedURL.deletingLastPathComponent()) }
+
+        #expect(throws: VaultError.self) {
+            try TrimApplier(vaultRoot: root).apply(
+                trimmedFileAt: trimmedURL, fileName: "audio.m4a",
+                newDuration: 4.5, toEntryAt: entryRelPath
+            )
+        }
+        // Refused before staging: no hidden leftovers, nothing in the trash.
+        #expect(try hiddenNames(inEntry: entryURL).isEmpty)
+        #expect(try TrashStore(vaultRoot: root).items().isEmpty)
+    }
+
+    // MARK: - Frontmatter helpers
+
+    /// An entry whose markdown exists but cannot be decoded as UTF-8 — the
+    /// case that used to be indistinguishable from "there is no transcript".
+    private func makeEntryWithUnreadableTranscript() throws -> (root: URL, entryURL: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-unreadable-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let entryURL = root.appending(path: "transcride-2026-07-01T10-00-00-note")
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+        try Data([0xFF, 0xFE, 0xFF, 0x00, 0x9C])
+            .write(to: entryURL.appending(path: "transcript.md"))
+        return (root, entryURL)
+    }
+
+    @Test func silenceModeRefusesToStubOverAnUnreadableTranscript() throws {
+        let (root, entryURL) = try makeEntryWithUnreadableTranscript()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = entryURL.appending(path: "transcript.md")
+        let before = try Data(contentsOf: url)
+
+        #expect(throws: VaultError.self) {
+            try EntryMetadata.setSilenceDetectionMode(.speech, inEntry: entryURL)
+        }
+        #expect(try Data(contentsOf: url) == before)
+    }
+
+    @Test func silenceModeStubsOnlyWhenTheEntryTrulyHasNoTranscript() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-nomd-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appending(path: "transcride-2026-07-01T10-00-00-note")
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+
+        try EntryMetadata.setSilenceDetectionMode(.speech, inEntry: entryURL)
+
+        let text = try String(
+            contentsOf: entryURL.appending(path: "transcript.md"), encoding: .utf8
+        )
+        #expect(FrontmatterDocument.parse(text).silenceDetectionMode == .speech)
+        // Seeded from the folder timestamp, as the old stub did.
+        #expect(FrontmatterDocument.parse(text).created != nil)
+    }
+
+    @Test func durationUpdateLeavesAnUnreadableTranscriptAloneWithoutThrowing() throws {
+        let (root, entryURL) = try makeEntryWithUnreadableTranscript()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = entryURL.appending(path: "transcript.md")
+        let before = try Data(contentsOf: url)
+
+        // Audio operations must neither fail nor fabricate a note over this.
+        try EntryMetadata.setDuration(4.5, inEntry: entryURL, editedAt: Date())
+        #expect(try Data(contentsOf: url) == before)
+    }
+
+    @Test func durationUpdateOnAMissingEntryIsSilent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-gone-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try EntryMetadata.setDuration(4.5, inEntry: root.appending(path: "not-there"))
+    }
+
+    @Test func repeatedDurationWriteDoesNotTouchTheFile() throws {
+        let (root, entryRelPath) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entryURL = root.appendingRelativePath(entryRelPath)
+        let url = entryURL.appending(path: "transcript.md")
+
+        try EntryMetadata.setDuration(7.25, inEntry: entryURL)
+        let stamp = Date(timeIntervalSince1970: 1_000_000)
+        try FileManager.default.setAttributes([.modificationDate: stamp], ofItemAtPath: url.path)
+
+        // Writing the same value again would otherwise bump the modification
+        // date and reshuffle the "Recently Edited" sort for no reason.
+        try EntryMetadata.setDuration(7.25, inEntry: entryURL)
+        let after = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]
+        #expect(after as? Date == stamp)
+    }
 }

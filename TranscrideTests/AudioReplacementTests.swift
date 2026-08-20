@@ -238,6 +238,42 @@ struct AudioReplacementTests {
         #expect(try String(
             contentsOf: entry.appending(path: "waveform.json"), encoding: .utf8
         ) == "current-waveform")
+        // The candidate survives for a retry, and nothing was trashed.
+        #expect(try String(contentsOf: rendered, encoding: .utf8) == "candidate")
+        #expect(try TrashStore(vaultRoot: root).items().isEmpty)
+    }
+
+    @Test func bakePublishesTheCandidateBeforeTrashingTheCanonicalFile() throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "replacement-ordering-\(UUID().uuidString)", directoryHint: .isDirectory
+        )
+        let entryPath = "transcride-2026-07-11T20-00-02-replace"
+        let entry = root.appendingRelativePath(entryPath)
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try AtomicFile.write("old", to: entry.appending(path: "audio.m4a"))
+        let next = entry.appending(
+            path: AudioReplacementArtifacts.nextDirectoryName, directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(at: next, withIntermediateDirectories: true)
+        let rendered = entry.appending(path: AudioReplacementArtifacts.candidateFileName)
+        try AtomicFile.write("new", to: rendered)
+
+        let outcome = try AudioReplacementApplier(vaultRoot: root).apply(
+            renderedFileAt: rendered, nextHistoryDirectory: next,
+            expectedSourceFileName: "audio.m4a", duration: 2, toEntryAt: entryPath
+        )
+
+        // The candidate became the canonical file by exchange, so nothing is
+        // left staged and the displaced version is filed under its own name.
+        #expect(!FileManager.default.fileExists(atPath: rendered.path))
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: entry.path)
+            .filter { $0.hasSuffix(".installing") || $0.hasSuffix(".previous") }
+        #expect(leftovers.isEmpty)
+        #expect(try String(contentsOf: entry.appending(path: "audio.m4a"), encoding: .utf8) == "new")
+        let wrapper = TrashStore(vaultRoot: root).trashDirectory
+            .appending(path: outcome.trashedName)
+        #expect(try String(contentsOf: wrapper.appending(path: "audio.m4a"), encoding: .utf8) == "old")
     }
 
     @Test func oneHundredOverlappingBakesNeverDriftOrCapSlices() {

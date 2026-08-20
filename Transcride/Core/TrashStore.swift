@@ -183,10 +183,16 @@ struct TrashStore: Sendable {
     /// cache as one restorable item. Unlike Delete Audio this sets no
     /// frontmatter flag — the entry is getting replacement audio, not losing it.
     @discardableResult
-    func trashPreTrimAudio(atEntryPath entryPath: RelativePath, deletedAt: Date = Date()) throws -> String {
+    func trashPreTrimAudio(
+        atEntryPath entryPath: RelativePath,
+        deletedAt: Date = Date(),
+        sourceFileName: String? = nil,
+        storedAs: String? = nil
+    ) throws -> String {
         try trashAudioFiles(
             atEntryPath: entryPath, wrapperPrefix: "original-audio-",
-            kind: .preTrimAudio, deletedAt: deletedAt, includeReplacementHistory: true
+            kind: .preTrimAudio, deletedAt: deletedAt, includeReplacementHistory: true,
+            sourceFileName: sourceFileName, storedAs: storedAs
         )
     }
 
@@ -195,11 +201,15 @@ struct TrashStore: Sendable {
     /// complete and the user must be able to swap either one back.
     @discardableResult
     func trashPreExtensionAudio(
-        atEntryPath entryPath: RelativePath, deletedAt: Date = Date()
+        atEntryPath entryPath: RelativePath,
+        deletedAt: Date = Date(),
+        sourceFileName: String? = nil,
+        storedAs: String? = nil
     ) throws -> String {
         try trashAudioFiles(
             atEntryPath: entryPath, wrapperPrefix: "pre-extension-audio-",
-            kind: .preExtensionAudio, deletedAt: deletedAt, includeReplacementHistory: true
+            kind: .preExtensionAudio, deletedAt: deletedAt, includeReplacementHistory: true,
+            sourceFileName: sourceFileName, storedAs: storedAs
         )
     }
 
@@ -207,40 +217,67 @@ struct TrashStore: Sendable {
     /// versions, compression versions swap symmetrically on restore.
     @discardableResult
     func trashPreCompressionAudio(
-        atEntryPath entryPath: RelativePath, deletedAt: Date = Date()
+        atEntryPath entryPath: RelativePath,
+        deletedAt: Date = Date(),
+        sourceFileName: String? = nil,
+        storedAs: String? = nil
     ) throws -> String {
         try trashAudioFiles(
             atEntryPath: entryPath, wrapperPrefix: "pre-compression-audio-",
-            kind: .preCompressionAudio, deletedAt: deletedAt, includeReplacementHistory: true
+            kind: .preCompressionAudio, deletedAt: deletedAt, includeReplacementHistory: true,
+            sourceFileName: sourceFileName, storedAs: storedAs
         )
     }
 
     @discardableResult
     func trashPreReplacementAudio(
-        atEntryPath entryPath: RelativePath, deletedAt: Date = Date()
+        atEntryPath entryPath: RelativePath,
+        deletedAt: Date = Date(),
+        sourceFileName: String? = nil,
+        storedAs: String? = nil
     ) throws -> String {
         try trashAudioFiles(
             atEntryPath: entryPath, wrapperPrefix: "pre-replacement-audio-",
             kind: .preReplacementAudio, deletedAt: deletedAt,
-            includeReplacementHistory: true
+            includeReplacementHistory: true,
+            sourceFileName: sourceFileName, storedAs: storedAs
         )
     }
 
     /// Moves the entry's audio file and waveform cache into a single trash
     /// wrapper (one Recently Deleted row, one-click restore).
+    ///
+    /// `sourceFileName` names the file to stage instead of discovering the
+    /// entry's visible audio, and `storedAs` the name it takes inside the
+    /// wrapper. Audio edits use both: they publish the new version first and
+    /// hand the displaced bytes — which by then sit under a hidden name — to
+    /// the trash under the name they had while they were the entry's audio, so
+    /// restore stays symmetric. Both default to today's behavior.
     private func trashAudioFiles(
         atEntryPath entryPath: RelativePath,
         wrapperPrefix: String,
         kind: TrashItemKind,
         deletedAt: Date,
-        includeReplacementHistory: Bool = false
+        includeReplacementHistory: Bool = false,
+        sourceFileName: String? = nil,
+        storedAs: String? = nil
     ) throws -> String {
         let entryURL = vaultRoot.appendingRelativePath(entryPath)
-        let fileNames = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
-            .filter { !$0.hasPrefix(".") }
-        guard let audioName = VaultScanner.audioFile(in: fileNames) else {
-            throw VaultError.notFound(entryPath.appendingComponent("audio"))
+        let audioName: String
+        if let sourceFileName {
+            guard fm.fileExists(atPath: entryURL.appending(path: sourceFileName).path) else {
+                throw VaultError.notFound(entryPath.appendingComponent(sourceFileName))
+            }
+            audioName = sourceFileName
+        } else {
+            let fileNames = ((try? fm.contentsOfDirectory(atPath: entryURL.path)) ?? [])
+                .filter { !$0.hasPrefix(".") }
+            guard let discovered = VaultScanner.audioFile(in: fileNames) else {
+                throw VaultError.notFound(entryPath.appendingComponent("audio"))
+            }
+            audioName = discovered
         }
+        let storedName = storedAs ?? audioName
         try fm.createDirectory(at: trashDirectory, withIntermediateDirectories: true)
 
         let trashedName = availableName(for: wrapperPrefix + entryPath.lastComponent)
@@ -262,7 +299,7 @@ struct TrashStore: Sendable {
         do {
             try fm.moveItem(
                 at: entryURL.appending(path: audioName),
-                to: wrapperURL.appending(path: audioName)
+                to: wrapperURL.appending(path: storedName)
             )
         } catch {
             try? fm.removeItem(at: wrapperURL)
