@@ -264,6 +264,64 @@ struct TranscriptionApplierTests {
         #expect(doc.body.contains("Transcride"))
     }
 
+    /// The worst instance of the read-else-stub pattern: an unreadable
+    /// transcript used to be replaced by an empty stub, which then compared as
+    /// "not forked" and got overwritten with regenerated markdown — losing the
+    /// user's hand edits outright.
+    @Test func unreadableTranscriptIsNeverStubbedOrOverwritten() throws {
+        let vault = try makeVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let relPath = try makeEntry(in: vault, title: "Hand Edited", body: "\nMy notes.\n")
+        let entryURL = vault.appending(path: relPath)
+        let transcriptURL = entryURL.appending(path: TranscriptFile.defaultName)
+        // Bytes that are not valid UTF-8: readable file, undecodable content.
+        let raw = Data([0xFF, 0xFE, 0x00, 0x80, 0x81])
+        try raw.write(to: transcriptURL)
+
+        #expect(throws: VaultError.unreadableTranscript(TranscriptFile.defaultName)) {
+            try TranscriptionApplier(vaultRoot: vault).apply(
+                segments: [segment(["Hello", "there"])],
+                toEntryAt: relPath,
+                engine: engineMeta(),
+                engineFrontmatterID: "parakeet-tdt-v3",
+                vocabularyTerms: [],
+                date: .now
+            )
+        }
+
+        // The note is byte-identical...
+        #expect(try Data(contentsOf: transcriptURL) == raw)
+        // ...and the abort happened before anything else was written, so no
+        // fresh original was left beside the untouched markdown.
+        #expect(!FileManager.default.fileExists(
+            atPath: TranscriptOriginal.url(inEntry: entryURL).path
+        ))
+    }
+
+    /// The stub path still has to work: an entry with no markdown at all is a
+    /// legitimate "nothing to preserve" case.
+    @Test func entryWithNoTranscriptStillGetsOneGenerated() throws {
+        let vault = try makeVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let name = "transcride-2026-07-09T10-00-00"
+        let entryURL = vault.appending(path: name)
+        try FileManager.default.createDirectory(at: entryURL, withIntermediateDirectories: true)
+
+        let outcome = try TranscriptionApplier(vaultRoot: vault).apply(
+            segments: [segment(["Hello", "there"])],
+            toEntryAt: name,
+            engine: engineMeta(),
+            engineFrontmatterID: "parakeet-tdt-v3",
+            vocabularyTerms: [],
+            date: .now
+        )
+        #expect(!outcome.markdownLeftAlone)
+        let written = try transcriptText(
+            inEntry: vault.appending(path: outcome.entryRelativePath)
+        )
+        #expect(written.contains("Hello there"))
+    }
+
     @Test func missingEntryThrowsNotFound() throws {
         let vault = try makeVault()
         defer { try? FileManager.default.removeItem(at: vault) }

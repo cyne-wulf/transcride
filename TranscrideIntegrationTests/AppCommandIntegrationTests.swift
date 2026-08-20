@@ -203,4 +203,110 @@ struct AppCommandIntegrationTests {
         #expect(!model.presentQuickMove())
         #expect(!model.isQuickMovePresented)
     }
+
+    // MARK: - Live-recording capture guard
+
+    /// Exact-equality guards let the user delete, move or rename an *ancestor
+    /// folder* of a live recording. The journal then rides into `.trash` and
+    /// Empty Trash destroys the only copy of the audio.
+    @Test(arguments: [
+        // (operation target, live recording path, should block)
+        ("Journal/transcride-2026-07-01T10-00-00", "Journal/transcride-2026-07-01T10-00-00", true),
+        ("Journal", "Journal/transcride-2026-07-01T10-00-00", true),
+        ("Work/2026", "Work/2026/Q3/transcride-2026-07-01T10-00-00", true),
+        ("", "Journal/transcride-2026-07-01T10-00-00", true),
+        // The classic separator bug: a sibling folder sharing a prefix.
+        ("Journal2", "Journal/transcride-2026-07-01T10-00-00", false),
+        ("Journ", "Journal/transcride-2026-07-01T10-00-00", false),
+        // Unrelated siblings, and a descendant of the entry (never a target).
+        ("Projects", "Journal/transcride-2026-07-01T10-00-00", false),
+        ("Journal/transcride-2026-07-01T10-00-01", "Journal/transcride-2026-07-01T10-00-00", false),
+    ] as [(String, String, Bool)])
+    func ancestorFoldersOfALiveRecordingAreBlocked(
+        target: String, live: String, blocked: Bool
+    ) {
+        #expect(
+            AppModel.operationCapturesLiveRecording(target: target, liveEntryPath: live)
+                == blocked
+        )
+    }
+
+    @Test func nothingIsBlockedWhileNoRecordingIsLive() {
+        #expect(!AppModel.operationCapturesLiveRecording(target: "", liveEntryPath: nil))
+        #expect(!AppModel.operationCapturesLiveRecording(
+            target: "Journal", liveEntryPath: nil
+        ))
+    }
+
+    // MARK: - External change intersection
+
+    /// Any write anywhere in the vault used to reload the open entry's whole
+    /// transcript (full JSON decode, timing repair, word-map rebuild).
+    @Test func externalChangeReloadIsLimitedToTheOpenEntry() {
+        let vault = URL(fileURLWithPath: "/tmp/vault")
+        let open = "Journal/transcride-2026-07-01T10-00-00"
+        func touches(_ paths: [String]) -> Bool {
+            AppModel.externalChange(paths, touchesEntryAt: open, inVault: vault)
+        }
+        // The entry folder, and a file inside it.
+        #expect(touches(["/tmp/vault/Journal/transcride-2026-07-01T10-00-00"]))
+        #expect(touches(["/tmp/vault/Journal/transcride-2026-07-01T10-00-00/Note.md"]))
+        // An ancestor folder: a folder rename arrives as an event on the folder.
+        #expect(touches(["/tmp/vault/Journal"]))
+        // Unrelated entries — including one whose path shares a prefix.
+        #expect(!touches(["/tmp/vault/Journal/transcride-2026-07-01T10-00-01/Note.md"]))
+        #expect(!touches(["/tmp/vault/Journal2/transcride-2026-07-01T10-00-00"]))
+        #expect(!touches(["/tmp/vault/Projects/transcride-2026-08-01T10-00-00/Note.md"]))
+        // One hit among misses still counts.
+        #expect(touches([
+            "/tmp/vault/Projects/transcride-2026-08-01T10-00-00/Note.md",
+            "/tmp/vault/Journal/transcride-2026-07-01T10-00-00/Note.md",
+        ]))
+        // Unknown extent is treated as "everything", matching the index.
+        #expect(touches([]))
+    }
+
+    // MARK: - Transcription queue path tracking
+
+    /// A rename or move mid-transcription used to leave the running item
+    /// pointing at the old path; the write threw `.notFound`, which read as
+    /// "entry deleted", and the finished transcription was silently dropped.
+    @Test func queueItemPathFollowsRenamesAndFolderMoves() async throws {
+        let vault = try makeVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let service = VaultService(rootURL: vault)
+        let queue = TranscriptionQueue(vaultRoot: vault, service: service)
+        defer { queue.shutdown() }
+
+        let original = "Journal/\(Self.entryName)"
+        queue.enqueue(entryRelativePath: original, source: "test")
+        let itemID = try #require(queue.items.first?.id)
+        #expect(queue.currentPath(forItemID: itemID) == original)
+
+        // An entry rename (auto-title or manual).
+        let renamed = "Journal/transcride-2026-07-01T10-00-00-new-title"
+        queue.repointItems(from: original, to: renamed)
+        #expect(queue.currentPath(forItemID: itemID) == renamed)
+
+        // A folder rename above it: descendants follow by prefix.
+        queue.repointItems(from: "Journal", to: "Field Notes")
+        #expect(queue.currentPath(forItemID: itemID)
+            == "Field Notes/transcride-2026-07-01T10-00-00-new-title")
+
+        // A sibling folder sharing a prefix must not be dragged along.
+        queue.repointItems(from: "Field", to: "Moved")
+        #expect(queue.currentPath(forItemID: itemID)
+            == "Field Notes/transcride-2026-07-01T10-00-00-new-title")
+    }
+
+    /// The entry-folder timestamp is the stable identity, so an *external*
+    /// rename that never reaches `repointItems` is still recoverable.
+    @Test func externallyRenamedEntryIsFoundByItsTimestampIdentity() throws {
+        let original = "Journal/\(Self.entryName)"
+        let renamedInFinder = "Archive/transcride-2026-07-01T10-00-00-renamed-by-hand"
+        #expect(EntryIdentity.sameEntry(original, renamedInFinder))
+        #expect(!EntryIdentity.sameEntry(
+            original, "Archive/transcride-2026-07-01T10-00-01-other"
+        ))
+    }
 }

@@ -71,6 +71,70 @@ struct InterruptedRecordingRecoveryTests {
         #expect(entry.hasTranscript)
     }
 
+    /// Deleting the folder that contains a live recording drags the journal
+    /// into `.trash`, which the ordinary scan skips as hidden. Rebuilding it
+    /// there makes the audio restorable instead of purge-bait.
+    @Test func journalTrashedWithItsFolderIsRebuiltInPlace() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "transcride-recovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // What a folder delete leaves behind: the whole folder, entry and all,
+        // parked under `.trash`.
+        let trashedPath = ".trash/Journal/transcride-2026-07-11T10-30-00"
+        let trashedURL = root.appendingRelativePath(trashedPath)
+        try FileManager.default.createDirectory(at: trashedURL, withIntermediateDirectories: true)
+        let source = try TestAudio.makeWAV(seconds: 1.2, amplitude: 0.35)
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        try FileManager.default.copyItem(
+            at: source, to: trashedURL.appending(path: RecorderPartialFile.name)
+        )
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: root)
+
+        // The rebuilt entry stays strictly in its own channel: nothing here may
+        // be enqueued for transcription or handed to the search index.
+        #expect(summary.recovered.isEmpty)
+        #expect(summary.failures.isEmpty)
+        let rebuilt = try #require(summary.recoveredInTrash.first)
+        #expect(summary.recoveredInTrash.count == 1)
+        #expect(rebuilt.entryRelativePath == trashedPath)
+        #expect(abs(rebuilt.duration - 1.2) < 0.1)
+        #expect(FileManager.default.fileExists(
+            atPath: trashedURL.appending(path: rebuilt.audioFileName).path
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: trashedURL.appending(path: RecorderPartialFile.name).path
+        ))
+        // And the live vault is untouched: a trashed entry must never surface
+        // in the library.
+        var scanner = VaultScanner()
+        #expect(scanner.scan(root: root).allEntries.isEmpty)
+    }
+
+    /// The trash pass must not disturb the ordinary one when both have work.
+    @Test func trashAndLiveJournalsRecoverIntoSeparateChannels() async throws {
+        let fixture = try makeEntry()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = try TestAudio.makeWAV(seconds: 1.2, amplitude: 0.35)
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        try FileManager.default.copyItem(
+            at: source, to: fixture.url.appending(path: RecorderPartialFile.name)
+        )
+        let trashedURL = fixture.root
+            .appendingRelativePath(".trash/transcride-2026-07-11T09-00-00")
+        try FileManager.default.createDirectory(at: trashedURL, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: source, to: trashedURL.appending(path: RecorderPartialFile.name)
+        )
+
+        let summary = await InterruptedRecordingRecovery.recoverAll(inVault: fixture.root)
+
+        #expect(summary.recovered.map(\.entryRelativePath) == [fixture.path])
+        #expect(summary.recoveredInTrash.map(\.entryRelativePath)
+            == [".trash/transcride-2026-07-11T09-00-00"])
+        #expect(summary.failures.isEmpty)
+    }
+
     @Test func relaunchIdentifiesFramedDigitalSilenceWithoutDiscardingIt() async throws {
         let fixture = try makeEntry()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

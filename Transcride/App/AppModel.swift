@@ -84,6 +84,11 @@ final class AppModel {
     private var lastFinalizedRecordingDuration: Double?
     private(set) var isGlobalIndicatorRetentionActive = false
     private var recordingCommandGate = RecordingCommandGate()
+    /// Continuations parked in `stopRecordingForTermination` until the gate
+    /// releases. Main-actor only.
+    private var recordingCommandWaiters: [CheckedContinuation<Void, Never>] = []
+    private var transcriptSaveRefreshTask: Task<Void, Never>?
+    static let transcriptSaveRefreshDelay: Double = 1.2
     /// Extension and replacement starts cross permission/filesystem awaits and
     /// are therefore actor-reentrant. Keep exactly one such workflow in flight
     /// so a losing task cannot alter the winner's shared edit session.
@@ -176,7 +181,15 @@ final class AppModel {
     private(set) var queuePopoverRequestRevision = 0
     private(set) var cancelTrimRequestRevision = 0
     private(set) var trimModeActive = false
-    var workbenchUIState = WorkbenchUIState()
+    var workbenchUIState = WorkbenchUIState() {
+        didSet {
+            // Leaving the editor flushes the coalesced post-save rescan, so
+            // the list row never sits on a stale preview afterwards.
+            if oldValue.isEditing, !workbenchUIState.isEditing {
+                Task { [weak self] in await self?.flushTranscriptSaveRefresh() }
+            }
+        }
+    }
 
     func requestEntryAction(_ request: EntryActionRequest) {
         guard selectedEntry != nil else { return }
@@ -216,7 +229,7 @@ final class AppModel {
         guard entry.hasAudio else {
             return entry.audioUnavailableExplanation ?? "No audio is available to trim."
         }
-        if recorder.currentEntryPath == entry.relativePath {
+        if liveRecordingBlocks(entry.relativePath) {
             return "Stop the recording before trimming."
         }
         if replacementModeActive {
@@ -655,6 +668,16 @@ final class AppModel {
             }.joined(separator: "\n")
             errorMessage = "Some interrupted recordings still need recovery. Their partial audio was kept unchanged:\n\(details)"
         }
+        if !recordingRecovery.recoveredInTrash.isEmpty {
+            // Deliberately notice-only: these entries live in `.trash`, so they
+            // must not be enqueued for transcription or added to the search
+            // index. Restoring one turns it into an ordinary entry, and the
+            // next launch's scan picks it up from there.
+            let count = recordingRecovery.recoveredInTrash.count
+            recordingRecoveryNoticeMessage = count == 1
+                ? "A recording that was interrupted while its note sat in Recently Deleted was rebuilt. Restore that note to keep the audio."
+                : "\(count) recordings that were interrupted while their notes sat in Recently Deleted were rebuilt. Restore those notes to keep the audio."
+        }
 
         let extensionDiscovery = await service.recordingExtensionRecoveries()
         extensionRecoveries = []
@@ -711,7 +734,9 @@ final class AppModel {
         watcher = FSEventsWatcher(url: url) { [weak self] paths in
             Task {
                 await service.synchronizeSearchIndex(changedAbsolutePaths: paths)
-                await self?.handleExternalVaultChange(for: service)
+                await self?.handleExternalVaultChange(
+                    for: service, changedAbsolutePaths: paths
+                )
             }
         }
         // Retention purge on launch/open (window configurable per vault,
@@ -754,11 +779,43 @@ final class AppModel {
         }
     }
 
-    private func handleExternalVaultChange(for changedService: VaultService) async {
+    private func handleExternalVaultChange(
+        for changedService: VaultService, changedAbsolutePaths: [String]
+    ) async {
         guard service === changedService else { return }
-        externalVaultRevision &+= 1
+        // Bumping the revision reloads the open entry's whole transcript — a
+        // full JSON decode, timing repair and word-map rebuild. Any write
+        // anywhere in the vault used to pay that cost, so only do it when the
+        // event actually touched the entry on screen.
+        if let vaultURL, let openEntry = selectedEntryID,
+           Self.externalChange(
+               changedAbsolutePaths, touchesEntryAt: openEntry, inVault: vaultURL
+           ) {
+            externalVaultRevision &+= 1
+        }
         await refresh()
         refreshVaultSearchIfVisible()
+    }
+
+    /// Whether a coalesced filesystem event touched the open entry — the entry
+    /// folder itself, anything inside it, or an ancestor of it (a folder
+    /// rename arrives as an event on the folder).
+    ///
+    /// An empty path list means "unknown extent", which `VaultSearchIndex`
+    /// also treats as everything; reloading unnecessarily is the safe side.
+    static func externalChange(
+        _ changedAbsolutePaths: [String],
+        touchesEntryAt entryPath: RelativePath,
+        inVault vaultURL: URL
+    ) -> Bool {
+        guard !changedAbsolutePaths.isEmpty else { return true }
+        let entry = vaultURL.appendingRelativePath(entryPath).standardizedFileURL.path
+        return changedAbsolutePaths.contains { raw in
+            let changed = URL(fileURLWithPath: raw).standardizedFileURL.path
+            return changed == entry
+                || changed.hasPrefix(entry + "/")
+                || entry.hasPrefix(changed + "/")
+        }
     }
 
     private func searchIndexDidFinish(for indexedService: VaultService, error: Error?) {
@@ -843,6 +900,62 @@ final class AppModel {
         recentVaults = VaultBookmark.resolveRecents()
     }
 
+    // MARK: - Live-recording guards
+
+    /// True when a vault operation on `target` would carry the live recording's
+    /// entry folder with it: the folder itself, or any ancestor of it.
+    ///
+    /// Exact equality is not enough. Deleting, moving or renaming an *ancestor*
+    /// folder takes the live `.recording.caf` journal along — into `.trash` for
+    /// a delete, where the launch recovery scan never looks — and Empty Trash
+    /// then destroys the only copy of the audio.
+    static func operationCapturesLiveRecording(
+        target: RelativePath, liveEntryPath: RelativePath?
+    ) -> Bool {
+        guard let live = liveEntryPath else { return false }
+        // The separator matters in both directions: "Journal" must not capture
+        // a recording inside the sibling folder "Journal2".
+        return target.isEmpty || target == live || live.hasPrefix(target + "/")
+    }
+
+    /// Whether the live recording blocks a mutation of `relPath`.
+    func liveRecordingBlocks(_ relPath: RelativePath) -> Bool {
+        Self.operationCapturesLiveRecording(
+            target: relPath, liveEntryPath: recorder.currentEntryPath
+        )
+    }
+
+    /// Follows a rename or move in the recovery bookkeeping that was captured
+    /// at launch. `VaultService` re-anchors recovery records to the folder it
+    /// finds them in, but only at *discovery* time: a rename between the
+    /// launch scan and the user resolving the sheet would otherwise dead-end
+    /// `finishRecoveredExtension`, `saveRecoveredExtensionAsNewEntry` and
+    /// `discardRecoveredExtension` on a path that no longer exists.
+    private func repointRecoveryArtifacts(from oldPath: RelativePath, to newPath: RelativePath) {
+        guard oldPath != newPath else { return }
+        func repointed(_ path: RelativePath) -> RelativePath? {
+            if path == oldPath { return newPath }
+            if path.hasPrefix(oldPath + "/") {
+                return newPath + path.dropFirst(oldPath.count)
+            }
+            return nil
+        }
+        for index in extensionRecoveries.indices {
+            if let moved = repointed(extensionRecoveries[index].entryRelativePath) {
+                extensionRecoveries[index].entryRelativePath = moved
+            }
+        }
+        unresolvedExtensionRecoveryEntryPaths = Set(
+            unresolvedExtensionRecoveryEntryPaths.map { repointed($0) ?? $0 }
+        )
+        if let replacementEntryPath, let moved = repointed(replacementEntryPath) {
+            self.replacementEntryPath = moved
+        }
+        if let path = replacementSession?.entryRelativePath, let moved = repointed(path) {
+            replacementSession?.entryRelativePath = moved
+        }
+    }
+
     // MARK: - Intents (folders)
 
     func createFolder(named name: String, inFolder parent: RelativePath) async {
@@ -852,9 +965,22 @@ final class AppModel {
     }
 
     func renameFolder(at relPath: RelativePath, to newName: String) async {
+        guard !liveRecordingBlocks(relPath) else {
+            errorMessage = "Stop the recording before renaming this folder — the recording in progress is inside it."
+            return
+        }
         await perform("renameFolder [\(relPath)] -> \(newName)") { service in
             let newPath = try await service.renameFolder(at: relPath, to: newName)
             await MainActor.run {
+                // Every entry beneath the folder just changed path: the queue
+                // and any launch-captured recovery record must follow, or a
+                // running transcription lands on a path that no longer exists.
+                self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
+                self.repointRecoveryArtifacts(from: relPath, to: newPath)
+                if let selected = self.selectedEntryID,
+                   selected.hasPrefix(relPath + "/") {
+                    self.selectedEntryID = newPath + selected.dropFirst(relPath.count)
+                }
                 if self.sidebarSelection == .folder(relPath) {
                     self.sidebarSelection = .folder(newPath)
                 }
@@ -865,11 +991,15 @@ final class AppModel {
     // MARK: - Intents (entries)
 
     func renameEntry(_ entry: Entry, toTitle title: String) async {
-        guard recorder.currentEntryPath != entry.relativePath else { return }
+        guard !liveRecordingBlocks(entry.relativePath) else {
+            errorMessage = "Stop the recording before renaming this note."
+            return
+        }
         await perform("renameEntry [\(entry.relativePath)] -> \(title)") { service in
             let newPath = try await service.renameEntry(at: entry.relativePath, toTitle: title)
             await MainActor.run {
                 self.transcriptionQueue?.repointItems(from: entry.relativePath, to: newPath)
+                self.repointRecoveryArtifacts(from: entry.relativePath, to: newPath)
                 if self.selectedEntryID == entry.relativePath {
                     self.selectedEntryID = newPath
                 }
@@ -878,20 +1008,28 @@ final class AppModel {
     }
 
     func moveItem(atRelativePath relPath: RelativePath, toFolder destFolder: RelativePath) async {
-        guard recorder.currentEntryPath != relPath else { return }
+        guard !liveRecordingBlocks(relPath) else {
+            errorMessage = "Stop the recording before moving this — the recording in progress is inside it."
+            return
+        }
         await perform("moveItem [\(relPath)] -> [\(destFolder)]") { service in
             let newPath = try await service.moveItem(at: relPath, toFolder: destFolder)
             await MainActor.run {
                 self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
-                if self.selectedEntryID == relPath {
-                    self.selectedEntryID = newPath
+                self.repointRecoveryArtifacts(from: relPath, to: newPath)
+                if let selected = self.selectedEntryID,
+                   selected == relPath || selected.hasPrefix(relPath + "/") {
+                    self.selectedEntryID = newPath + selected.dropFirst(relPath.count)
                 }
             }
         }
     }
 
     func deleteItem(atRelativePath relPath: RelativePath) async {
-        guard recorder.currentEntryPath != relPath else { return }
+        guard !liveRecordingBlocks(relPath) else {
+            errorMessage = "Stop the recording before deleting this — the recording in progress is inside it."
+            return
+        }
         // Standard list semantics: deleting the selected entry selects the
         // one that takes its place (the next below, else the new last).
         // Computed from the displayed order before the row disappears.
@@ -923,7 +1061,7 @@ final class AppModel {
     }
 
     func toggleFavorite(for entry: Entry) async {
-        guard recorder.currentEntryPath != entry.relativePath else { return }
+        guard !liveRecordingBlocks(entry.relativePath) else { return }
         let favorite = !entry.favorite
         await perform("setFavorite \(favorite) [\(entry.relativePath)]") { service in
             try await service.setFavorite(favorite, atEntryPath: entry.relativePath)
@@ -958,7 +1096,7 @@ final class AppModel {
     /// title "… copy". The copy becomes the selection so the user lands on
     /// what they just made.
     func duplicateEntry(_ entry: Entry) async {
-        guard recorder.currentEntryPath != entry.relativePath else { return }
+        guard !liveRecordingBlocks(entry.relativePath) else { return }
         guard let service else { return }
         do {
             let newPath = try await service.duplicateEntry(at: entry.relativePath)
@@ -1206,7 +1344,7 @@ final class AppModel {
             return quickMoveBlockReason() == nil
         case .moveToRecentlyDeleted:
             guard let entry else { return false }
-            return recorder.currentEntryPath != entry.relativePath
+            return !liveRecordingBlocks(entry.relativePath)
                 && !replacementModeActive
                 && !clipMutationEntryPaths.contains(entry.relativePath)
         case .extendRecording:
@@ -1237,7 +1375,7 @@ final class AppModel {
         case .deleteAudio:
             guard let entry else { return false }
             return entry.hasAudio
-                && recorder.currentEntryPath != entry.relativePath
+                && !liveRecordingBlocks(entry.relativePath)
                 && !compressingEntryPaths.contains(entry.relativePath)
         case .exportMarkdown:
             return entry?.hasTranscript == true
@@ -1593,7 +1731,7 @@ final class AppModel {
             return "Recently Deleted items are restored, not moved."
         }
         guard let entry = selectedEntry else { return "Select a note to move." }
-        if recorder.currentEntryPath == entry.relativePath {
+        if liveRecordingBlocks(entry.relativePath) {
             return "Stop the recording before moving this note."
         }
         if replacementModeActive {
@@ -1647,7 +1785,7 @@ final class AppModel {
     /// open with `quickMoveErrorMessage` set.
     func performQuickMove(to destination: QuickMoveDestination) async {
         guard let entryPath = quickMoveEntryPath, let service, let vaultURL else { return }
-        guard recorder.currentEntryPath != entryPath else {
+        guard !liveRecordingBlocks(entryPath) else {
             quickMoveErrorMessage = "Stop the recording before moving this note."
             return
         }
@@ -1664,6 +1802,7 @@ final class AppModel {
                 )
                 await refresh {
                     self.transcriptionQueue?.repointItems(from: entryPath, to: newPath)
+                    self.repointRecoveryArtifacts(from: entryPath, to: newPath)
                     if self.selectedEntryID == entryPath {
                         self.selectedEntryID = newPath
                     }
@@ -1775,6 +1914,38 @@ final class AppModel {
         await performRecordingCommand(.stopAndSave)
     }
 
+    /// Awaits any in-flight recording command, then guarantees the live
+    /// recording is finalized.
+    ///
+    /// `performRecordingCommand` is suppressed outright while another command
+    /// holds the gate, so termination cannot simply call `stopRecording()`: a
+    /// stop already in flight would make the termination task return instantly
+    /// and the process would exit mid-encode. Journal recovery makes that
+    /// survivable, but "Stop, Save, and Quit" promises the file is saved
+    /// *before* the app goes away.
+    func stopRecordingForTermination() async {
+        // Both gates matter: `startNewRecording` holds the command gate, but a
+        // replacement take or an extension claims only the start token, and
+        // quitting through either window still has to wait for the microphone
+        // to settle before there is anything to stop.
+        while recordingCommandGate.commandInFlight != nil || isRecordingStartInFlight {
+            await withCheckedContinuation { continuation in
+                recordingCommandWaiters.append(continuation)
+            }
+        }
+        guard recorder.state == .recording || recorder.state == .paused else { return }
+        await performRecordingCommand(.stopAndSave)
+    }
+
+    /// Wakes everything waiting on the recording-command gate. Called from the
+    /// same `defer` that releases the gate, on the main actor, so a waiter
+    /// added just before the release can never be missed.
+    private func signalRecordingCommandFinished() {
+        let waiters = recordingCommandWaiters
+        recordingCommandWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     /// The floating indicator is a compact state-dependent toggle. It reuses
     /// the same serialized commands as the global shortcuts and recorder UI.
     func toggleRecordingFromIndicator() async {
@@ -1802,7 +1973,10 @@ final class AppModel {
         case .perform:
             break
         }
-        defer { recordingCommandGate.finish(command) }
+        defer {
+            recordingCommandGate.finish(command)
+            signalRecordingCommandFinished()
+        }
 
         switch command {
         case .startNew:
@@ -1918,6 +2092,7 @@ final class AppModel {
         activeRecordingStartToken = nil
         isRecordingStartInFlight = false
         recordingWorkflowStartGate.finish()
+        signalRecordingCommandFinished()
     }
 
     private func recordingStartContextIsCurrent(
@@ -2056,6 +2231,11 @@ final class AppModel {
             globalRecordingStateTask?.cancel()
             globalRecordingTransientState = nil
             updateLiveTranscription()
+            // The microphone is live: hold the start token any longer and the
+            // full vault rescan below would reject a Stop or Pause with "the
+            // microphone is still starting". The `defer` above stays as the
+            // error-path backstop and is idempotent (it re-checks the token).
+            finishRecordingStart(startToken)
             await refresh()
         } catch {
             DebugLog.append("startRecording FAILED \(error)")
@@ -2241,7 +2421,15 @@ final class AppModel {
     }
 
     func stopReplacementTake() async {
+        // `sessionTarget` stays non-nil all the way through finalization, so it
+        // cannot serialize the three entrants (region-boundary callback, UI
+        // Stop, global Stop command). The recorder state can: `stop()` moves to
+        // `.finalizing` synchronously before its first await, so a second
+        // main-actor entrant returns here instead of getting nil back from
+        // `stop()` and reporting a failure during a successful save. Mirrors
+        // the guard in `RecorderService.cancelReplacementCapture`.
         guard case .replacementTake? = recorder.sessionTarget,
+              recorder.state == .recording || recorder.state == .paused,
               let service, var session = replacementSession else { return }
         let sessionID = session.id
         let entryRelativePath = session.entryRelativePath
@@ -2900,8 +3088,15 @@ final class AppModel {
             // the revision separately would reload the transcript twice).
             await refresh {
                 self.transcriptRevision += 1
-                if self.selectedEntryID == originalPath, outcome.entryRelativePath != originalPath {
-                    self.selectedEntryID = outcome.entryRelativePath
+                if outcome.entryRelativePath != originalPath {
+                    // An auto-title rename moves the folder too, so any
+                    // launch-captured recovery record has to follow it.
+                    self.repointRecoveryArtifacts(
+                        from: originalPath, to: outcome.entryRelativePath
+                    )
+                    if self.selectedEntryID == originalPath {
+                        self.selectedEntryID = outcome.entryRelativePath
+                    }
                 }
             }
         }
@@ -3290,13 +3485,40 @@ final class AppModel {
                 clearHandEdited: clearHandEdited,
                 atEntryPath: entry.relativePath
             )
-            await refresh()
-            refreshVaultSearchIfVisible()
+            scheduleTranscriptSaveRefresh()
             return saved
         } catch {
             errorMessage = "Could not save the transcript: \(error.localizedDescription)"
             return nil
         }
+    }
+
+    /// The editor autosaves every 600 ms. `refresh()` walks the whole vault
+    /// tree and re-parses every trash sidecar, so paying it per save made
+    /// continuous typing rescan the vault twice a second. The list preview
+    /// still updates from the save — just coalesced to one rescan per burst.
+    private func scheduleTranscriptSaveRefresh() {
+        transcriptSaveRefreshTask?.cancel()
+        transcriptSaveRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.transcriptSaveRefreshDelay))
+            guard !Task.isCancelled else { return }
+            // Clear before running so the refresh never cancels itself.
+            self?.transcriptSaveRefreshTask = nil
+            await self?.performTranscriptSaveRefresh()
+        }
+    }
+
+    /// Runs the coalesced rescan now. Called when editing finishes, so leaving
+    /// the editor never leaves a stale list row behind.
+    func flushTranscriptSaveRefresh() async {
+        transcriptSaveRefreshTask?.cancel()
+        transcriptSaveRefreshTask = nil
+        await performTranscriptSaveRefresh()
+    }
+
+    private func performTranscriptSaveRefresh() async {
+        await refresh()
+        refreshVaultSearchIfVisible()
     }
 
     // MARK: - Vocabulary (VOC-1)

@@ -261,23 +261,55 @@ final class TranscriptionQueue {
             created: ISO8601DateFormatter().string(from: .now),
             appVersion: "\(version) (\(build))"
         )
+        // A rename or move landing mid-run leaves `item` — captured before the
+        // transcription started — pointing at a path that no longer exists.
+        // Writing there throws `.notFound`, which reads as "the entry was
+        // deleted" and silently discards a completed transcription.
+        let targetPath = await resolveApplyTarget(for: item)
         let outcome = try await service.applyTranscription(
             segments: segments,
-            toEntryAt: item.entryRelativePath,
+            toEntryAt: targetPath,
             engine: metadata,
             engineFrontmatterID: info.id,
             vocabularyTerms: vocabulary
         )
         DebugLog.append(
-            "transcribed [\(item.entryRelativePath)] with \(info.id) (\(item.source)): "
+            "transcribed [\(targetPath)] with \(info.id) (\(item.source)): "
                 + "\(segments.count) segments, \(outcome.correctionCount) corrections"
                 + (outcome.appliedTitle.map { ", titled \"\($0)\"" } ?? "")
                 + (outcome.markdownLeftAlone ? ", md left alone (hand-edited)" : "")
         )
-        onEntryTranscribed?(item.entryRelativePath, outcome)
-        if outcome.entryRelativePath != item.entryRelativePath {
-            repointItems(from: item.entryRelativePath, to: outcome.entryRelativePath)
+        onEntryTranscribed?(targetPath, outcome)
+        if outcome.entryRelativePath != targetPath {
+            repointItems(from: targetPath, to: outcome.entryRelativePath)
         }
+    }
+
+    /// Where this item's finished transcription should actually be written.
+    ///
+    /// In-app renames and moves call `repointItems`, so the queued record is
+    /// already current — the running task's captured copy is what goes stale.
+    /// An external rename (Finder, Obsidian) never reaches `repointItems`, so
+    /// fall back to the entry's stable timestamp identity, which survives both
+    /// a re-slug and a move.
+    private func resolveApplyTarget(for item: TranscriptionQueueItem) async -> RelativePath {
+        let current = currentPath(forItemID: item.id) ?? item.entryRelativePath
+        let currentURL = vaultRoot.appendingRelativePath(current)
+        if FileManager.default.fileExists(atPath: currentURL.path) { return current }
+        guard let identity = EntryIdentity.of(current) else { return current }
+        let entries = await service.snapshot().allEntries
+        guard let match = entries.first(where: {
+            EntryIdentity.of($0.relativePath) == identity
+        }) else { return current }
+        DebugLog.append("queue re-resolved [\(current)] -> [\(match.relativePath)]")
+        repointItems(from: current, to: match.relativePath)
+        return match.relativePath
+    }
+
+    /// The queued record's path right now, which `repointItems` keeps in step
+    /// with renames and moves. Nil once the item has left the queue.
+    func currentPath(forItemID itemID: String) -> RelativePath? {
+        items.first(where: { $0.id == itemID })?.entryRelativePath
     }
 
     private func markWaiting(_ itemID: String) {

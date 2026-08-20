@@ -32,6 +32,12 @@ struct InterruptedRecordingRecoverySummary: Equatable, Sendable {
     var recovered: [InterruptedRecordingRecoveryOutcome] = []
     var failures: [InterruptedRecordingRecoveryFailure] = []
     var acknowledgedLegacyPaths: [RelativePath] = []
+    /// Journals rebuilt inside `.trash`, kept in a separate channel from
+    /// `recovered` on purpose: these entries are deleted, so they must never be
+    /// enqueued for transcription or fed to the search index. They surface only
+    /// as a notice telling the user the audio is restorable from Recently
+    /// Deleted. Paths are `.trash`-relative to the vault root.
+    var recoveredInTrash: [InterruptedRecordingRecoveryOutcome] = []
 }
 
 enum InterruptedRecordingRecoveryError: LocalizedError {
@@ -70,6 +76,22 @@ enum InterruptedRecordingRecovery {
 
     static func recoverAll(inVault vaultRoot: URL) async -> InterruptedRecordingRecoverySummary {
         var summary = InterruptedRecordingRecoverySummary()
+        // Safety net for a live recording whose entry — or whose ancestor
+        // folder — was deleted mid-capture. The journal rode along into
+        // `.trash`, which the ordinary scan skips as a hidden directory, and
+        // Empty Trash would then destroy the only copy of the audio. Rebuilding
+        // it in place makes the recording restorable from Recently Deleted.
+        for entryURL in entryDirectoriesWithPartials(
+            inVault: vaultRoot.appending(
+                path: TrashStore.directoryName, directoryHint: .isDirectory
+            )
+        ) {
+            let relativePath = relativePath(of: entryURL, under: vaultRoot)
+            guard let outcome = try? await recover(
+                entryURL: entryURL, relativePath: relativePath
+            ) else { continue }
+            summary.recoveredInTrash.append(outcome)
+        }
         for entryURL in entryDirectoriesWithPartials(inVault: vaultRoot) {
             let relativePath = relativePath(of: entryURL, under: vaultRoot)
             do {

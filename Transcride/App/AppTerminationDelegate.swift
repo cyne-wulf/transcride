@@ -31,6 +31,15 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Defense in depth for the shortcut-capture flag. `ShortcutCaptureField`
+    /// already ends capture when its window resigns key, but that flag
+    /// suppresses every app shortcut while it is set, so a capture control torn
+    /// down in some way the view layer did not anticipate must never be able to
+    /// disable the keyboard permanently. Idempotent in the normal path.
+    func applicationDidResignActive(_ notification: Notification) {
+        Self.model?.isShortcutCaptureActive = false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         indicatorController?.shutdown()
         menuBarItemController?.shutdown()
@@ -40,13 +49,35 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model = Self.model else { return .terminateNow }
         if model.isRecordingStartInFlight || model.recorder.state == .finalizing {
+            // Finalizing a long recording can take minutes, so an OK-only
+            // "try again later" is not an acceptable answer to Quit: it leaves
+            // the user with no way out but Force Quit. Offer to quit *after*
+            // the save completes, and keep an immediate escape that is safe
+            // because the crash-safe journal is still on disk.
+            let starting = model.isRecordingStartInFlight
             let alert = NSAlert()
-            alert.messageText = "Audio Operation in Progress"
-            alert.informativeText = "Transcride is starting or saving a recording. Wait for it to finish, then quit again."
+            alert.messageText = starting
+                ? "Starting the Microphone…"
+                : "Saving Your Recording…"
+            alert.informativeText = starting
+                ? "Transcride is still starting the microphone. Quit After Saving waits for it to settle and then quits."
+                : "Transcride is writing the recording to disk, which can take a while for a long recording. Quit After Saving quits as soon as the file is safely written. Quit Now leaves the crash-safe journal untouched; Transcride restores the recording from it on the next launch."
             alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            return .terminateCancel
+            alert.addButton(withTitle: "Quit After Saving")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Quit Now")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                Task { @MainActor in
+                    await model.stopRecordingForTermination()
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+                return .terminateLater
+            case .alertThirdButtonReturn:
+                return .terminateNow
+            default:
+                return .terminateCancel
+            }
         }
         guard model.recorder.state == .recording || model.recorder.state == .paused else {
             return .terminateNow
@@ -78,7 +109,10 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             Task { @MainActor in
-                await model.stopRecording()
+                // Not `stopRecording()`: a stop already in flight would make
+                // that call return instantly through the command gate's
+                // repeat suppression, and the process would exit mid-encode.
+                await model.stopRecordingForTermination()
                 sender.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater

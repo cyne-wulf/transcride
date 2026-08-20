@@ -35,6 +35,24 @@ struct TranscriptionApplier: Sendable {
             throw VaultError.notFound(relPath)
         }
 
+        // 0. Read the existing note first, before anything is written. An
+        // unreadable transcript must abort with the entry completely
+        // untouched: fabricating a stub here would make step 3 believe the
+        // note is an empty placeholder and overwrite a hand-edited file with
+        // regenerated markdown. `EntryFrontmatter.read` throws
+        // `unreadableTranscript` rather than inventing a replacement; the
+        // applier itself does legitimately rewrite the body afterwards, so it
+        // uses the read/decide half of the helper and writes directly.
+        let slot = try EntryFrontmatter.read(inEntry: entryURL)
+        let transcriptURL = slot.url
+        var doc: FrontmatterDocument
+        if let existing = slot.document {
+            doc = existing
+        } else {
+            doc = FrontmatterDocument(fields: [], body: "")
+            doc.created = EntryFolderName(parsing: relPath.lastComponent)?.date
+        }
+
         // 1. Correction backstop — the raw engine words stay in corrected_from.
         var transcript = TranscriptOriginal(engine: engine, segments: segments)
         let correctionCount = VocabularyCorrector.apply(terms: vocabularyTerms, to: &transcript)
@@ -47,16 +65,6 @@ struct TranscriptionApplier: Sendable {
         // 3. Regenerate transcript.md — but never over a hand edit. A body is
         // safe to replace when it's the empty stub or exactly what the
         // previous original generated (whitespace-insensitive).
-        let transcriptURL = TranscriptFile.url(inEntry: entryURL)
-            ?? entryURL.appending(path: TranscriptFile.defaultName)
-        var doc: FrontmatterDocument
-        if let text = try? String(contentsOf: transcriptURL, encoding: .utf8) {
-            doc = FrontmatterDocument.parse(text)
-        } else {
-            doc = FrontmatterDocument(fields: [], body: "")
-            doc.created = EntryFolderName(parsing: relPath.lastComponent)?.date
-        }
-
         let regenerable = !TranscriptEditDocument.isForked(doc, comparedTo: previousOriginal)
         var markdownLeftAlone = false
         if regenerable {
