@@ -59,6 +59,7 @@ struct ZenModeView: View {
             model.handleExitCommand()
             return .handled
         }
+        .onKeyPress(.space) { handleSpacebar() }
         .onExitCommand { model.handleExitCommand() }
         .onAppear {
             focused = true
@@ -67,10 +68,29 @@ struct ZenModeView: View {
         }
     }
 
+    /// Space mirrors the visible controls: record when idle, pause/resume while
+    /// capturing. Stopping stays on the stop button / global shortcuts so a
+    /// stray keypress can never end a take.
+    private func handleSpacebar() -> KeyPress.Result {
+        switch recorder.state {
+        case .idle:
+            Task { await model.startRecording() }
+        case .recording:
+            Task { await model.toggleRecordingPause() }
+        case .paused:
+            // Mirrors the disabled pause button: input changed, only Stop and Save.
+            guard recorder.canResume else { return .handled }
+            Task { await model.toggleRecordingPause() }
+        case .finalizing:
+            break
+        }
+        return .handled
+    }
+
     private var escHint: String {
         recorder.state == .idle
-            ? "esc to leave zen mode"
-            : "esc to cancel and discard the recording"
+            ? "space to record · esc to leave zen mode"
+            : "space to pause and resume · esc to cancel and discard the recording"
     }
 
     @ViewBuilder
