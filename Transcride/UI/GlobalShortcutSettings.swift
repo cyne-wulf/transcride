@@ -46,7 +46,7 @@ struct GlobalShortcutSettingsPane: View {
 
             HStack {
                 Spacer()
-                Button("Reset to Defaults") {
+                Button("Reset Global Shortcuts") {
                     validationMessages.removeAll()
                     model.resetGlobalShortcutPreferences()
                 }
@@ -60,9 +60,10 @@ struct GlobalShortcutSettingsPane: View {
             HStack {
                 Text(action.title)
                 Spacer()
-                ShortcutCaptureView(
+                ShortcutCaptureField(
                     chord: model.globalShortcutPreferences.bindings[action] ?? nil,
-                    onCapture: { setChord($0, for: action) }
+                    onCapture: { setChord($0, for: action) },
+                    onCaptureStateChange: { model.isShortcutCaptureActive = $0 }
                 )
                 .frame(width: 150, height: 28)
                 Button("Clear") { setChord(nil, for: action) }
@@ -157,123 +158,6 @@ struct GlobalShortcutSettingsPane: View {
         validationMessages[action] = nil
         preferences.bindings[action] = chord
         model.updateGlobalShortcutPreferences(preferences)
-    }
-}
-
-private struct ShortcutCaptureView: NSViewRepresentable {
-    var chord: GlobalShortcutChord?
-    var onCapture: (GlobalShortcutChord?) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onCapture: onCapture)
-    }
-
-    func makeNSView(context: Context) -> ShortcutCaptureNSView {
-        let view = ShortcutCaptureNSView()
-        view.onCapture = context.coordinator.capture
-        view.chord = chord
-        return view
-    }
-
-    func updateNSView(_ nsView: ShortcutCaptureNSView, context: Context) {
-        context.coordinator.onCapture = onCapture
-        nsView.onCapture = context.coordinator.capture
-        nsView.chord = chord
-    }
-
-    @MainActor
-    final class Coordinator {
-        var onCapture: (GlobalShortcutChord?) -> Void
-
-        init(onCapture: @escaping (GlobalShortcutChord?) -> Void) {
-            self.onCapture = onCapture
-        }
-
-        func capture(_ chord: GlobalShortcutChord?) {
-            onCapture(chord)
-        }
-    }
-}
-
-@MainActor
-private final class ShortcutCaptureNSView: NSView {
-    var chord: GlobalShortcutChord? { didSet { updateLabel() } }
-    var onCapture: ((GlobalShortcutChord?) -> Void)?
-
-    private let label = NSTextField(labelWithString: "")
-    private var isCapturing = false
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.borderWidth = 1
-        label.alignment = .center
-        label.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
-        label.setAccessibilityElement(false)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        setAccessibilityElement(true)
-        setAccessibilityRole(.button)
-        setAccessibilityLabel("Record global shortcut")
-        updateLabel()
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override var acceptsFirstResponder: Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
-    }
-
-    override func becomeFirstResponder() -> Bool {
-        isCapturing = true
-        updateLabel()
-        return true
-    }
-
-    override func resignFirstResponder() -> Bool {
-        isCapturing = false
-        updateLabel()
-        return true
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 {
-            window?.makeFirstResponder(nil)
-            return
-        }
-        if event.keyCode == 51 || event.keyCode == 117 {
-            onCapture?(nil)
-            window?.makeFirstResponder(nil)
-            return
-        }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        var modifiers: GlobalShortcutModifiers = []
-        if flags.contains(.command) { modifiers.insert(.command) }
-        if flags.contains(.option) { modifiers.insert(.option) }
-        if flags.contains(.control) { modifiers.insert(.control) }
-        if flags.contains(.shift) { modifiers.insert(.shift) }
-        onCapture?(GlobalShortcutChord(keyCode: UInt32(event.keyCode), modifiers: modifiers))
-        window?.makeFirstResponder(nil)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.borderColor = (isCapturing ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
-        super.draw(dirtyRect)
-    }
-
-    private func updateLabel() {
-        label.stringValue = isCapturing ? "Press shortcut…" : (chord?.glyphDescription ?? "Not Set")
-        setAccessibilityValue(label.stringValue)
-        needsDisplay = true
     }
 }
 

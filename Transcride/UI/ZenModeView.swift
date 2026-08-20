@@ -96,7 +96,10 @@ struct ZenModeView: View {
                         .foregroundStyle(recorder.state == .paused ? .red : .primary)
                 }
                 .buttonStyle(.plain)
-                .help(recorder.state == .paused ? "Resume" : "Pause")
+                .disabled(recorder.state == .paused && !recorder.canResume)
+                .help(recorder.state == .paused
+                    ? (recorder.canResume ? "Resume" : "Input changed — Stop and Save")
+                    : "Pause")
 
                 Button {
                     Task { await model.stopRecording() }

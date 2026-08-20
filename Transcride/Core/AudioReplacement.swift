@@ -369,6 +369,7 @@ enum ReplacementRecoveryClassification: Equatable, Sendable {
 struct ReplacementSessionDiscovery: Sendable {
     var recoverable: [ReplacementTakeSession]
     var committedEntryPaths: [RelativePath]
+    var microphoneObservations: [RecoveredMicrophoneCaptureObservation]
 }
 
 enum ReplacementSessionDisposition: Equatable, Sendable {

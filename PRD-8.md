@@ -139,6 +139,240 @@ Internal/transitional states may also appear when necessary:
 - [ ] Quit Transcride completely: global shortcuts no longer intercept anything, matching the Keybinds pane's explanation.
 - [ ] `xcodebuild test` passes.
 
+## Addendum (2026-07-20, user-approved out-of-band addition): Quick Move and app-wide key remapping
+
+The human approved expanding this milestone with an Obsidian-style **Move
+Note…** command and a complete in-app shortcut remapper. This addendum extends
+the milestone's scope, definition of done, and verification checklist; the
+original GLB requirements are unchanged and milestone status does not advance
+until the combined checklist is human-confirmed.
+
+### App shortcut catalog and preferences (KEY-1)
+
+- Shared shortcut types (`ShortcutChord`/`ShortcutModifiers`) carry physical
+  key code, modifiers, display glyphs, validation, persistence, and pure event
+  matching for both the app-local and global systems. The existing
+  global-preference wire format is unchanged.
+- A versioned `AppShortcutPreferences` store maps stable `AppShortcutAction`
+  IDs to up to two ordered bindings (primary and alternate) and covers every
+  Transcride-specific command: recording/file, notes/entry (including Move
+  Note), playback (clip undo/redo, skips, jumps 0–9, speed, Skip Silence, Zen),
+  library/view (find/search, folder navigation, four sort choices, sidebar
+  destinations, Transcription Queue), and app/help (About, Keyboard Shortcuts).
+- Every pre-existing default and alternate is preserved — including **E/⌘⇧R**
+  for Extend and **⌘⌫/⇧⌫** for Recently Deleted. Previously unbound commands
+  stay unbound. **Move Note… defaults to ⌥M.**
+- Escape, Return, Tab, plain Up/Down, unmodified Delete, and macOS-owned
+  App/Edit/Window chords are fixed and rejected at capture. System commands,
+  menu-bar-widget commands, and Debug Testing commands are excluded from the
+  catalog.
+- Bare local keys are allowed but never fire while editable text has focus;
+  clip undo/redo, entry deletion, and folder navigation (⌥↑/⌥↓) defer to
+  text editing even when modified.
+- Validation rejects modifier-only chords, reserved chords, duplicates across
+  every primary/alternate slot, and conflicts with global bindings. A
+  configured global chord outranks a conflicting local binding; ambiguous or
+  shadowed persisted bindings stay disabled and are visibly flagged in
+  Settings rather than silently dropped.
+
+### One dispatcher (KEY-2)
+
+- Menu clicks and matched keyboard events route through
+  `AppModel.performAppCommand(_:)` with one availability calculation
+  (`isAppCommandEnabled(_:)`).
+- Menus display the primary binding (falling back to a menu-safe alternate);
+  bare and focus-sensitive chords remain monitor-owned so menu key
+  equivalents can never steal typing.
+- Remapping applies live without relaunch. While a shortcut-capture control
+  owns input, normal command dispatch is suppressed.
+
+### Keybinds settings and help (KEY-3)
+
+- Settings → Keybinds splits into **App Shortcuts** (search, category
+  grouping, primary/alternate capture slots, per-slot clearing,
+  conflict/reserved feedback, **Reset App Shortcuts**) and **Global Controls**
+  (the existing GLB-1 pane with **Reset Global Shortcuts**). The resets are
+  independent.
+- Help → Keyboard Shortcuts derives its rows from live preferences, showing
+  local bindings and accurately distinguishing app-only from global commands.
+
+### Quick Move (MOV-1)
+
+- **Entry → Move Note…** (⌥M, remappable) opens a compact centered picker
+  titled for the selected note: search focused immediately; Vault Root and
+  every existing folder listed with the current parent excluded; empty-query
+  results put Vault Root first with natural ordering; typed queries rank
+  leaf/path exact/prefix/substring/fuzzy matches deterministically.
+- Arrow keys change selection, Return or click moves, Escape cancels. The
+  picker never creates folders and never overwrites a same-named destination
+  entry.
+- If the note is being edited, pending autosaves are flushed and editing
+  finishes before the picker opens; a failed save keeps the picker closed.
+  The command is disabled with no selection or during incompatible
+  recording/mutation states.
+- Failures (vanished destination, collision, filesystem error) keep the
+  picker open with an inline error. Success atomically refreshes the
+  snapshot, repoints transcription-queue paths, refreshes the search index,
+  and follows the selection to the new path with no empty intermediate frame.
+  The sidebar/list context is unchanged; drag/drop and the context-menu Move
+  To submenu keep working.
+
+### Addendum — definition of done
+
+- Unit tests cover shortcut defaults, unique stable IDs,
+  persistence/migration, reset, primary/alternate ordering, bare-key
+  acceptance, reserved-key rejection, local/local and local/global conflicts,
+  corrupted persisted conflicts, modifier normalization, editable-text
+  deferral, and catalog coverage; plus quick-move destination enumeration,
+  filtering/ranking, and vault-move edge cases (nested, root, same-folder
+  no-op, missing destination, collision, content preservation).
+- Integration tests cover dispatcher availability, live remapping without
+  relaunch, store round-trips, global registration remaining unchanged, and
+  the quick-move flow end to end (move + queue repoint + selection
+  continuity, collision, vanished destination).
+- `xcodegen generate` and the full `xcodebuild test` pass; the installed
+  `/Applications/Transcride.app` is the build used for verification.
+
+### Addendum — verification checklist (human-run)
+
+- [ ] Settings → Keybinds shows App Shortcuts and Global Controls. In App
+  Shortcuts, remap a modified chord (e.g. Show Info) and a bare key (e.g.
+  Trim), confirm both work immediately without relaunch, and confirm the menu
+  bar and Help window update to match.
+- [ ] While editing a note, press the bare remapped key: the letter types
+  into the note and no command fires. ⌘Z in the editor still performs text
+  undo.
+- [ ] Attempt to capture a duplicate chord, a reserved key (Return, plain ↓,
+  ⌘Q), and the global ⌥R: each is rejected with an inline explanation and the
+  previous binding survives.
+- [ ] Reset App Shortcuts restores every default (including ⌥M for Move
+  Note) without touching the global ⌥R/⌥P bindings; Reset Global Shortcuts
+  leaves app shortcuts alone.
+- [ ] Select a note and press ⌥M: the picker opens with search focused. Type
+  to filter, use ↑/↓ then Return to move the note into a nested folder;
+  repeat moving to Vault Root. The sidebar stays on the original folder, the
+  detail pane follows the moved note, and its queued transcription (if any)
+  completes against the new path.
+- [ ] Create a same-named entry collision and attempt the move: the picker
+  stays open with an inline error and neither entry is modified.
+- [ ] Start editing a note, press ⌥M without saving: the edit is saved
+  first, then the picker opens; the moved note contains the edit.
+- [ ] With no note selected (or while recording into the selected note),
+  Entry → Move Note… is disabled / gives honest feedback.
+- [ ] `xcodebuild test` passes.
+
+## Addendum (2026-08-12; revised 2026-08-13, user-approved): Universal recording and capture honesty
+
+The human approved one universal Record action for voice notes and calls. There
+is no Voice/Meeting mode or persistent source selector. Every new recording
+starts the selected microphone immediately and opportunistically includes audio
+playing on the Mac. Capture is app-agnostic, so browser Google Meet plus Zoom,
+Telegram, and WhatsApp work without per-app setup when their audio plays on the
+Mac, including through headphones. Calls running entirely on another device are
+out of scope unless that device's audio is routed through the Mac.
+
+### Universal source (MTG-1)
+
+- The existing AVAudioEngine microphone path is authoritative for start,
+  quality, latency, duration, pause/resume, crash recovery, and final output.
+  ScreenCaptureKit captures only Mac system audio; it never replaces or delays
+  the microphone and never captures or retains video. Transcride's own playback
+  is excluded. Explain that notifications and other Mac sounds may be included.
+- System-audio permission denial/restriction, required relaunch, start failure,
+  invalid format/timing, stream stall, sidecar-write failure, or mix failure
+  must never block, pause, or fail microphone recording. Show honest live state:
+  checking/available, meaningful Mac audio captured, or microphone-only with a
+  reason. Stop & Save never awaits a permission/start continuation; detached
+  cleanup serializes any future optional capture. A retired source preference
+  is ignored and removed during migration.
+- Retain Mac audio in a bounded sparse source-separated sidecar with finite
+  pre-roll and release hysteresis. Qualified pre-roll participates in the mix;
+  release is capped exactly even when one callback exceeds the remaining
+  window. Persisted records may not overlap. Do not create a durable sidecar
+  until meaningful Mac signal exists; silence before/between useful regions
+  must not grow a second full-length audio file. Explicitly stop every partially
+  or fully started stream, synchronously detach its output, and invalidate late
+  callbacks on stop, cancel, vault change, or quit/recover-later.
+- Map ScreenCaptureKit presentation timestamps through its synchronization
+  clock onto timestamped microphone segments. Callback arrival time is not
+  media time. Pause intervals, route-restart gaps, invalid timing, and samples
+  outside retained microphone coverage cannot add, shift, or fill frames.
+- On stop, render source-separated audio offline in bounded chunks with fixed
+  headroom-safe gains and smooth attack/release; do not use a unity live sum or
+  hard clamp. The pristine mic journal remains untouched until the staged mix
+  validates. The final render has exactly the microphone frame count and
+  preserves mic samples outside system-audio overlap. Any failure installs the
+  mic master instead. With no meaningful Mac audio, output is the ordinary
+  mic-only path with no retained sidecar or extra file growth.
+- Atomically install the validated mixed-or-mic-only canonical audio before
+  queuing batch transcription. Live transcription remains a display-only mic
+  preview, is cleared at stop, and is replaced by post-stop transcription of
+  the final canonical audio. This preserves playback seek and word-level
+  karaoke highlighting without time compression, extension, or shifted start.
+  A meaningful system source promotes an otherwise silent microphone capture
+  to transcribable only after the mix validates; a failed canonical install can
+  never enqueue a hidden journal.
+- Extensions and replacement takes remain microphone-only because their edit
+  semantics are tied to the selected canonical region. This boundary is stated
+  in Recording Settings.
+
+### Capture honesty and reliability (MTG-2)
+
+- Starting an audio engine/stream is not sufficient proof of capture. Track
+  first-buffer delivery, continued buffer delivery, and meaningful signal.
+  Warn visibly within seconds when no audio is detected; never leave a dead
+  capture graph presenting an unqualified Recording state.
+- Explicitly downmix every input channel before sample-rate conversion. A
+  multi-channel microphone whose first channel is silent must not produce a
+  silent mono recording when another channel carries signal.
+- A zero-frame recording is not a successful save and is never queued for
+  transcription. A framed recording containing only digital silence is
+  retained for recovery/inspection but is reported honestly and is not queued
+  as if speech were captured.
+- A configured microphone that is absent or cannot be bound must fail visibly
+  rather than silently falling back to an unintended device. System Default is
+  the only selection allowed to follow the current default route.
+- `AVAudioEngine.start()` alone is not proof that recording began. Publish an
+  active recording only after the requested physical route is stable and at
+  least one microphone buffer has been normalized and written to the canonical
+  journal. A failed/no-buffer attempt must tear down its graph completely,
+  persist a diagnostic event, and retry with a fresh engine within a bounded
+  startup deadline.
+- Keep an always-on, append-only microphone-failure ledger across relaunches and
+  app updates. Record every permission/device/format/journal/engine startup
+  failure; every no-buffer, prolonged-silence, stall, and sink-write episode;
+  and every terminal zero-frame or perfectly silent microphone result before
+  optional Mac audio can mask it. Stop, cancel, quit-and-recover, and crash
+  recovery use the same microphone-only classification. The ledger is local,
+  owner-readable only, and contains no vault paths, titles, audio samples,
+  device names, raw hardware identifiers, or error descriptions.
+
+### Universal-recording addendum — definition of done
+
+- Unit/integration tests cover multi-channel downmix with signal absent from
+  channel zero; first-buffer timeout; stream stall; prolonged digital silence;
+  zero-frame finalization; selected-device mismatch; retired-preference
+  migration; optional permission/start/stall fallback; no-system bit-equivalent
+  bypass/no artifact; later system-signal alignment; pause/resume and route-gap
+  timestamp mapping; offline headroom/release; corrupt/mix-failure mic fallback;
+  exact canonical frame/seek mapping; qualified pre-roll; exact zero/nonzero
+  release bounds; Core/file parity across renderer blocks; overlap rejection;
+  silent-mic/system-signal classification; suspended optional-start cleanup;
+  live-clear → canonical-install → batch-enqueue ordering (including install
+  failure suppression); honest UI status mapping; canonical written-sample
+  silence classification; terminal/cancel/recovery logging; durable JSONL
+  append across relaunches; concurrent complete records; restrictive file
+  permissions; nonfatal log-write failure; and hard-crash zero/silent journal
+  classification for new recordings, extensions, and replacement takes.
+- Human verification records both sides of calls in browser Google Meet, Zoom,
+  Telegram, and WhatsApp, with speakers and headphones where supported. It
+  also verifies Bluetooth microphone quality/latency, permission
+  denial/recovery, pause/resume, global background start/stop, honest live
+  status, app-audio exclusion, crash recovery, late-starting Mac audio, and
+  playback karaoke highlighting against the final transcript.
+- The full test suite passes and the tested build is installed at
+  `/Applications/Transcride.app`.
+
 ## Handoff (required, after the checklist is verified)
 
-Write **`PRD-9-start-here.md`** with: state summary; build/run/test commands; changed file map; global action ids and default chords; registration lifecycle; `AppModel` intent signatures; command serialization rules; indicator state model; panel level/Space/activation behavior; screen-position persistence; permissions and failure states; deviations; known issues. Append milestone deviations and global-control architecture to `PROJECT-STATE.md`. Close with the fresh-model assumption line used by prior milestone handoffs.
+Write **`PRD-9-start-here.md`** with: state summary; build/run/test commands; changed file map; global action ids and default chords; registration lifecycle; `AppModel` intent signatures; command serialization rules; indicator state model; panel level/Space/activation behavior; screen-position persistence; permissions and failure states; the app-shortcut catalog/dispatcher architecture and quick-move flow from the addendum; deviations; known issues. Append milestone deviations and global-control architecture to `PROJECT-STATE.md`. Close with the fresh-model assumption line used by prior milestone handoffs.

@@ -16,7 +16,15 @@ struct RecorderBar: View {
 
     var body: some View {
         Group {
-            switch recorder.state {
+            if model.isRecordingStartInFlight && recorder.state == .idle {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    Text("Starting microphone…")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            } else {
+                switch recorder.state {
             case .idle:
                 HStack(spacing: 12) {
                     idleControls
@@ -26,18 +34,25 @@ struct RecorderBar: View {
             case .finalizing:
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
-                Text(recorder.extensionSession == nil
-                        ? (isReplacementTake
-                            ? "Finalizing replacement take…" : "Finalizing recording…")
-                        : "Appending extension safely…")
+                    Text(recorder.isStartingMicrophone
+                        ? "Starting microphone…"
+                        : recorder.extensionSession == nil
+                            ? (isReplacementTake
+                                ? "Finalizing replacement take…" : "Finalizing recording…")
+                            : "Appending extension safely…")
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
             }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .frame(height: isCaptureShelfVisible ? 184 : 56)
+        .frame(height: isCaptureShelfVisible
+            ? (isNewEntryRecording
+                ? (recorder.captureHealthMessage == nil ? 212 : 240)
+                : (recorder.captureHealthMessage == nil ? 184 : 212))
+            : 56)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.28),
             value: isCaptureShelfVisible
@@ -122,7 +137,7 @@ struct RecorderBar: View {
     private var selectedMicName: String {
         guard !preferredMicUID.isEmpty else { return "System Default" }
         return model.inputDevices.device(forUID: preferredMicUID)?.name
-            ?? "System Default (device unavailable)"
+            ?? "Selected microphone unavailable"
     }
 
     // MARK: - Recording
@@ -153,6 +168,26 @@ struct RecorderBar: View {
                 if !isReplacementTake { zenButton }
             }
 
+
+            if let warning = recorder.captureHealthMessage {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("recording-capture-warning")
+            }
+
+            if isNewEntryRecording {
+                Label(
+                    recorder.systemAudioStatus.presentation.text,
+                    systemImage: recorder.systemAudioStatus.presentation.symbolName
+                )
+                    .font(.caption)
+                    .foregroundStyle(systemAudioStatusColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("system-audio-capture-status")
+            }
+
             LiveWaveformView(peaks: recorder.livePeaks)
                 .frame(maxWidth: .infinity)
                 .frame(height: 88)
@@ -173,6 +208,19 @@ struct RecorderBar: View {
         return recorder.state == .paused ? "Paused" : "Recording"
     }
 
+    private var isNewEntryRecording: Bool {
+        if case .newEntry? = recorder.sessionTarget { return true }
+        return false
+    }
+
+    private var systemAudioStatusColor: Color {
+        switch recorder.systemAudioStatus.presentation.tone {
+        case .neutral: .secondary
+        case .success: .green
+        case .warning: .orange
+        }
+    }
+
     private var isReplacementTake: Bool {
         if case .replacementTake? = recorder.sessionTarget { return true }
         return false
@@ -187,7 +235,10 @@ struct RecorderBar: View {
                 .foregroundStyle(recorder.state == .paused ? .red : .primary)
         }
         .buttonStyle(.plain)
-        .help(recorder.state == .paused ? "Resume Recording" : "Pause Recording")
+        .disabled(recorder.state == .paused && !recorder.canResume)
+        .help(recorder.state == .paused
+            ? (recorder.canResume ? "Resume Recording" : "Input changed — Stop and Save")
+            : "Pause Recording")
     }
 
     private var stopButton: some View {

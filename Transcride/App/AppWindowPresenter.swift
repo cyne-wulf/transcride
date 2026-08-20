@@ -49,6 +49,13 @@ enum AppWindowPresenter {
         }
     }
 
+    /// Opens an auxiliary scene window (About, Keyboard Shortcuts) from
+    /// non-SwiftUI contexts such as the app command dispatcher.
+    static func openAuxiliaryWindow(id: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindowAction?(id: id)
+    }
+
     static func openSettings() {
         NSApp.unhide(nil)
         NSApp.activate(ignoringOtherApps: true)

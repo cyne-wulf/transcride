@@ -5,6 +5,32 @@ import Testing
 @Suite("Global recording app integration", .serialized)
 @MainActor
 struct GlobalRecordingIntegrationTests {
+    @Test func coreAudioDefaultProxyIsNotASelectableMicrophone() {
+        #expect(AudioInputDevices.isSystemDefaultProxy(
+            uid: "CAdefault",
+            name: "CA Default Device"
+        ))
+        #expect(AudioInputDevices.isSystemDefaultProxy(
+            uid: "com.apple.audio.CoreAudio.DefaultInputDevice",
+            name: "CoreAudio Default"
+        ))
+        #expect(AudioInputDevices.isSystemDefaultProxy(
+            uid: "unrelated-uid",
+            name: "CAdefault"
+        ))
+        #expect(!AudioInputDevices.isSystemDefaultProxy(
+            uid: "AppleHDAEngineInput:1B,0,1,0:1",
+            name: "MacBook Air Microphone"
+        ))
+    }
+
+    @Test func recorderLiveUpdatesUseOneTenthSecondOfInputFrames() {
+        #expect(RecorderService.liveUpdateInterval == 0.1)
+        #expect(RecorderService.liveUpdateBufferSize(for: 16_000) == 1_600)
+        #expect(RecorderService.liveUpdateBufferSize(for: 44_100) == 4_410)
+        #expect(RecorderService.liveUpdateBufferSize(for: 48_000) == 4_800)
+    }
+
     @Test func preferencesStoreDefaultsAndRoundTrips() throws {
         let suiteName = "GlobalRecordingIntegrationTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -108,6 +134,21 @@ struct GlobalRecordingIntegrationTests {
         #expect(paused.status == .paused)
         #expect(paused.pauseActionTitle == "Resume Recording    ⌥P")
 
+        let quarantined = MenuBarControlSnapshot.make(
+            presentationState: .paused(
+                elapsed: 12,
+                pauseShortcut: "Unavailable",
+                stopShortcut: "⌥R"
+            ),
+            recorderPhase: .paused,
+            pauseResumeAvailable: false,
+            preferences: .defaults,
+            registrationStatuses: registered
+        )
+        #expect(quarantined.pauseActionTitle == "Resume Unavailable — Save First    ⌥P")
+        #expect(!quarantined.pauseActionEnabled)
+        #expect(quarantined.primaryActionEnabled)
+
         let finalizing = MenuBarControlSnapshot.make(
             presentationState: .saving(elapsed: 12),
             recorderPhase: .finalizing,
@@ -117,6 +158,17 @@ struct GlobalRecordingIntegrationTests {
         #expect(finalizing.status == .saving)
         #expect(!finalizing.primaryActionEnabled)
         #expect(!finalizing.pauseActionEnabled)
+
+        let starting = MenuBarControlSnapshot.make(
+            presentationState: .startingMicrophone,
+            recorderPhase: .startingMicrophone,
+            preferences: .defaults,
+            registrationStatuses: registered
+        )
+        #expect(starting.status == .startingMicrophone)
+        #expect(starting.primaryActionTitle.hasPrefix("Starting Microphone…"))
+        #expect(!starting.primaryActionEnabled)
+        #expect(!starting.pauseActionEnabled)
 
         var disabledPreferences = GlobalShortcutPreferences.defaults
         disabledPreferences.isEnabled = false

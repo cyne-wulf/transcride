@@ -94,6 +94,10 @@ struct MainView: View {
             VaultSearchView()
                 .environment(model)
         }
+        .sheet(isPresented: $model.isQuickMovePresented) {
+            QuickMoveView()
+                .environment(model)
+        }
         .sheet(isPresented: $model.isExtensionRecoveryPresented) {
             ExtensionRecoveryView()
                 .environment(model)

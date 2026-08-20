@@ -38,9 +38,19 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model = Self.model,
-              model.recorder.state == .recording || model.recorder.state == .paused
-        else { return .terminateNow }
+        guard let model = Self.model else { return .terminateNow }
+        if model.isRecordingStartInFlight || model.recorder.state == .finalizing {
+            let alert = NSAlert()
+            alert.messageText = "Audio Operation in Progress"
+            alert.informativeText = "Transcride is starting or saving a recording. Wait for it to finish, then quit again."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return .terminateCancel
+        }
+        guard model.recorder.state == .recording || model.recorder.state == .paused else {
+            return .terminateNow
+        }
 
         let extending = model.recorder.extensionSession != nil
         let replacing: Bool
@@ -73,7 +83,11 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
             }
             return .terminateLater
         case .alertThirdButtonReturn:
-            return .terminateNow
+            Task { @MainActor in
+                await model.prepareActiveRecordingForDeferredRecovery()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
         default:
             return .terminateCancel
         }

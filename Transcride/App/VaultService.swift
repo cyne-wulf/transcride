@@ -619,11 +619,175 @@ actor VaultService {
         )
     }
 
+    private struct OrphanedReplacementTake {
+        var id: UUID
+        var fileName: String
+        var capturedFrames: Int64
+        var sampleRate: Double
+        var createdAt: Date
+        var status: ReplacementTakeStatus
+    }
+
+    /// `finalizeReplacementTake` installs the completed take before AppModel
+    /// appends it to the session manifest. A hard termination in that small
+    /// window must not strand valid audio that is no longer represented by the
+    /// crash journal. Only canonical, session-local take files are candidates;
+    /// previews, render candidates, exact/temp files, symlinks, and arbitrary
+    /// audio files remain untouched.
+    private func adoptingOrphanedReplacementTakes(
+        from directory: URL,
+        into session: ReplacementTakeSession
+    ) -> ReplacementTakeSession {
+        guard session.region.frameCount > 0,
+              session.region.sampleRate.isFinite,
+              session.region.sampleRate > 0,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return session }
+
+        let referencedIDs = Set(session.takes.map(\.id))
+        let referencedNames = Set(session.takes.map(\.fileName))
+        var claimedIDs = referencedIDs
+        var candidates: [OrphanedReplacementTake] = []
+
+        for name in names.sorted() {
+            guard !referencedNames.contains(name),
+                  let identity = Self.canonicalReplacementTakeIdentity(fileName: name),
+                  !claimedIDs.contains(identity.id),
+                  let inspection = Self.inspectOrphanedReplacementTake(
+                    at: directory.appending(path: name),
+                    for: session.region
+                  )
+            else { continue }
+            claimedIDs.insert(identity.id)
+            candidates.append(OrphanedReplacementTake(
+                id: identity.id,
+                fileName: name,
+                capturedFrames: inspection.frames,
+                sampleRate: inspection.sampleRate,
+                createdAt: inspection.createdAt,
+                status: inspection.status
+            ))
+        }
+
+        guard !candidates.isEmpty else { return session }
+        let highestExistingNumber = max(0, session.takes.map(\.number).max() ?? 0)
+        guard highestExistingNumber <= Int.max - candidates.count else {
+            DebugLog.append("replacement orphan recovery deferred: take number overflow")
+            return session
+        }
+
+        var recovered = session
+        for (offset, candidate) in candidates.enumerated() {
+            recovered.appendTake(ReplacementTake(
+                id: candidate.id,
+                number: highestExistingNumber + offset + 1,
+                fileName: candidate.fileName,
+                capturedFrames: candidate.capturedFrames,
+                sampleRate: candidate.sampleRate,
+                createdAt: candidate.createdAt,
+                status: candidate.status
+            ))
+        }
+        recovered.failureMessage = nil
+
+        do {
+            // One atomic ledger replacement adopts the entire deterministic
+            // candidate set. On failure the old session remains authoritative
+            // and the audio files stay available for the next discovery.
+            try saveReplacementSession(recovered)
+            return recovered
+        } catch {
+            DebugLog.append("replacement orphan recovery deferred: \(error)")
+            return session
+        }
+    }
+
+    private nonisolated static func canonicalReplacementTakeIdentity(
+        fileName: String
+    ) -> (id: UUID, fileExtension: String)? {
+        let path = fileName as NSString
+        let fileExtension = path.pathExtension
+        guard fileExtension == "m4a" || fileExtension == "caf" else { return nil }
+        let stem = path.deletingPathExtension
+        guard stem.hasPrefix("take-") else { return nil }
+        let rawID = String(stem.dropFirst("take-".count))
+        guard let id = UUID(uuidString: rawID),
+              fileName == AudioReplacementArtifacts.takeFileName(
+                id: id, fileExtension: fileExtension
+              )
+        else { return nil }
+        return (id, fileExtension)
+    }
+
+    private nonisolated static func inspectOrphanedReplacementTake(
+        at url: URL,
+        for region: ReplacementRegion
+    ) -> (frames: Int64, sampleRate: Double, createdAt: Date, status: ReplacementTakeStatus)? {
+        do {
+            let values = try url.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .creationDateKey,
+                .contentModificationDateKey,
+            ])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
+
+            let file = try AVAudioFile(forReading: url)
+            defer { file.close() }
+            let format = file.processingFormat
+            let sampleRate = format.sampleRate
+            let expectedFrames = Int64(file.length)
+            guard sampleRate.isFinite,
+                  abs(sampleRate - region.sampleRate) < 0.001,
+                  format.channelCount > 0,
+                  expectedFrames > 0,
+                  let buffer = AVAudioPCMBuffer(
+                    pcmFormat: format,
+                    frameCapacity: AVAudioFrameCount(min(expectedFrames, 16_384))
+                  )
+            else { return nil }
+
+            var decodedFrames: Int64 = 0
+            while decodedFrames < expectedFrames {
+                let remaining = expectedFrames - decodedFrames
+                let requested = AVAudioFrameCount(min(remaining, Int64(buffer.frameCapacity)))
+                buffer.frameLength = 0
+                try file.read(into: buffer, frameCount: requested)
+                guard buffer.frameLength > 0 else { return nil }
+                decodedFrames += Int64(buffer.frameLength)
+            }
+            guard decodedFrames == expectedFrames else { return nil }
+
+            let status: ReplacementTakeStatus
+            switch ReplacementTakeEligibility.classify(
+                capturedFrames: decodedFrames,
+                capturedSampleRate: sampleRate,
+                for: region
+            ) {
+            case .eligible:
+                status = .complete
+            case .incomplete:
+                status = .incomplete
+            case .tooLong, .wrongSampleRate:
+                return nil
+            }
+            return (
+                decodedFrames,
+                sampleRate,
+                values.creationDate ?? values.contentModificationDate ?? .distantPast,
+                status
+            )
+        } catch {
+            return nil
+        }
+    }
+
     /// Relaunch recovery for duration-locked attempts. A crash journal is
     /// promoted to a playable CAF take without ever baking it automatically.
     func replacementTakeSessions() -> ReplacementSessionDiscovery {
         var sessions: [ReplacementTakeSession] = []
         var committed: [RelativePath] = []
+        var microphoneObservations: [RecoveredMicrophoneCaptureObservation] = []
         for entry in scanner.scan(root: rootURL).allEntries {
             let entryURL = rootURL.appendingRelativePath(entry.relativePath)
             let cancellationMarker = entryURL.appending(
@@ -646,7 +810,9 @@ actor VaultService {
             guard let data = try? Data(contentsOf: manifest),
                   var session = try? JSONDecoder().decode(
                     ReplacementTakeSession.self, from: data
-                  ) else { continue }
+                  ),
+                  session.entryRelativePath == entry.relativePath
+            else { continue }
             if session.phase == .swapping || session.phase == .retranscribing,
                let selectedID = session.selectedTakeID,
                AudioReplacementStore.loadRecipe(in: entryURL)?.sources
@@ -655,9 +821,16 @@ actor VaultService {
                 try? cancelReplacementSession(entryRelativePath: session.entryRelativePath)
                 continue
             }
+            session = adoptingOrphanedReplacementTakes(from: directory, into: session)
             let partial = entryURL.appending(path: AudioReplacementArtifacts.partialFileName)
             if FileManager.default.fileExists(atPath: partial.path),
                let file = try? AVAudioFile(forReading: partial) {
+                if let inspection = try? MicrophoneJournalInspector.inspect(partial) {
+                    microphoneObservations.append(.init(
+                        sessionID: session.id,
+                        inspection: inspection
+                    ))
+                }
                 let id = UUID()
                 let name = AudioReplacementArtifacts.takeFileName(
                     id: id, fileExtension: "caf"
@@ -692,7 +865,8 @@ actor VaultService {
         }
         return ReplacementSessionDiscovery(
             recoverable: sessions.sorted { $0.id.uuidString < $1.id.uuidString },
-            committedEntryPaths: committed
+            committedEntryPaths: committed,
+            microphoneObservations: microphoneObservations
         )
     }
 

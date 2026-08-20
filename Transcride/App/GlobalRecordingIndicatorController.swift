@@ -144,8 +144,13 @@ final class GlobalRecordingIndicatorController: NSObject, NSWindowDelegate {
             kind = "ready"; announcement = "Transcride ready to record"
         case .recording:
             kind = "recording"; announcement = "Transcride recording"
+        case .recordingNeedsAttention(_, let message, _):
+            kind = "recording-attention"
+            announcement = "Transcride recording needs attention. \(message)"
         case .paused:
             kind = "paused"; announcement = "Transcride recording paused"
+        case .startingMicrophone:
+            kind = "starting"; announcement = "Transcride starting microphone"
         case .saving:
             kind = "saving"; announcement = "Transcride saving recording"
         case .saved:
@@ -307,14 +312,14 @@ private struct GlobalRecordingIndicatorView: View {
                 Image(systemName: "checkmark").foregroundStyle(.white)
                     .font(.system(size: 22, weight: .bold))
             }
-        case .saving:
+        case .startingMicrophone, .saving:
             ZStack {
                 Circle().fill(.red).frame(width: 48, height: 48)
                 ProgressView().controlSize(.small).tint(.white)
             }
         case .ready:
             Circle().fill(.red).frame(width: 48, height: 48)
-        case .needsAttention, .saveFailed, .unavailable:
+        case .recordingNeedsAttention, .needsAttention, .saveFailed, .unavailable:
             ZStack {
                 Circle().fill(.red).frame(width: 48, height: 48)
                 Image(systemName: "exclamationmark").foregroundStyle(.white)
@@ -334,7 +339,9 @@ private struct GlobalRecordingIndicatorView: View {
         case .hidden: ""
         case .ready: "Ready"
         case .recording: "Recording"
+        case .recordingNeedsAttention: "No Audio Detected"
         case .paused: "Paused"
+        case .startingMicrophone: "Starting Microphone…"
         case .saving: "Saving…"
         case .saved: "Recording Saved"
         case .needsAttention: "Needs Attention"
@@ -349,8 +356,11 @@ private struct GlobalRecordingIndicatorView: View {
         case .ready(let shortcut): "Start: \(shortcut)"
         case .recording(let elapsed, let pause, let stop):
             "\(format(elapsed))  Pause \(pause) · Save \(stop)"
+        case .recordingNeedsAttention(let elapsed, let message, let stop):
+            "\(format(elapsed)) · \(message) · Save \(stop)"
         case .paused(let elapsed, let pause, let stop):
             "\(format(elapsed))  Resume \(pause) · Save \(stop)"
+        case .startingMicrophone: "Waiting for the first microphone buffer"
         case .saving(let elapsed): "Finalizing \(format(elapsed))"
         case .saved(let duration, _): "Saved \(format(duration))"
         case .needsAttention(let message), .saveFailed(let message),

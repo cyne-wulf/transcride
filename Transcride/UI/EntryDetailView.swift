@@ -864,7 +864,10 @@ private struct PlaybackSection: View {
                 Circle()
                     .fill(model.recorder.state == .paused ? Color.orange : Color.red)
                     .frame(width: 9, height: 9)
-                Text(model.recorder.state == .finalizing ? "Finishing extension…" : "Extending")
+                Text(model.recorder.state == .finalizing
+                    ? (model.recorder.isStartingMicrophone
+                        ? "Starting microphone…" : "Finishing extension…")
+                    : "Extending")
                     .font(.callout.weight(.semibold))
                 Spacer()
                 Text("Combined: " + EntryListView.formatDuration(
@@ -892,7 +895,12 @@ private struct PlaybackSection: View {
                     TransportButton(
                         systemImage: model.recorder.state == .paused ? "record.circle" : "pause.fill",
                         size: 20 * controlScale,
-                        help: model.recorder.state == .paused ? "Resume Extension (Space)" : "Pause Extension (Space)"
+                        help: model.recorder.state == .paused
+                            ? (model.recorder.canResume
+                                ? "Resume Extension (Space)"
+                                : "Input changed — Stop and Save")
+                            : "Pause Extension (Space)",
+                        isEnabled: model.recorder.state != .paused || model.recorder.canResume
                     ) {
                         Task { await model.toggleRecordingPause() }
                     }
@@ -1409,6 +1417,7 @@ private struct TransportButton: View {
     let size: CGFloat
     let help: String
     var tint = AnyShapeStyle(.primary)
+    var isEnabled = true
     let action: () -> Void
 
     @State private var hovering = false
@@ -1428,6 +1437,7 @@ private struct TransportButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .help(help)

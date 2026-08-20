@@ -5,11 +5,27 @@ struct InterruptedRecordingRecoveryOutcome: Equatable, Sendable {
     var entryRelativePath: RelativePath
     var audioFileName: String
     var duration: Double
+    /// Derived from decoded canonical samples, not merely from duration. A
+    /// framed all-zero journal is recoverable evidence, but it is also a
+    /// microphone-capture failure and must not be treated as transcribable.
+    var microphoneHasSignal: Bool
+    var microphoneFrames: Int64
+    /// Usually identical to `microphoneHasSignal`. The only exception is a
+    /// crash after a validated universal mix was installed: Mac audio may make
+    /// the visible canonical file useful even though the mic itself failed.
+    var canonicalHasSignal: Bool
+
+    var shouldQueueTranscription: Bool { canonicalHasSignal }
 }
 
 struct InterruptedRecordingRecoveryFailure: Equatable, Sendable {
     var entryRelativePath: RelativePath
     var message: String
+    /// Available when the partial is readable even though it is too short to
+    /// recover. This closes the abrupt-crash window before the live watchdog
+    /// or normal teardown could persist a zero/silent-mic event.
+    var microphoneTerminalState: MicrophoneTerminalCaptureState? = nil
+    var microphoneFrames: Int64 = 0
 }
 
 struct InterruptedRecordingRecoverySummary: Equatable, Sendable {
@@ -60,9 +76,17 @@ enum InterruptedRecordingRecovery {
                     acknowledgeLegacyArtifact(in: entryURL, reason: error.localizedDescription)
                     summary.acknowledgedLegacyPaths.append(relativePath)
                 } else {
+                    let inspection = try? MicrophoneJournalInspector.inspect(partial)
                     summary.failures.append(.init(
                         entryRelativePath: relativePath,
-                        message: error.localizedDescription
+                        message: error.localizedDescription,
+                        microphoneTerminalState: inspection.map {
+                            MicrophoneTerminalCaptureState.classify(
+                                frames: $0.frames,
+                                hasSignal: $0.hasSignal
+                            )
+                        },
+                        microphoneFrames: inspection?.frames ?? 0
                     ))
                 }
             }
@@ -89,22 +113,31 @@ enum InterruptedRecordingRecovery {
             }
             let audioURL = entryURL.appending(path: existingAudio)
             let duration = try await validatedDuration(of: audioURL)
+            let microphoneInspection = try MicrophoneJournalInspector.inspect(partialURL)
+            let canonicalInspection = try MicrophoneJournalInspector.inspect(audioURL)
             try await finishMetadata(
                 entryURL: entryURL, audioURL: audioURL, duration: duration
             )
-            try? fm.removeItem(at: partialURL)
-            cleanupTemporaryFiles(in: entryURL)
+            // The partial is also the discovery/retry marker. Retire it only
+            // after every hidden continuation artifact is gone; otherwise a
+            // crash or deletion failure here would strand those files forever.
+            try cleanupTemporaryFiles(in: entryURL)
+            try fm.removeItem(at: partialURL)
             return .init(
                 entryRelativePath: relativePath,
                 audioFileName: existingAudio,
-                duration: duration
+                duration: duration,
+                microphoneHasSignal: microphoneInspection.hasSignal,
+                microphoneFrames: microphoneInspection.frames,
+                canonicalHasSignal: canonicalInspection.hasSignal
             )
         }
 
         let partialDuration = try await validatedDuration(of: partialURL)
+        let microphoneInspection = try MicrophoneJournalInspector.inspect(partialURL)
         let temporaryM4A = entryURL.appending(path: temporaryM4AFileName)
         let temporaryCAF = entryURL.appending(path: temporaryCAFFileName)
-        cleanupTemporaryFiles(in: entryURL)
+        try cleanupRecoveryStagingFiles(in: entryURL)
 
         let stagedURL: URL
         let finalName: String
@@ -140,13 +173,19 @@ enum InterruptedRecordingRecovery {
         }
         try fm.moveItem(at: stagedURL, to: finalURL)
         try waveform.write(to: WaveformData.url(inEntry: entryURL))
+        // Keep the authoritative microphone journal discoverable until the
+        // visible copy, metadata, and all hidden artifacts are safe. Partial
+        // cleanup is idempotent, so any removal error leaves a retry path.
+        try cleanupTemporaryFiles(in: entryURL)
         try fm.removeItem(at: partialURL)
-        cleanupTemporaryFiles(in: entryURL)
 
         return .init(
             entryRelativePath: relativePath,
             audioFileName: finalName,
-            duration: partialDuration
+            duration: partialDuration,
+            microphoneHasSignal: microphoneInspection.hasSignal,
+            microphoneFrames: microphoneInspection.frames,
+            canonicalHasSignal: microphoneInspection.hasSignal
         )
     }
 
@@ -205,9 +244,37 @@ enum InterruptedRecordingRecovery {
         return String(url.standardizedFileURL.path.dropFirst(prefix.count))
     }
 
-    private static func cleanupTemporaryFiles(in entryURL: URL) {
-        try? FileManager.default.removeItem(at: entryURL.appending(path: temporaryM4AFileName))
-        try? FileManager.default.removeItem(at: entryURL.appending(path: temporaryCAFFileName))
+    private static func cleanupRecoveryStagingFiles(in entryURL: URL) throws {
+        try removeFilesIfPresent(
+            named: [temporaryM4AFileName, temporaryCAFFileName],
+            in: entryURL
+        )
+    }
+
+    /// Terminal cleanup for every interrupted universal-recording
+    /// continuation. This must succeed before `.recording.caf` is removed,
+    /// because recovery discovery deliberately keys on that mic journal.
+    private static func cleanupTemporaryFiles(in entryURL: URL) throws {
+        try removeFilesIfPresent(
+            named: [temporaryM4AFileName, temporaryCAFFileName]
+                + UniversalRecordingArtifacts.interruptedRecoveryCleanupFileNames,
+            in: entryURL
+        )
+    }
+
+    private static func removeFilesIfPresent(
+        named fileNames: [String], in entryURL: URL
+    ) throws {
+        let fm = FileManager.default
+        for fileName in fileNames {
+            let url = entryURL.appending(path: fileName)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            do {
+                try fm.removeItem(at: url)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile {
+                // Another idempotent continuation may already have removed it.
+            }
+        }
     }
 
     /// Pre-fix builds journaled variable-packet AAC/ALAC. An abrupt exit
@@ -245,4 +312,19 @@ enum InterruptedRecordingRecovery {
 /// filename lives in this tiny contract.
 enum RecorderPartialFile {
     static let name = ".recording.caf"
+}
+
+/// Shared hidden-file contract for the optional universal recording path.
+/// Keeping these names in Core lets abrupt-crash recovery converge artifacts
+/// created by the app layer without duplicating privacy-sensitive filenames.
+enum UniversalRecordingArtifacts {
+    static let systemAudioFileName = ".recording-system-audio.sparse"
+    static let mixedJournalFileName = ".recording-mixed.caf"
+    static let stagedCanonicalAudioFileName = ".audio-finalizing.m4a"
+
+    static let interruptedRecoveryCleanupFileNames = [
+        systemAudioFileName,
+        mixedJournalFileName,
+        stagedCanonicalAudioFileName,
+    ]
 }

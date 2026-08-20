@@ -63,9 +63,33 @@ final class AppModel {
     let globalShortcutService = GlobalShortcutService()
 
     private(set) var globalShortcutPreferences = GlobalShortcutPreferencesStore.load()
+    /// App-local remappable shortcuts (Settings → Keybinds → App Shortcuts).
+    private(set) var appShortcutPreferences = AppShortcutPreferencesStore.load()
+    /// True while a Settings shortcut-capture control owns keyboard input;
+    /// normal command dispatch is suppressed so captured chords never fire.
+    var isShortcutCaptureActive = false
+
+    // Quick Move (Move Note…): view-presented picker state.
+    var isQuickMovePresented = false {
+        didSet {
+            if !isQuickMovePresented {
+                quickMoveEntryPath = nil
+                quickMoveErrorMessage = nil
+            }
+        }
+    }
+    private(set) var quickMoveEntryPath: RelativePath?
+    var quickMoveErrorMessage: String?
     private(set) var globalRecordingTransientState: GlobalRecordingPresentationState?
+    private var lastFinalizedRecordingDuration: Double?
     private(set) var isGlobalIndicatorRetentionActive = false
     private var recordingCommandGate = RecordingCommandGate()
+    /// Extension and replacement starts cross permission/filesystem awaits and
+    /// are therefore actor-reentrant. Keep exactly one such workflow in flight
+    /// so a losing task cannot alter the winner's shared edit session.
+    private var recordingWorkflowStartGate = RecordingWorkflowStartGate()
+    private var activeRecordingStartToken: UUID?
+    private(set) var isRecordingStartInFlight = false
     private var globalRecordingStateTask: Task<Void, Never>?
     private var globalIndicatorRetentionTask: Task<Void, Never>?
     private var lastCompletedRecordingAt: Date?
@@ -126,6 +150,10 @@ final class AppModel {
 
     enum WorkbenchActionRequest {
         case editOrSave, copyAsMarkdown, toggleLayer, renameSpeakers
+        /// Flush pending autosaves and leave edit mode, then report whether
+        /// the note is safely saved (true when it was not being edited).
+        /// Used by Move Note… so a move never races an unsaved edit.
+        case finishEditing(@MainActor (Bool) -> Void)
     }
 
     /// What the note workbench can do right now, mirrored up so menu items
@@ -324,6 +352,9 @@ final class AppModel {
     var transcriptNoticeMessage: String?
     var recordingRecoveryNoticeMessage: String?
     private(set) var extensionRecoveries: [RecoverableRecordingExtension] = []
+    /// Includes both actionable and malformed extension recovery artifacts.
+    /// A new extension must never overwrite either kind's manifest/journal.
+    private(set) var unresolvedExtensionRecoveryEntryPaths: Set<RelativePath> = []
     private(set) var extensionRecoveryProcessingIDs: Set<String> = []
     private(set) var compressingEntryPaths: Set<RelativePath> = []
     private(set) var clipMutationEntryPaths: Set<RelativePath> = []
@@ -397,6 +428,7 @@ final class AppModel {
 
     func start() async {
         guard phase == .launching else { return }
+        RecordingSourcePreferenceMigration.removeLegacyPreference()
         installKeyMonitor()
         configureGlobalRecordingControls()
         Task { await modelManager.refresh() }
@@ -445,15 +477,66 @@ final class AppModel {
         globalShortcutService.shutdown()
     }
 
+    private func logRecoveredMicrophoneFailure(
+        _ observation: RecoveredMicrophoneCaptureObservation,
+        target: MicrophoneFailureEvent.Target,
+        elapsedSeconds: TimeInterval = 0
+    ) {
+        let classification: (
+            MicrophoneFailureEvent.Kind,
+            MicrophoneFailureEvent.Reason
+        )? = switch observation.inspection.terminalState {
+        case .noFrames:
+            (.noAudioAfterStart, .noFrames)
+        case .perfectlySilent:
+            (.perfectlySilentClip, .perfectlySilent)
+        case .signal:
+            nil
+        }
+        guard let classification else { return }
+        MicrophoneFailureLogger.shared.log(MicrophoneFailureEvent(
+            sessionID: observation.sessionID ?? UUID(),
+            kind: classification.0,
+            target: target,
+            stage: .crashRecovery,
+            reason: classification.1,
+            preferredRoute: .unknown,
+            resolvedDeviceFormat: nil,
+            engineState: .init(
+                phase: .stopped,
+                isRunning: false,
+                tapInstalled: false
+            ),
+            frames: observation.inspection.frames,
+            elapsedSeconds: elapsedSeconds
+        ))
+    }
+
     /// Opens `url` as the vault, replacing any current vault.
     func openVault(at url: URL, isSecurityScoped: Bool, saveBookmark: Bool) async {
+        guard !isRecordingStartInFlight else {
+            errorMessage = "Wait for the microphone to finish starting before switching vaults."
+            return
+        }
+        // Recording finalization suspends while optional Mac audio is torn down
+        // and the canonical file is installed. Keep the current vault until
+        // that serialized transition completes.
+        guard recorder.state != .finalizing else {
+            errorMessage = "Wait for the current recording operation to finish before switching vaults."
+            return
+        }
         if replacementModeActive {
             // Finish the old vault's temporary transaction against the old
             // VaultService before replacing it below.
             await cancelReplacement()
         } else if recorder.isActive {
-            stopLiveTranscription()
-            _ = await recorder.stop() // finalize into the old vault first
+            // Route every non-replacement stop through the same canonical
+            // install and post-stop handoff before replacing the old service.
+            _ = await stopRecordingImpl()
+            guard recorder.state == .idle else {
+                errorMessage = "Wait for the current recording operation to finish before switching vaults."
+                return
+            }
         }
         player.unload()
         searchIndexTask?.cancel()
@@ -490,6 +573,8 @@ final class AppModel {
         let service = VaultService(rootURL: url)
         self.service = service
         snapshot = nil
+        extensionRecoveries = []
+        unresolvedExtensionRecoveryEntryPaths = []
         trashItems = []
         sidebarSelection = .folder("")
         selectedEntryID = nil
@@ -510,9 +595,35 @@ final class AppModel {
 
         let recordingRecovery = await service.recoverInterruptedRecordings()
         for outcome in recordingRecovery.recovered {
-            queue.enqueue(
-                entryRelativePath: outcome.entryRelativePath,
-                source: "recording-recovery"
+            logRecoveredMicrophoneFailure(
+                .init(
+                    sessionID: nil,
+                    inspection: .init(
+                        frames: outcome.microphoneFrames,
+                        hasSignal: outcome.microphoneHasSignal
+                    )
+                ),
+                target: .newEntry,
+                elapsedSeconds: outcome.duration
+            )
+            if outcome.shouldQueueTranscription {
+                queue.enqueue(
+                    entryRelativePath: outcome.entryRelativePath,
+                    source: "recording-recovery"
+                )
+            }
+        }
+        for failure in recordingRecovery.failures {
+            guard let state = failure.microphoneTerminalState else { continue }
+            logRecoveredMicrophoneFailure(
+                .init(
+                    sessionID: nil,
+                    inspection: .init(
+                        frames: failure.microphoneFrames,
+                        hasSignal: state == .signal
+                    )
+                ),
+                target: .newEntry
             )
         }
         if !recordingRecovery.recovered.isEmpty {
@@ -522,6 +633,17 @@ final class AppModel {
                 : "\(count) interrupted recordings were recovered through the last audio written to disk."
             if !recordingRecovery.acknowledgedLegacyPaths.isEmpty {
                 message += " A separate partial from a pre-fix build could not be decoded; its bytes remain preserved and it will not trigger this notice again."
+            }
+            let failedMicrophoneCount = recordingRecovery.recovered.filter {
+                MicrophoneTerminalCaptureState.classify(
+                    frames: $0.microphoneFrames,
+                    hasSignal: $0.microphoneHasSignal
+                ) != .signal
+            }.count
+            if failedMicrophoneCount > 0 {
+                message += failedMicrophoneCount == 1
+                    ? " Its microphone track was empty or perfectly silent; that failure was logged, and the clip was retained for inspection."
+                    : " \(failedMicrophoneCount) microphone tracks were empty or perfectly silent; those failures were logged, and the clips were retained for inspection."
             }
             recordingRecoveryNoticeMessage = message
         } else if !recordingRecovery.acknowledgedLegacyPaths.isEmpty {
@@ -536,7 +658,17 @@ final class AppModel {
 
         let extensionDiscovery = await service.recordingExtensionRecoveries()
         extensionRecoveries = []
+        unresolvedExtensionRecoveryEntryPaths = Set(
+            extensionDiscovery.recoverable.map(\.entryRelativePath)
+                + extensionDiscovery.malformedEntryPaths
+        )
         for recovery in extensionDiscovery.recoverable {
+            if let observation = recovery.microphoneObservation {
+                logRecoveredMicrophoneFailure(
+                    observation,
+                    target: .extensionRecording
+                )
+            }
             if recovery.phase == .swapNeedsCleanup {
                 do {
                     _ = try await service.finishRecoveredExtension(recovery)
@@ -545,6 +677,9 @@ final class AppModel {
                         source: "extension-recovery"
                     )
                     audioRevision &+= 1
+                    unresolvedExtensionRecoveryEntryPaths.remove(
+                        recovery.entryRelativePath
+                    )
                 } catch {
                     extensionRecoveries.append(recovery)
                 }
@@ -559,6 +694,12 @@ final class AppModel {
         isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
 
         let replacementDiscovery = await service.replacementTakeSessions()
+        for observation in replacementDiscovery.microphoneObservations {
+            logRecoveredMicrophoneFailure(
+                observation,
+                target: .replacementTake
+            )
+        }
         for path in replacementDiscovery.committedEntryPaths {
             queueExtensionRetranscription(
                 entryRelativePath: path,
@@ -964,37 +1105,25 @@ final class AppModel {
         }
     }
 
-    private let spaceKeyCode: UInt16 = 49
     private let escapeKeyCode: UInt16 = 53
-    private let deleteKeyCode: UInt16 = 51
-    private let zenKeyCode: UInt16 = 6
-    private let undoKeyCode: UInt16 = 6
-    private let extendKeyCode: UInt16 = 14
-    private let replaceKeyCode: UInt16 = 15
-    private let skipSilenceKeyCode: UInt16 = 1
-    private let trimKeyCode: UInt16 = 17
-    private let findKeyCode: UInt16 = 3
-    private let leftBracketKeyCode: UInt16 = 33
-    private let rightBracketKeyCode: UInt16 = 30
-    private let backslashKeyCode: UInt16 = 42
-    private let leftArrowKeyCode: UInt16 = 123
-    private let rightArrowKeyCode: UInt16 = 124
     private let downArrowKeyCode: UInt16 = 125
     private let upArrowKeyCode: UInt16 = 126
 
-    /// Top-row and numeric-keypad digit positions. Like common media players,
-    /// 1...8 seek in 10% increments while 9 means the end of the track.
-    private let playbackFractionsByKeyCode: [UInt16: Double] = [
-        29: 0.0, 18: 0.1, 19: 0.2, 20: 0.3, 21: 0.4,
-        23: 0.5, 22: 0.6, 26: 0.7, 28: 0.8, 25: 1.0,
-        82: 0.0, 83: 0.1, 84: 0.2, 85: 0.3, 86: 0.4,
-        87: 0.5, 88: 0.6, 89: 0.7, 91: 0.8, 92: 1.0,
-    ]
-
-    /// Returns true when the event was consumed.
+    /// Returns true when the event was consumed. Every remappable command is
+    /// resolved against `appShortcutPreferences`; only structural keys
+    /// (Escape, plain Up/Down) keep fixed handling here.
     private func handleKeyDown(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
         guard phase == .ready else { return false }
-        let modifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // A shortcut-capture control owns the keyboard: captured chords must
+        // never dispatch as commands.
+        guard !isShortcutCaptureActive else { return false }
+        let rawModifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // AppKit marks arrow/keypad events as numeric-pad/function keys even
+        // on the built-in keyboard; those implicit flags are not user-held
+        // modifiers and must not block matching.
+        let modifiers = ShortcutModifiers(
+            cocoaFlags: UInt(rawModifiers.subtracting([.numericPad, .function]).rawValue)
+        )
         // Field editors (TextField, search) and TextEditor are all NSTextView.
         let focusedTextView = NSApp.keyWindow?.firstResponder as? NSTextView
         // A selectable read-only transcript should not suppress transport
@@ -1011,43 +1140,209 @@ final class AppModel {
             return handleExitCommand()
         }
 
-        if keyCode == findKeyCode, modifiers == [.command, .shift] {
-            presentVaultSearch()
-            return true
-        }
-        if keyCode == findKeyCode, modifiers == .command {
-            guard !isVaultSearchPresented else { return false }
-            requestInNoteFind()
-            return selectedEntry != nil
-        }
-
-        if keyCode == undoKeyCode,
-           modifiers == .command || modifiers == [.command, .shift] {
-            // Editable fields and the Markdown editor keep their native
-            // NSText undo manager. Clip history is only active outside text.
-            guard editingTextView == nil else { return false }
-            guard let entry = selectedEntry else {
-                // Match standard macOS undo behavior: with no applicable
-                // document/clip, the command is consumed as a silent no-op.
-                return true
-            }
-            if let reason = clipEditBlockReason(for: entry) {
-                errorMessage = reason
-                return true
-            }
-            Task {
-                await performClipEdit(
-                    modifiers.contains(.shift) ? .redo : .undo,
-                    for: entry
-                )
-            }
-            return true
+        if let action = AppShortcutEventMatcher.action(
+            forKeyCode: keyCode,
+            modifiers: modifiers,
+            isTextEditing: editingTextView != nil,
+            preferences: appShortcutPreferences,
+            globalChords: configuredGlobalChords
+        ) {
+            return performAppCommand(action)
         }
 
-        if keyCode == extendKeyCode {
-            // Plain E starts an extension or finishes the active one. An
-            // editable text view always keeps the key for normal typing.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
+        if keyCode == upArrowKeyCode || keyCode == downArrowKeyCode,
+           editingTextView == nil, modifiers.isEmpty, middleColumnIsCollapsed {
+            // Plain Up/Down normally falls through to the List, but its
+            // responder disappears when the responsive layout collapses the
+            // middle split item. These keys are reserved, never remappable.
+            return moveMiddleSelection(by: keyCode == downArrowKeyCode ? 1 : -1)
+        }
+        return false
+    }
+
+    // MARK: - App command dispatch (menus + remappable shortcuts)
+
+    /// Global chords always outrank local bindings; a local binding equal to a
+    /// configured global chord is disabled and flagged in Settings.
+    var configuredGlobalChords: [ShortcutChord] {
+        globalShortcutPreferences.bindings.values.compactMap { $0 }
+    }
+
+    func updateAppShortcutPreferences(_ preferences: AppShortcutPreferences) {
+        appShortcutPreferences = preferences
+        AppShortcutPreferencesStore.save(preferences)
+    }
+
+    func resetAppShortcutPreferences() {
+        updateAppShortcutPreferences(.defaults)
+    }
+
+    /// One availability calculation for menu items and shortcut dispatch.
+    func isAppCommandEnabled(_ action: AppShortcutAction) -> Bool {
+        let ready = phase == .ready
+        let entry = selectedEntry
+        switch action {
+        case .newRecording:
+            return ready && !isRecordingStartInFlight
+                && !recorder.isActive && recorder.state != .finalizing
+        case .startStopRecording:
+            return ready && !isRecordingStartInFlight
+                && recorder.state != .finalizing
+        case .pauseOrPlaybackToggle:
+            switch recorder.state {
+            case .recording: return true
+            case .paused: return recorder.canResume
+            case .finalizing: return false
+            case .idle: return player.url != nil
+            }
+        case .importAudio, .newFolder, .searchVault, .goToVaultRoot,
+             .goToFavorites, .goToRecentlyDeleted, .showTranscriptionQueue,
+             .sortByDate, .sortByDuration, .sortByTitle, .sortByRecentlyEdited,
+             .toggleSkipSilence, .previousFolder, .nextFolder:
+            return ready
+        case .toggleFavorite, .renameEntry, .duplicateEntry, .showInfo, .revealInFinder:
+            return entry != nil
+        case .moveNote:
+            return quickMoveBlockReason() == nil
+        case .moveToRecentlyDeleted:
+            guard let entry else { return false }
+            return recorder.currentEntryPath != entry.relativePath
+                && !replacementModeActive
+                && !clipMutationEntryPaths.contains(entry.relativePath)
+        case .extendRecording:
+            if isRecordingStartInFlight { return false }
+            if recorder.extensionSession != nil { return true }
+            return entry.map { extensionBlockReason(for: $0) == nil } ?? false
+        case .editOrSaveNote:
+            return workbenchUIState.canEditNote || workbenchUIState.isEditing
+        case .copyAsMarkdown:
+            return workbenchUIState.hasContent
+        case .toggleLayer:
+            return workbenchUIState.isForked && !workbenchUIState.isEditing
+        case .retranscribe:
+            return entry?.hasAudio == true
+        case .trimAudio:
+            if trimModeActive { return true }
+            return entry.map { trimBlockedReason(for: $0, duration: $0.duration) == nil } ?? false
+        case .replaceAudio:
+            return !isRecordingStartInFlight
+                && (entry.map { replacementBlockedReason(for: $0) == nil } ?? false)
+        case .compressAudio:
+            guard let entry else { return false }
+            return entry.hasAudio && !compressingEntryPaths.contains(entry.relativePath)
+        case .restoreOriginalAudio:
+            return entry.map { originalAudioTrashItem(for: $0) != nil } ?? false
+        case .renameSpeakers:
+            return workbenchUIState.hasSpeakers && !workbenchUIState.isEditing
+        case .deleteAudio:
+            guard let entry else { return false }
+            return entry.hasAudio
+                && recorder.currentEntryPath != entry.relativePath
+                && !compressingEntryPaths.contains(entry.relativePath)
+        case .exportMarkdown:
+            return entry?.hasTranscript == true
+        case .shareAudio:
+            return entry?.hasAudio == true
+        case .openInObsidian:
+            return vaultHasObsidianConfig && entry?.hasTranscript == true
+        case .clipUndo, .clipRedo:
+            return entry != nil
+        case .skipBack, .skipForward, .speedDown, .speedUp, .speedReset,
+             .playbackJump0, .playbackJump1, .playbackJump2, .playbackJump3,
+             .playbackJump4, .playbackJump5, .playbackJump6, .playbackJump7,
+             .playbackJump8, .playbackJump9:
+            return player.url != nil
+        case .enterZenMode:
+            return ready && !recorder.isZenMode
+        case .findInNote:
+            return ready && entry != nil && !isVaultSearchPresented
+        case .showAbout, .showKeyboardShortcuts:
+            return true
+        }
+    }
+
+    /// One dispatch path for menu clicks and matched keyboard shortcuts.
+    /// Returns whether the command consumed the invocation; unavailable
+    /// commands either give explicit feedback (consumed) or pass the key
+    /// through (not consumed), matching the long-standing monitor semantics.
+    @discardableResult
+    func performAppCommand(_ action: AppShortcutAction) -> Bool {
+        // A capture control owns the keyboard: nothing may dispatch, not even
+        // via a menu key equivalent the capture view failed to intercept.
+        guard !isShortcutCaptureActive else { return false }
+        switch action {
+        case .newRecording:
+            guard isAppCommandEnabled(action) else { return false }
+            Task { await startRecording() }
+            return true
+
+        case .startStopRecording:
+            switch recorder.state {
+            case .recording, .paused:
+                Task { await stopRecording() }
+            case .finalizing:
+                break // consume repeats while the recording is being installed
+            case .idle:
+                Task { await startRecording() }
+            }
+            return true
+
+        case .pauseOrPlaybackToggle:
+            // While recording this is the pause/resume control; playback only
+            // gets the chord when the recorder is idle.
+            switch recorder.state {
+            case .recording:
+                if case .replacementTake? = recorder.sessionTarget { return true }
+                Task { await toggleRecordingPause() }
+                return true
+            case .paused:
+                guard recorder.canResume else { return false }
+                Task { await toggleRecordingPause() }
+                return true
+            case .finalizing:
+                return false
+            case .idle:
+                guard player.url != nil else { return false }
+                player.togglePlayPause()
+                return true
+            }
+
+        case .importAudio:
+            guard isAppCommandEnabled(action) else { return false }
+            importViaPanel()
+            return true
+
+        case .newFolder:
+            guard isAppCommandEnabled(action) else { return false }
+            requestNewFolder()
+            return true
+
+        case .toggleFavorite:
+            guard let entry = selectedEntry else { return false }
+            Task { await toggleFavorite(for: entry) }
+            return true
+
+        case .renameEntry:
+            guard selectedEntry != nil else { return false }
+            requestRenameEntry()
+            return true
+
+        case .duplicateEntry:
+            guard let entry = selectedEntry else { return false }
+            Task { await duplicateEntry(entry) }
+            return true
+
+        case .moveNote:
+            return presentQuickMove()
+
+        case .moveToRecentlyDeleted:
+            guard isAppCommandEnabled(action), let entry = selectedEntry else { return false }
+            Task { await deleteItem(atRelativePath: entry.relativePath) }
+            return true
+
+        case .extendRecording:
+            // Contextual: finishes the active extension, otherwise starts one
+            // for the selected entry (with feedback when blocked).
             if recorder.extensionSession != nil {
                 switch recorder.state {
                 case .recording, .paused:
@@ -1066,13 +1361,32 @@ final class AppModel {
                 Task { await startExtension(for: entry) }
             }
             return true
-        }
 
-        if keyCode == replaceKeyCode {
-            // Plain R enters Replace Audio for the selected clip. Keep this
-            // in the focus-aware monitor so typing in a field or note editor
-            // retains the letter normally.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
+        case .editOrSaveNote:
+            guard isAppCommandEnabled(action) else { return false }
+            requestWorkbenchAction(.editOrSave)
+            return true
+
+        case .copyAsMarkdown:
+            guard isAppCommandEnabled(action) else { return false }
+            requestWorkbenchAction(.copyAsMarkdown)
+            return true
+
+        case .toggleLayer:
+            guard isAppCommandEnabled(action) else { return false }
+            requestWorkbenchAction(.toggleLayer)
+            return true
+
+        case .retranscribe:
+            guard isAppCommandEnabled(action) else { return false }
+            requestEntryAction(.retranscribe)
+            return true
+
+        case .trimAudio:
+            toggleTrimFromShortcut()
+            return true
+
+        case .replaceAudio:
             guard let entry = selectedEntry else {
                 errorMessage = "Select an audio clip before replacing audio."
                 return true
@@ -1083,143 +1397,305 @@ final class AppModel {
                 beginReplacement(for: entry)
             }
             return true
-        }
 
-        if keyCode == trimKeyCode {
-            // Plain T mirrors the trim control from every non-editing pane.
-            // Consuming unavailable attempts also prevents List type-selection
-            // from scrolling the middle pane to titles beginning with T.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
-            toggleTrimFromShortcut()
+        case .compressAudio:
+            guard isAppCommandEnabled(action) else { return false }
+            requestEntryAction(.compress)
             return true
-        }
 
-        if keyCode == skipSilenceKeyCode {
-            // Skip Silence is an app-wide persisted playback preference, so S
-            // may toggle it even when focus is outside the detail pane.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
+        case .restoreOriginalAudio:
+            guard isAppCommandEnabled(action) else { return false }
+            requestEntryAction(.restoreOriginalAudio)
+            return true
+
+        case .renameSpeakers:
+            guard isAppCommandEnabled(action) else { return false }
+            requestWorkbenchAction(.renameSpeakers)
+            return true
+
+        case .deleteAudio:
+            guard isAppCommandEnabled(action) else { return false }
+            requestEntryAction(.deleteAudio)
+            return true
+
+        case .showInfo:
+            guard isAppCommandEnabled(action) else { return false }
+            requestEntryAction(.showInfo)
+            return true
+
+        case .revealInFinder:
+            guard let entry = selectedEntry else { return false }
+            revealInFinder(relativePath: entry.relativePath)
+            return true
+
+        case .exportMarkdown:
+            guard isAppCommandEnabled(action) else { return false }
+            requestEntryAction(.exportMarkdown)
+            return true
+
+        case .shareAudio:
+            guard isAppCommandEnabled(action), let entry = selectedEntry else { return false }
+            shareAudioFromMenu(for: entry)
+            return true
+
+        case .openInObsidian:
+            guard isAppCommandEnabled(action), let entry = selectedEntry else { return false }
+            openInObsidian(entry: entry)
+            return true
+
+        case .clipUndo, .clipRedo:
+            guard let entry = selectedEntry else {
+                // Match standard macOS undo behavior: with no applicable
+                // document/clip, the command is consumed as a silent no-op.
+                return true
+            }
+            if let reason = clipEditBlockReason(for: entry) {
+                errorMessage = reason
+                return true
+            }
+            Task {
+                await performClipEdit(action == .clipRedo ? .redo : .undo, for: entry)
+            }
+            return true
+
+        case .skipBack:
+            guard player.url != nil else { return false }
+            player.skipBackward()
+            return true
+
+        case .skipForward:
+            guard player.url != nil else { return false }
+            player.skipForward()
+            return true
+
+        case .playbackJump0, .playbackJump1, .playbackJump2, .playbackJump3,
+             .playbackJump4, .playbackJump5, .playbackJump6, .playbackJump7,
+             .playbackJump8, .playbackJump9:
+            guard player.url != nil, let fraction = Self.playbackFraction(for: action) else {
+                return false
+            }
+            player.seek(toFraction: fraction)
+            return true
+
+        case .speedDown:
+            guard player.url != nil else { return false }
+            player.stepSpeed(-1)
+            return true
+
+        case .speedUp:
+            guard player.url != nil else { return false }
+            player.stepSpeed(1)
+            return true
+
+        case .speedReset:
+            guard player.url != nil else { return false }
+            player.speed = 1.0
+            return true
+
+        case .toggleSkipSilence:
             player.skipSilence.toggle()
             return true
-        }
 
-        if keyCode == zenKeyCode {
-            // Plain Z enters Zen from anywhere except text input. Once Zen is
-            // active, Escape remains the deliberate exit control.
-            guard modifiers.isEmpty, editingTextView == nil else { return false }
+        case .enterZenMode:
             if case .replacementTake? = recorder.sessionTarget { return true }
             recorder.isZenMode = true
             return true
-        }
 
-        if keyCode == leftBracketKeyCode || keyCode == rightBracketKeyCode || keyCode == backslashKeyCode {
-            // [ and ] step playback speed and \ resets it to 1× whenever an
-            // entry with audio is open, matching the transport speed control.
-            guard modifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            if keyCode == backslashKeyCode {
-                player.speed = 1.0
-            } else {
-                player.stepSpeed(keyCode == rightBracketKeyCode ? 1 : -1)
-            }
+        case .findInNote:
+            guard !isVaultSearchPresented else { return false }
+            requestInNoteFind()
+            return selectedEntry != nil
+
+        case .searchVault:
+            presentVaultSearch()
+            return true
+
+        case .previousFolder:
+            return moveSidebarSelection(by: -1)
+
+        case .nextFolder:
+            return moveSidebarSelection(by: 1)
+
+        case .sortByDate:
+            guard isAppCommandEnabled(action) else { return false }
+            selectEntrySortOrder(.dateNewest)
+            return true
+
+        case .sortByDuration:
+            guard isAppCommandEnabled(action) else { return false }
+            selectEntrySortOrder(.duration)
+            return true
+
+        case .sortByTitle:
+            guard isAppCommandEnabled(action) else { return false }
+            selectEntrySortOrder(.title)
+            return true
+
+        case .sortByRecentlyEdited:
+            guard isAppCommandEnabled(action) else { return false }
+            selectEntrySortOrder(.recentlyEdited)
+            return true
+
+        case .goToVaultRoot:
+            guard isAppCommandEnabled(action) else { return false }
+            sidebarSelection = .folder("")
+            return true
+
+        case .goToFavorites:
+            guard isAppCommandEnabled(action) else { return false }
+            sidebarSelection = .favorites
+            return true
+
+        case .goToRecentlyDeleted:
+            guard isAppCommandEnabled(action) else { return false }
+            sidebarSelection = .recentlyDeleted
+            return true
+
+        case .showTranscriptionQueue:
+            guard isAppCommandEnabled(action) else { return false }
+            requestQueuePopover()
+            return true
+
+        case .showAbout:
+            AppWindowPresenter.openAuxiliaryWindow(id: AboutCommands.windowID)
+            return true
+
+        case .showKeyboardShortcuts:
+            AppWindowPresenter.openAuxiliaryWindow(id: KeyboardShortcutsCommands.windowID)
             return true
         }
+    }
 
-        if keyCode == leftArrowKeyCode || keyCode == rightArrowKeyCode {
-            // Left/Right use the loaded clip's contextual skip interval. Up/Down are
-            // deliberately not intercepted so list clip selection keeps its
-            // native keyboard behavior.
-            // AppKit marks arrow events as numeric-pad/function keys even on
-            // the built-in keyboard; those implicit flags are not user-held
-            // modifiers and must not block the shortcut.
-            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            if keyCode == rightArrowKeyCode {
-                player.skipForward()
-            } else {
-                player.skipBackward()
-            }
+    /// Like common media players, 1...8 seek in 10% increments while 9 means
+    /// the end of the track.
+    private static func playbackFraction(for action: AppShortcutAction) -> Double? {
+        switch action {
+        case .playbackJump0: 0.0
+        case .playbackJump1: 0.1
+        case .playbackJump2: 0.2
+        case .playbackJump3: 0.3
+        case .playbackJump4: 0.4
+        case .playbackJump5: 0.5
+        case .playbackJump6: 0.6
+        case .playbackJump7: 0.7
+        case .playbackJump8: 0.8
+        case .playbackJump9: 1.0
+        default: nil
+        }
+    }
+
+    // MARK: - Quick Move (Move Note…)
+
+    /// Why Move Note… is unavailable right now, or nil when it may present.
+    func quickMoveBlockReason() -> String? {
+        guard phase == .ready else { return "Open a vault before moving notes." }
+        guard sidebarSelection != .recentlyDeleted else {
+            return "Recently Deleted items are restored, not moved."
+        }
+        guard let entry = selectedEntry else { return "Select a note to move." }
+        if recorder.currentEntryPath == entry.relativePath {
+            return "Stop the recording before moving this note."
+        }
+        if replacementModeActive {
+            return "Finish or cancel replacing audio before moving the note."
+        }
+        if clipMutationEntryPaths.contains(entry.relativePath) {
+            return "Wait for the current audio operation to finish."
+        }
+        if compressingEntryPaths.contains(entry.relativePath) {
+            return "Wait for audio compression to finish."
+        }
+        return nil
+    }
+
+    /// Opens the Move Note picker. If the note is being edited, pending
+    /// autosaves are flushed and editing finishes first; the picker does not
+    /// open when that save fails.
+    @discardableResult
+    func presentQuickMove() -> Bool {
+        guard let entry = selectedEntry else { return false }
+        if let reason = quickMoveBlockReason() {
+            errorMessage = reason
             return true
         }
-
-        if let fraction = playbackFractionsByKeyCode[keyCode] {
-            // Ignore the numeric-pad flag AppKit adds automatically, but do
-            // not steal modified digits or digits typed into an editor.
-            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard explicitModifiers.isEmpty, editingTextView == nil, player.url != nil else { return false }
-            player.seek(toFraction: fraction)
-            return true
+        let entryPath = entry.relativePath
+        if workbenchUIState.isEditing {
+            requestWorkbenchAction(.finishEditing { [weak self] saved in
+                guard let self, saved else { return }
+                guard self.selectedEntry?.relativePath == entryPath else { return }
+                self.quickMoveEntryPath = entryPath
+                self.isQuickMovePresented = true
+            })
+        } else {
+            quickMoveEntryPath = entryPath
+            isQuickMovePresented = true
         }
+        return true
+    }
 
-        if keyCode == upArrowKeyCode || keyCode == downArrowKeyCode {
-            // Option-Up/Down navigates the far-left folder/sidebar pane while
-            // leaving keyboard focus in the clip list. Plain Up/Down normally
-            // falls through to the List, but its responder disappears when
-            // the responsive layout collapses the middle split item.
-            let explicitModifiers = modifiers.subtracting([.numericPad, .function])
-            guard editingTextView == nil else { return false }
-            let offset = keyCode == downArrowKeyCode ? 1 : -1
-            if explicitModifiers == .option {
-                return moveSidebarSelection(by: offset)
-            }
-            if explicitModifiers.isEmpty, middleColumnIsCollapsed {
-                return moveMiddleSelection(by: offset)
-            }
-            return false
-        }
+    /// Every folder the selected note can move to, current parent excluded.
+    var quickMoveDestinations: [QuickMoveDestination] {
+        guard let entryPath = quickMoveEntryPath, let root = snapshot?.root else { return [] }
+        return QuickMoveModel.destinations(
+            folderPaths: root.allFolders.map(\.relativePath),
+            excludingParentOf: entryPath
+        )
+    }
 
-        if keyCode == deleteKeyCode {
-            // Command+Delete and Shift+Delete both move the selected clip
-            // straight to Recently Deleted. Text editing keeps ownership of
-            // either chord while an editable field or note has focus.
-            guard modifiers == .command || modifiers == .shift, editingTextView == nil,
-                  let entry = selectedEntry, recorder.currentEntryPath != entry.relativePath,
-                  !replacementModeActive,
-                  !clipMutationEntryPaths.contains(entry.relativePath)
-            else { return false }
-            Task { await deleteItem(atRelativePath: entry.relativePath) }
-            return true
+    /// Moves the note, then atomically publishes the refreshed snapshot with
+    /// the repointed queue and followed selection. On failure the picker stays
+    /// open with `quickMoveErrorMessage` set.
+    func performQuickMove(to destination: QuickMoveDestination) async {
+        guard let entryPath = quickMoveEntryPath, let service, let vaultURL else { return }
+        guard recorder.currentEntryPath != entryPath else {
+            quickMoveErrorMessage = "Stop the recording before moving this note."
+            return
         }
-
-        guard keyCode == spaceKeyCode else { return false }
-        if modifiers == .shift {
-            if let focusedTextView = editingTextView {
-                // Typing wins: Shift+Space while writing inserts a space
-                // instead of reaching the Start/Stop Recording menu item.
-                focusedTextView.insertText(" ", replacementRange: focusedTextView.selectedRange())
-                return true
-            }
-            // Handle the recording intent here instead of falling through to
-            // SwiftUI's menu equivalent, whose dispatch depends on pane focus.
-            switch recorder.state {
-            case .recording, .paused:
-                Task { await stopRecording() }
-            case .finalizing:
-                break // consume repeats while the recording is being installed
-            case .idle:
-                Task { await startRecording() }
-            }
-            return true
-        }
-        if modifiers.isEmpty, editingTextView == nil {
-            // While recording, Space is the pause/resume control; playback
-            // only gets Space when the recorder is idle.
-            switch recorder.state {
-            case .recording:
-                if case .replacementTake? = recorder.sessionTarget { return true }
-                Task { await toggleRecordingPause() }
-                return true
-            case .paused:
-                Task { await toggleRecordingPause() }
-                return true
-            case .finalizing:
-                return false
-            case .idle:
-                if player.url != nil {
-                    player.togglePlayPause()
-                    return true
+        let outcome: QuickMoveOutcome
+        if !destination.isVaultRoot,
+           !FileManager.default.fileExists(
+               atPath: vaultURL.appendingRelativePath(destination.path).path
+           ) {
+            outcome = .destinationMissing
+        } else {
+            do {
+                let newPath = try await service.moveItem(
+                    at: entryPath, toFolder: destination.path
+                )
+                await refresh {
+                    self.transcriptionQueue?.repointItems(from: entryPath, to: newPath)
+                    if self.selectedEntryID == entryPath {
+                        self.selectedEntryID = newPath
+                    }
                 }
+                refreshVaultSearchIfVisible()
+                outcome = .moved(newPath)
+            } catch {
+                outcome = Self.quickMoveOutcome(for: error, entryPath: entryPath)
             }
         }
-        return false
+        if outcome.isSuccess {
+            quickMoveErrorMessage = nil
+            isQuickMovePresented = false
+        } else {
+            quickMoveErrorMessage = outcome.errorDescription
+        }
+    }
+
+    private static func quickMoveOutcome(
+        for error: Error, entryPath: RelativePath
+    ) -> QuickMoveOutcome {
+        if case VaultError.alreadyExists = error {
+            return .collision(entryPath.lastComponent)
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSFileNoSuchFileError {
+            return .destinationMissing
+        }
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSFileWriteFileExistsError {
+            return .collision(entryPath.lastComponent)
+        }
+        return .failed(error.localizedDescription)
     }
 
     /// Sheets, alerts, SwiftUI popovers, and auxiliary windows own their first
@@ -1361,7 +1837,7 @@ final class AppModel {
                 lastCompletedRecordingAt = completedAt
                 beginGlobalIndicatorRetention(after: completedAt)
                 showGlobalRecordingTransient(.saved(
-                    duration: finalDuration,
+                    duration: lastFinalizedRecordingDuration ?? finalDuration,
                     until: .now.addingTimeInterval(2.5)
                 ))
             }
@@ -1371,10 +1847,16 @@ final class AppModel {
     private func recordingCommandAvailabilityState(
         for command: RecordingCommand
     ) -> RecordingCommandAvailabilityState {
+        if isRecordingStartInFlight { return .startingMicrophone }
         switch recorder.state {
         case .recording: return .recording
-        case .paused: return .paused
-        case .finalizing: return .finalizing
+        case .paused:
+            if recorder.canResume { return .paused }
+            return .pausedResumeUnavailable(
+                recorder.alertMessage ?? "Stop & Save before starting another recording."
+            )
+        case .finalizing:
+            return recorder.isStartingMicrophone ? .startingMicrophone : .finalizing
         case .idle:
             guard phase == .ready, let vaultURL else {
                 return .idleUnavailable("Open a writable vault in Transcride first.")
@@ -1423,6 +1905,31 @@ final class AppModel {
         isGlobalIndicatorRetentionActive = false
     }
 
+    private func beginRecordingStart() -> UUID? {
+        guard recordingWorkflowStartGate.begin() else { return nil }
+        let token = UUID()
+        activeRecordingStartToken = token
+        isRecordingStartInFlight = true
+        return token
+    }
+
+    private func finishRecordingStart(_ token: UUID) {
+        guard activeRecordingStartToken == token else { return }
+        activeRecordingStartToken = nil
+        isRecordingStartInFlight = false
+        recordingWorkflowStartGate.finish()
+    }
+
+    private func recordingStartContextIsCurrent(
+        _ token: UUID,
+        service: VaultService,
+        vaultURL: URL
+    ) -> Bool {
+        activeRecordingStartToken == token
+            && self.service === service
+            && self.vaultURL?.standardizedFileURL == vaultURL.standardizedFileURL
+    }
+
     var globalRecordingPresentationState: GlobalRecordingPresentationState {
         recordingPresentationState(requiresRegisteredShortcut: true)
     }
@@ -1438,16 +1945,30 @@ final class AppModel {
     private func recordingPresentationState(
         requiresRegisteredShortcut: Bool
     ) -> GlobalRecordingPresentationState {
+        if isRecordingStartInFlight { return .startingMicrophone }
         if let globalRecordingTransientState { return globalRecordingTransientState }
         let toggle = (globalShortcutPreferences.bindings[.toggleRecording] ?? nil)?.glyphDescription ?? ""
         let pause = (globalShortcutPreferences.bindings[.pauseResumeRecording] ?? nil)?.glyphDescription ?? ""
         switch recorder.state {
         case .recording:
+            if let warning = recorder.captureHealthMessage {
+                return .recordingNeedsAttention(
+                    elapsed: recorder.elapsed,
+                    message: warning,
+                    stopShortcut: toggle
+                )
+            }
             return .recording(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: toggle)
         case .paused:
-            return .paused(elapsed: recorder.elapsed, pauseShortcut: pause, stopShortcut: toggle)
+            return .paused(
+                elapsed: recorder.elapsed,
+                pauseShortcut: recorder.canResume ? pause : "Unavailable",
+                stopShortcut: toggle
+            )
         case .finalizing:
-            return .saving(elapsed: recorder.elapsed)
+            return recorder.isStartingMicrophone
+                ? .startingMicrophone
+                : .saving(elapsed: recorder.elapsed)
         case .idle:
             if phase != .ready { return .needsAttention("Open or create a vault to record.") }
             if let message = recorder.alertMessage { return .needsAttention(message) }
@@ -1461,6 +1982,13 @@ final class AppModel {
             }
             if inputDevices.devices.isEmpty {
                 return .needsAttention("No usable microphone input is available.")
+            }
+            let selectedMicUID = UserDefaults.standard.string(
+                forKey: PreferenceKey.preferredMicUID
+            ) ?? ""
+            if !selectedMicUID.isEmpty,
+               inputDevices.device(forUID: selectedMicUID) == nil {
+                return .needsAttention("The selected microphone is unavailable. Choose another microphone or System Default.")
             }
             if let vaultURL,
                let capacity = try? vaultURL.resourceValues(
@@ -1479,31 +2007,54 @@ final class AppModel {
 
     private func startNewRecordingImpl() async {
         guard let service, let vaultURL, !recorder.isActive else { return }
-        guard await RecorderService.ensureMicPermission() else {
+        guard let startToken = beginRecordingStart() else { return }
+        defer { finishRecordingStart(startToken) }
+        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
+        guard await RecorderService.ensureMicPermission(
+            target: .newEntry,
+            preferredMicUID: micUID
+        ) else {
             errorMessage = """
             Transcride needs microphone access to record. \
             Enable it in System Settings → Privacy & Security → Microphone, then try again.
             """
-            globalRecordingTransientState = .needsAttention(errorMessage ?? "Microphone access is required.")
+            showGlobalRecordingTransient(.needsAttention(
+                errorMessage ?? "Microphone access is required."
+            ))
             NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        guard recordingStartContextIsCurrent(
+            startToken,
+            service: service,
+            vaultURL: vaultURL
+        ) else {
+            errorMessage = "Recording did not start because the active vault changed."
             return
         }
         let quality = RecordingQuality(
             rawValue: UserDefaults.standard.string(forKey: PreferenceKey.recordingQuality) ?? ""
         ) ?? .compressed
-        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
-
         let folder = newEntryTargetFolder
         var createdPath: RelativePath?
         do {
             let relPath = try await service.createEntryFolder(inFolder: folder, date: .now)
             createdPath = relPath
-            try recorder.start(
+            guard recordingStartContextIsCurrent(
+                startToken,
+                service: service,
+                vaultURL: vaultURL
+            ) else {
+                throw RecorderError.recordingContextChanged
+            }
+            try await recorder.start(
                 entryURL: vaultURL.appendingRelativePath(relPath),
                 relativePath: relPath,
                 quality: quality,
                 preferredMicUID: micUID
             )
+            globalRecordingStateTask?.cancel()
+            globalRecordingTransientState = nil
             updateLiveTranscription()
             await refresh()
         } catch {
@@ -1512,11 +2063,18 @@ final class AppModel {
                 try? await service.removeEmptyEntryFolder(at: createdPath)
             }
             errorMessage = "Recording could not start: \(error.localizedDescription)"
+            showGlobalRecordingTransient(.needsAttention(
+                errorMessage ?? "Recording could not start."
+            ))
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
     func extensionBlockReason(for entry: Entry) -> RecordingExtensionBlockReason? {
         guard entry.hasAudio else { return entry.audioDeleted ? .audioDeleted : .noAudio }
+        if unresolvedExtensionRecoveryEntryPaths.contains(entry.relativePath) {
+            return .recoveryPending
+        }
         if recorder.isActive { return .recorderBusy }
         if trimModeActive { return .entryBusy("trimming") }
         if replacementModeActive { return .entryBusy("replacing audio") }
@@ -1575,6 +2133,8 @@ final class AppModel {
         guard let service, let vaultURL, let audioName = entry.audioFileName,
               replacementEntryPath == entry.relativePath,
               !recorder.isActive else { return }
+        guard let startToken = beginRecordingStart() else { return }
+        defer { finishRecordingStart(startToken) }
         // Audition playback must never bleed into microphone capture.
         player.pause()
         let session: ReplacementTakeSession
@@ -1586,6 +2146,13 @@ final class AppModel {
                 timeline = try await service.replacementTimeline(
                     entryRelativePath: entry.relativePath, audioFileName: audioName
                 )
+                guard recordingStartContextIsCurrent(
+                    startToken,
+                    service: service,
+                    vaultURL: vaultURL
+                ) else {
+                    throw RecorderError.recordingContextChanged
+                }
             } catch {
                 errorMessage = "The audio timeline could not be read for replacement: \(error.localizedDescription)"
                 return
@@ -1605,8 +2172,20 @@ final class AppModel {
             )
             replacementSession = session
         }
-        guard await RecorderService.ensureMicPermission() else {
+        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
+        guard await RecorderService.ensureMicPermission(
+            target: .replacementTake,
+            preferredMicUID: micUID
+        ) else {
             errorMessage = "Transcride needs microphone access to record a replacement take. Enable it in System Settings → Privacy & Security → Microphone, then try again."
+            return
+        }
+        guard recordingStartContextIsCurrent(
+            startToken,
+            service: service,
+            vaultURL: vaultURL
+        ) else {
+            errorMessage = "The replacement take did not start because the active vault changed."
             return
         }
         do {
@@ -1614,10 +2193,16 @@ final class AppModel {
             capturing.phase = .capturing
             replacementSession = capturing
             try await service.saveReplacementSession(capturing)
+            guard recordingStartContextIsCurrent(
+                startToken,
+                service: service,
+                vaultURL: vaultURL
+            ) else {
+                throw RecorderError.recordingContextChanged
+            }
             let quality = RecordingQuality(
                 rawValue: UserDefaults.standard.string(forKey: PreferenceKey.recordingQuality) ?? ""
             ) ?? .compressed
-            let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
             let target = ReplacementRecordingTarget(
                 entryRelativePath: entry.relativePath,
                 sessionID: capturing.id,
@@ -1627,7 +2212,7 @@ final class AppModel {
             recorder.onReplacementBoundaryReached = { [weak self] in
                 Task { @MainActor [weak self] in await self?.stopReplacementTake() }
             }
-            try recorder.start(
+            try await recorder.start(
                 entryURL: vaultURL.appendingRelativePath(entry.relativePath),
                 relativePath: entry.relativePath,
                 quality: quality,
@@ -1636,6 +2221,19 @@ final class AppModel {
             )
             replacementPreviewLabel = "Recording Take \(target.takeNumber)"
         } catch {
+            recorder.onReplacementBoundaryReached = nil
+            if let recorderError = error as? RecorderError,
+               recorderError.isStartOwnershipConflict {
+                var ready = session
+                ready.phase = .ready
+                ready.failureMessage = nil
+                replacementSession = ready
+                try? await service.saveReplacementSession(ready)
+                errorMessage = recorderError == .recordingContextChanged
+                    ? "The replacement take did not start because the active vault changed."
+                    : "A recording started before the replacement take could claim the microphone. Try the take again after it finishes."
+                return
+            }
             replacementSession?.phase = .failed
             replacementSession?.failureMessage = error.localizedDescription
             errorMessage = "The replacement take could not start: \(error.localizedDescription)"
@@ -1889,7 +2487,7 @@ final class AppModel {
         guard replacementEntryPath == expectedEntryPath else { return }
         if case .replacementTake(let target)? = recorder.sessionTarget,
            target.entryRelativePath == expectedEntryPath {
-            recorder.cancelReplacementCapture()
+            await recorder.cancelReplacementCapture()
         }
         // Clear the app-wide mutation lock before awaiting disk cleanup. This
         // makes every exit path converge immediately and also invalidates any
@@ -1940,11 +2538,71 @@ final class AppModel {
     }
 
     func startExtension(for entry: Entry) async {
-        await validateExtensionAvailability(for: entry)
-        guard let vaultURL, let audioName = entry.audioFileName,
+        guard let service, let vaultURL, let audioName = entry.audioFileName,
+              let startToken = beginRecordingStart() else { return }
+        defer { finishRecordingStart(startToken) }
+        let supportsExtension = await service.audioSupportsExtension(
+            atEntryPath: entry.relativePath
+        )
+        guard recordingStartContextIsCurrent(
+            startToken,
+            service: service,
+            vaultURL: vaultURL
+        ) else {
+            errorMessage = "The recording extension did not start because the active vault changed."
+            return
+        }
+        if supportsExtension {
+            unsupportedExtensionEntryPaths.remove(entry.relativePath)
+        } else {
+            unsupportedExtensionEntryPaths.insert(entry.relativePath)
+        }
+        let recoveryDiscovery = await service.recordingExtensionRecoveries()
+        guard recordingStartContextIsCurrent(
+            startToken,
+            service: service,
+            vaultURL: vaultURL
+        ) else {
+            errorMessage = "The recording extension did not start because the active vault changed."
+            return
+        }
+        if recoveryDiscovery.hasUnresolvedRecovery(for: entry.relativePath) {
+            unresolvedExtensionRecoveryEntryPaths.insert(entry.relativePath)
+            for recovery in recoveryDiscovery.recoverable
+            where recovery.entryRelativePath == entry.relativePath
+                && !extensionRecoveries.contains(where: { $0.id == recovery.id }) {
+                extensionRecoveries.append(recovery)
+            }
+            isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+            errorMessage = recoveryDiscovery.malformedEntryPaths.contains(entry.relativePath)
+                ? "The previous extension's recovery metadata is malformed. Its audio artifacts were kept; resolve or preserve them before recording another segment."
+                : RecordingExtensionBlockReason.recoveryPending.explanation
+            return
+        }
+        // Recovery may have been resolved externally since the vault opened.
+        // The fresh disk scan is authoritative; do not let a stale cache block
+        // this entry forever after all guarded artifacts are gone.
+        unresolvedExtensionRecoveryEntryPaths.remove(entry.relativePath)
+        extensionRecoveries.removeAll {
+            $0.entryRelativePath == entry.relativePath
+        }
+        isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
+        guard
               extensionBlockReason(for: entry) == nil else { return }
-        guard await RecorderService.ensureMicPermission() else {
+        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
+        guard await RecorderService.ensureMicPermission(
+            target: .extensionRecording,
+            preferredMicUID: micUID
+        ) else {
             errorMessage = "Transcride needs microphone access to extend a recording. Enable it in System Settings → Privacy & Security → Microphone, then try again."
+            return
+        }
+        guard recordingStartContextIsCurrent(
+            startToken,
+            service: service,
+            vaultURL: vaultURL
+        ) else {
+            errorMessage = "The recording extension did not start because the active vault changed."
             return
         }
         player.pause()
@@ -1952,14 +2610,13 @@ final class AppModel {
         let quality = RecordingQuality(
             rawValue: UserDefaults.standard.string(forKey: PreferenceKey.recordingQuality) ?? ""
         ) ?? .compressed
-        let micUID = UserDefaults.standard.string(forKey: PreferenceKey.preferredMicUID) ?? ""
         let target = RecordingExtensionTarget(
             entryRelativePath: entry.relativePath,
             sourceAudioFileName: audioName,
             sourceDuration: entry.duration ?? 0
         )
         do {
-            try recorder.start(
+            try await recorder.start(
                 entryURL: vaultURL.appendingRelativePath(entry.relativePath),
                 relativePath: entry.relativePath,
                 quality: quality,
@@ -1973,12 +2630,34 @@ final class AppModel {
     }
 
     private func stopRecordingImpl() async -> Bool {
+        lastFinalizedRecordingDuration = nil
         if case .replacementTake? = recorder.sessionTarget {
             await stopReplacementTake()
             return recorder.state == .idle && recorder.alertMessage == nil
         }
-        stopLiveTranscription()
-        guard let outcome = await recorder.stop() else { return false }
+        let coordination = await RecordingStopCoordinator.run(
+            clearLiveDisplay: { self.stopLiveTranscription() },
+            finalizeAndInstall: { await self.recorder.stop() },
+            isReadyForHandoff: { $0.finalizationSucceeded },
+            handoffFinalized: { await self.completeFinalizedRecording($0) }
+        )
+        switch coordination {
+        case .handedOff(let succeeded):
+            return succeeded
+        case .notReady(let outcome):
+            // The hidden microphone journal remains recoverable. In particular,
+            // no search sync or transcription seam is invoked for this path.
+            lastFinalizedRecordingDuration = outcome.duration
+            return false
+        case .noOutcome:
+            return false
+        }
+    }
+
+    private func completeFinalizedRecording(
+        _ outcome: RecorderService.FinalizationOutcome
+    ) async -> Bool {
+        lastFinalizedRecordingDuration = outcome.duration
         let relPath = outcome.entryRelativePath
         if case .extensionOf(let target) = outcome.target {
             guard let service else { return false }
@@ -2004,9 +2683,32 @@ final class AppModel {
                 errorMessage = "The extension segment is safe, but it could not be appended: \(error.localizedDescription)"
                 let discovery = await service.recordingExtensionRecoveries()
                 extensionRecoveries = discovery.recoverable
+                unresolvedExtensionRecoveryEntryPaths = Set(
+                    discovery.recoverable.map(\.entryRelativePath)
+                        + discovery.malformedEntryPaths
+                )
                 isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
                 return false
             }
+        }
+        switch outcome.captureResult {
+        case .noFrames:
+            do {
+                try await service?.removeEmptyEntryFolder(at: relPath)
+                await refresh()
+            } catch {
+                errorMessage = "No audio was captured, and the empty entry folder could not be removed: \(error.localizedDescription)"
+            }
+            return false
+        case .noSignal:
+            await service?.synchronizeSearchEntry(at: relPath)
+            await refresh { self.selectedEntryID = relPath }
+            return false
+        case .captured:
+            guard outcome.canonicalAudioInstalled else { return false }
+        }
+        if case .microphoneOnly(.mixFailed) = outcome.systemAudioStatus {
+            recordingRecoveryNoticeMessage = "The recording was saved from the microphone. Mac audio could not be mixed safely, so the pristine microphone recording was kept."
         }
         await service?.synchronizeSearchEntry(at: relPath)
         // Enqueue before the rescan so the entry's first selected frame
@@ -2030,7 +2732,7 @@ final class AppModel {
     func discardActiveRecording() async {
         isCancelRecordingConfirmationPresented = false
         stopLiveTranscription()
-        guard let cancelled = recorder.cancelActiveCapture() else { return }
+        guard let cancelled = await recorder.cancelActiveCapture() else { return }
         recorder.isZenMode = false
 
         switch cancelled.target {
@@ -2083,6 +2785,7 @@ final class AppModel {
                 source: "extension-recovery"
             )
             extensionRecoveries.removeAll { $0.id == recovery.id }
+            unresolvedExtensionRecoveryEntryPaths.remove(recovery.entryRelativePath)
             isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
             audioRevision &+= 1
             await refresh { self.selectedEntryID = recovery.entryRelativePath }
@@ -2104,6 +2807,7 @@ final class AppModel {
                 source: "extension-segment-recovery"
             )
             extensionRecoveries.removeAll { $0.id == recovery.id }
+            unresolvedExtensionRecoveryEntryPaths.remove(recovery.entryRelativePath)
             isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
             await refresh { self.selectedEntryID = newPath }
         } catch {
@@ -2117,6 +2821,7 @@ final class AppModel {
         await service.discardRecoveredExtension(recovery)
         extensionRecoveryProcessingIDs.remove(recovery.id)
         extensionRecoveries.removeAll { $0.id == recovery.id }
+        unresolvedExtensionRecoveryEntryPaths.remove(recovery.entryRelativePath)
         isExtensionRecoveryPresented = !extensionRecoveries.isEmpty
         await refresh()
     }
@@ -2173,6 +2878,11 @@ final class AppModel {
     private func stopLiveTranscription() {
         recorder.liveTee.set(nil)
         liveTranscriber.end()
+    }
+
+    func prepareActiveRecordingForDeferredRecovery() async {
+        stopLiveTranscription()
+        await recorder.preserveActiveCaptureForRecovery()
     }
 
     /// A transcription landed: refresh, follow an auto-title rename, and let

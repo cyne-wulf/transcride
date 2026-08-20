@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// Stable identity captured when the user starts extending an entry. The
@@ -82,6 +83,7 @@ enum RecordingExtensionBlockReason: Equatable, Sendable {
     case noAudio
     case audioDeleted
     case recorderBusy
+    case recoveryPending
     case entryBusy(String)
     case transcriptionBusy
     case unsupportedAudio
@@ -94,6 +96,8 @@ enum RecordingExtensionBlockReason: Equatable, Sendable {
             return "Restore this entry's audio from Recently Deleted before extending it."
         case .recorderBusy:
             return "Stop the active recording before extending this entry."
+        case .recoveryPending:
+            return "Resolve the interrupted extension before recording another segment."
         case .entryBusy(let operation):
             return "Wait for \(operation) to finish before extending this entry."
         case .transcriptionBusy:
@@ -108,8 +112,36 @@ enum RecordingExtensionArtifacts {
     static let manifestFileName = ".extension-state.json"
     static let partialFileName = ".extension-recording.caf"
     static let segmentM4AFileName = ".extension-segment.m4a"
+    /// Encode destination used before a validated segment is promoted to the
+    /// committed M4A name. Recovery never treats this file as a usable segment.
+    static let stagedSegmentM4AFileName = ".extension-segment-finalizing.m4a"
     static let segmentCAFFileName = ".extension-segment.caf"
     static let combinedFileName = ".extension-combined.m4a"
+
+    /// Committed recovery candidates, in preference order. A failed M4A
+    /// encode may leave both its destination and the still-valid CAF journal;
+    /// discovery must validate each file before honoring this priority.
+    static let segmentCandidateFileNames = [
+        segmentM4AFileName,
+        segmentCAFFileName,
+        partialFileName,
+    ]
+
+    /// Every hidden artifact that makes an entry relevant to recovery. The
+    /// staging M4A is included so an interrupted encode is surfaced, but it is
+    /// deliberately absent from `segmentCandidateFileNames` because it was
+    /// never validated and committed by the recorder.
+    static let cleanupFileNames = [
+        stagedSegmentM4AFileName,
+        combinedFileName,
+        segmentM4AFileName,
+        segmentCAFFileName,
+        partialFileName,
+        // The manifest is the recovery marker and is intentionally last. A
+        // crash during cleanup therefore remains discoverable and retryable.
+        manifestFileName,
+    ]
+    static let recoveryFileNames = Set(cleanupFileNames)
 
     enum RecoveryPhase: Equatable, Sendable {
         case none
@@ -120,17 +152,49 @@ enum RecordingExtensionArtifacts {
         case abandonedOutput
     }
 
-    static func classify(fileNames: Set<String>, manifest: RecordingExtensionSession?) -> RecoveryPhase {
-        if fileNames.contains(combinedFileName) {
-            return .combinedAwaitingSwap
+    static func classify(
+        selectedSegmentFileName: String?,
+        hasValidCombinedOutput: Bool,
+        hasArtifacts: Bool,
+        manifest: RecordingExtensionSession?
+    ) -> RecoveryPhase {
+        // Once the safe swap began, absence of a valid combined staging file
+        // means the visible canonical audio may already be installed and only
+        // idempotent cleanup remains. That path validates the visible audio and
+        // its staged predecessor before it converges.
+        if manifest?.phase == .swapping, !hasValidCombinedOutput {
+            return .swapNeedsCleanup
         }
-        if manifest?.phase == .swapping { return .swapNeedsCleanup }
-        if fileNames.contains(segmentM4AFileName) || fileNames.contains(segmentCAFFileName) {
+
+        // A combined output is only reconstructible/retryable while one of the
+        // committed source segments remains valid. A lone combined/staging file
+        // stays visible as abandoned metadata rather than being trusted.
+        guard let selectedSegmentFileName else {
+            return manifest != nil || hasArtifacts ? .abandonedOutput : .none
+        }
+        if hasValidCombinedOutput { return .combinedAwaitingSwap }
+
+        switch selectedSegmentFileName {
+        case segmentM4AFileName, segmentCAFFileName:
             return .finalizedSegment
+        case partialFileName:
+            return .partialCapture
+        default:
+            return .abandonedOutput
         }
-        if fileNames.contains(partialFileName) { return .partialCapture }
-        if manifest != nil { return .abandonedOutput }
-        return .none
+    }
+
+    /// A normal startup failure must leave the entry exactly as it was before
+    /// the user asked to extend it. A process crash never reaches this method,
+    /// so the provisional manifest and canonical CAF remain together for the
+    /// existing extension-recovery scan to inspect.
+    static func rollbackProvisionalStartup(
+        in entryURL: URL,
+        fileManager: FileManager = .default
+    ) {
+        for fileName in [manifestFileName, partialFileName] {
+            try? fileManager.removeItem(at: entryURL.appending(path: fileName))
+        }
     }
 }
 
@@ -139,6 +203,7 @@ struct RecoverableRecordingExtension: Identifiable, Equatable, Sendable {
     var session: RecordingExtensionSession
     var phase: RecordingExtensionArtifacts.RecoveryPhase
     var segmentFileName: String?
+    var microphoneObservation: RecoveredMicrophoneCaptureObservation?
 
     var id: String { "\(entryRelativePath)|\(session.id.uuidString)" }
 
@@ -157,6 +222,13 @@ struct RecoverableRecordingExtension: Identifiable, Equatable, Sendable {
 struct RecordingExtensionRecoveryDiscovery: Equatable, Sendable {
     var recoverable: [RecoverableRecordingExtension] = []
     var malformedEntryPaths: [RelativePath] = []
+
+    /// Any recovery artifact for this entry must be resolved before a new
+    /// extension may create the same manifest/journal names.
+    func hasUnresolvedRecovery(for entryRelativePath: RelativePath) -> Bool {
+        recoverable.contains { $0.entryRelativePath == entryRelativePath }
+            || malformedEntryPaths.contains(entryRelativePath)
+    }
 }
 
 enum RecordingExtensionRecovery {
@@ -174,14 +246,9 @@ enum RecordingExtensionRecovery {
             let names = Set((try? FileManager.default.contentsOfDirectory(
                 atPath: entryURL.path
             )) ?? [])
-            let artifactNames: Set<String> = [
-                RecordingExtensionArtifacts.manifestFileName,
-                RecordingExtensionArtifacts.partialFileName,
-                RecordingExtensionArtifacts.segmentM4AFileName,
-                RecordingExtensionArtifacts.segmentCAFFileName,
-                RecordingExtensionArtifacts.combinedFileName,
-            ]
-            guard !names.isDisjoint(with: artifactNames) else { continue }
+            guard !names.isDisjoint(
+                with: RecordingExtensionArtifacts.recoveryFileNames
+            ) else { continue }
             let relPath = relativePath(of: entryURL, under: root)
             let manifestURL = entryURL.appending(
                 path: RecordingExtensionArtifacts.manifestFileName
@@ -193,25 +260,34 @@ enum RecordingExtensionRecovery {
                 discovery.malformedEntryPaths.append(relPath)
                 continue
             }
+            let selectedCandidate = selectValidSegmentCandidate(
+                in: entryURL,
+                fileNames: names,
+                sessionID: session.id
+            )
+            let combinedURL = entryURL.appending(
+                path: RecordingExtensionArtifacts.combinedFileName
+            )
+            let hasValidCombinedOutput = names.contains(
+                RecordingExtensionArtifacts.combinedFileName
+            ) && isReadableAudio(at: combinedURL)
             let phase = RecordingExtensionArtifacts.classify(
-                fileNames: names, manifest: session
+                selectedSegmentFileName: selectedCandidate?.fileName,
+                hasValidCombinedOutput: hasValidCombinedOutput,
+                hasArtifacts: !names.isDisjoint(
+                    with: RecordingExtensionArtifacts.recoveryFileNames
+                ),
+                manifest: session
             )
             guard phase != .none else { continue }
-            let segmentName: String?
-            if names.contains(RecordingExtensionArtifacts.segmentM4AFileName) {
-                segmentName = RecordingExtensionArtifacts.segmentM4AFileName
-            } else if names.contains(RecordingExtensionArtifacts.segmentCAFFileName) {
-                segmentName = RecordingExtensionArtifacts.segmentCAFFileName
-            } else if names.contains(RecordingExtensionArtifacts.partialFileName) {
-                segmentName = RecordingExtensionArtifacts.partialFileName
-            } else {
-                segmentName = nil
-            }
             discovery.recoverable.append(.init(
                 entryRelativePath: relPath,
                 session: session,
                 phase: phase,
-                segmentFileName: segmentName
+                segmentFileName: selectedCandidate?.fileName,
+                microphoneObservation: phase == .partialCapture
+                    ? selectedCandidate?.microphoneObservation
+                    : nil
             ))
         }
         discovery.recoverable.sort { $0.entryRelativePath < $1.entryRelativePath }
@@ -220,14 +296,71 @@ enum RecordingExtensionRecovery {
     }
 
     static func removeArtifacts(in entryURL: URL) {
-        for name in [
-            RecordingExtensionArtifacts.manifestFileName,
-            RecordingExtensionArtifacts.partialFileName,
-            RecordingExtensionArtifacts.segmentM4AFileName,
-            RecordingExtensionArtifacts.segmentCAFFileName,
-            RecordingExtensionArtifacts.combinedFileName,
-        ] {
+        for name in RecordingExtensionArtifacts.cleanupFileNames {
             try? FileManager.default.removeItem(at: entryURL.appending(path: name))
+        }
+    }
+
+    private struct ValidSegmentCandidate {
+        var fileName: String
+        var microphoneObservation: RecoveredMicrophoneCaptureObservation?
+    }
+
+    private static func selectValidSegmentCandidate(
+        in entryURL: URL,
+        fileNames: Set<String>,
+        sessionID: UUID
+    ) -> ValidSegmentCandidate? {
+        for fileName in RecordingExtensionArtifacts.segmentCandidateFileNames
+        where fileNames.contains(fileName) {
+            let url = entryURL.appending(path: fileName)
+            if fileName == RecordingExtensionArtifacts.partialFileName {
+                guard let inspection = try? MicrophoneJournalInspector.inspect(url) else {
+                    continue
+                }
+                return .init(
+                    fileName: fileName,
+                    microphoneObservation: .init(
+                        sessionID: sessionID,
+                        inspection: inspection
+                    )
+                )
+            }
+            guard isReadableAudio(at: url) else { continue }
+            return .init(fileName: fileName, microphoneObservation: nil)
+        }
+        return nil
+    }
+
+    /// Synchronously checks a bounded prefix and suffix. Opening alone is not
+    /// sufficient for a truncated M4A whose header still advertises frames;
+    /// reading the tail catches that case without decoding an hours-long clip
+    /// during vault discovery.
+    private static func isReadableAudio(at url: URL) -> Bool {
+        do {
+            let input = try AVAudioFile(forReading: url)
+            defer { input.close() }
+            guard input.length > 0,
+                  input.processingFormat.sampleRate.isFinite,
+                  input.processingFormat.sampleRate > 0,
+                  input.processingFormat.channelCount > 0,
+                  let buffer = AVAudioPCMBuffer(
+                    pcmFormat: input.processingFormat,
+                    frameCapacity: 4_096
+                  ) else { return false }
+
+            try input.read(into: buffer, frameCount: 4_096)
+            guard buffer.frameLength > 0 else { return false }
+
+            if input.length > 4_096 {
+                input.framePosition = max(0, input.length - 4_096)
+                buffer.frameLength = 0
+                try input.read(into: buffer, frameCount: 4_096)
+                guard buffer.frameLength > 0 else { return false }
+            }
+            return true
+        } catch {
+            return false
         }
     }
 

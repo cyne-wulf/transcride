@@ -121,7 +121,7 @@ struct VaultSnapshot: Sendable {
     }
 }
 
-enum VaultError: LocalizedError {
+enum VaultError: LocalizedError, Equatable {
     case invalidName(String)
     case alreadyExists(String)
     case notFound(String)

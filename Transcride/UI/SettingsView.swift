@@ -10,7 +10,7 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             RecordingSettingsPane()
                 .tabItem { Label("Recording", systemImage: "mic") }
-            GlobalShortcutSettingsPane()
+            KeybindsSettingsPane()
                 .tabItem { Label("Keybinds", systemImage: "keyboard") }
             TranscriptionSettingsPane()
                 .tabItem { Label("Transcription", systemImage: "text.quote") }
@@ -19,6 +19,40 @@ struct SettingsView: View {
         }
         .frame(width: 540)
         .frame(minHeight: 320, maxHeight: 640)
+    }
+}
+
+/// Keybinds: the in-app remapper (every Transcride command) and the global
+/// system-wide recording controls, as two subviews of one pane.
+private struct KeybindsSettingsPane: View {
+    private enum Subpane: String, CaseIterable, Identifiable {
+        case appShortcuts = "App Shortcuts"
+        case globalControls = "Global Controls"
+
+        var id: String { rawValue }
+    }
+
+    @State private var subpane: Subpane = .appShortcuts
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Keybind scope", selection: $subpane) {
+                ForEach(Subpane.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+
+            switch subpane {
+            case .appShortcuts:
+                AppShortcutSettingsPane()
+            case .globalControls:
+                GlobalShortcutSettingsPane()
+            }
+        }
     }
 }
 
@@ -99,7 +133,7 @@ private struct RecordingSettingsPane: View {
                         Text(quality.label).tag(quality.rawValue)
                     }
                 }
-                Text("Applies to new recordings. Compressed is small and fine for speech; lossless keeps the microphone signal bit-perfect.")
+                Text("Every new recording starts with the selected microphone. When macOS permits it and meaningful sound is present, Transcride also adds audio playing on this Mac. Permission or Mac-audio failures never interrupt the microphone recording; notifications and other Mac sounds may be included. Extensions and replacement takes remain microphone-only. Compressed is small and well suited to speech; lossless avoids lossy encoding.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

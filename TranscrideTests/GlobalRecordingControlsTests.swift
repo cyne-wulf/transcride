@@ -16,12 +16,14 @@ struct GlobalRecordingControlsTests {
             elapsed: 1, pauseShortcut: "⌥P", stopShortcut: "⌥R"
         ).belongsToRecordingSession)
         #expect(GlobalRecordingPresentationState.saving(elapsed: 1).belongsToRecordingSession)
+        #expect(GlobalRecordingPresentationState.startingMicrophone.belongsToRecordingSession)
         #expect(GlobalRecordingPresentationState.saved(duration: 1, until: now).belongsToRecordingSession)
         #expect(GlobalRecordingPresentationState.saveFailed("Recoverable").belongsToRecordingSession)
         #expect(!GlobalRecordingPresentationState.ready(startShortcut: "⌥R").isCaptureActive)
         #expect(GlobalRecordingPresentationState.recording(
             elapsed: 1, pauseShortcut: "⌥P", stopShortcut: "⌥R"
         ).isCaptureActive)
+        #expect(GlobalRecordingPresentationState.startingMicrophone.isCaptureActive)
     }
 
     @Test func defaultsMatchProductChords() {
@@ -41,8 +43,8 @@ struct GlobalRecordingControlsTests {
     @Test func validationRejectsPlainShiftAndDuplicates() {
         let plain = GlobalShortcutChord(keyCode: 15, modifiers: [])
         let shifted = GlobalShortcutChord(keyCode: 15, modifiers: .shift)
-        #expect(plain.validation == .requiresNonShiftModifier)
-        #expect(shifted.validation == .requiresNonShiftModifier)
+        #expect(plain.globalCaptureValidation == .requiresNonShiftModifier)
+        #expect(shifted.globalCaptureValidation == .requiresNonShiftModifier)
 
         let preferences = GlobalShortcutPreferences.defaults
         #expect(preferences.validation(
@@ -134,6 +136,39 @@ struct GlobalRecordingControlsTests {
         ))
         #expect(gate.begin(.stopAndSave, state: .recording) == .perform)
         gate.finish(.stopAndSave)
+        #expect(gate.begin(
+            .pauseResume,
+            state: .pausedResumeUnavailable("Stop and save first.")
+        ) == .unavailable("Stop and save first."))
+        #expect(gate.begin(
+            .stopAndSave,
+            state: .pausedResumeUnavailable("Stop and save first.")
+        ) == .perform)
+        gate.finish(.stopAndSave)
+        #expect(gate.begin(
+            .startNew,
+            state: .startingMicrophone
+        ) == .unavailable("The microphone is still starting."))
+    }
+
+    @Test func recorderStartAdmissionRejectsEveryNonidleOwner() {
+        #expect(RecordingStartAdmissionPolicy.classify(
+            recorderIsIdle: true
+        ) == .begin)
+        #expect(RecordingStartAdmissionPolicy.classify(
+            recorderIsIdle: false
+        ) == .rejectAlreadyActive)
+    }
+
+    @Test func editRecordingStartGateSuppressesConcurrentLoser() {
+        var gate = RecordingWorkflowStartGate()
+        let first = gate.begin()
+        let overlapping = gate.begin()
+        #expect(first)
+        #expect(!overlapping)
+        gate.finish()
+        let afterFinish = gate.begin()
+        #expect(afterFinish)
     }
 
     @Test func presentationExpiresToReady() {

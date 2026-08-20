@@ -6,6 +6,7 @@ enum MenuBarRecorderPhase: Equatable {
     case idle
     case recording
     case paused
+    case startingMicrophone
     case finalizing
 }
 
@@ -13,7 +14,9 @@ enum MenuBarRecordingStatus: Equatable {
     case hidden
     case ready
     case recording
+    case recordingNeedsAttention(String)
     case paused
+    case startingMicrophone
     case saving
     case saved(duration: Double)
     case needsAttention(String)
@@ -28,8 +31,12 @@ enum MenuBarRecordingStatus: Equatable {
             .ready
         case .recording:
             .recording
+        case .recordingNeedsAttention(_, let message, _):
+            .recordingNeedsAttention(message)
         case .paused:
             .paused
+        case .startingMicrophone:
+            .startingMicrophone
         case .saving:
             .saving
         case .saved(let duration, _):
@@ -48,9 +55,10 @@ enum MenuBarRecordingStatus: Equatable {
         case .hidden, .ready: "captions.bubble"
         case .recording: "record.circle.fill"
         case .paused: "pause.circle.fill"
+        case .startingMicrophone: "mic.badge.plus"
         case .saving: "ellipsis.bubble"
         case .saved: "checkmark.bubble.fill"
-        case .needsAttention, .saveFailed, .unavailable:
+        case .recordingNeedsAttention, .needsAttention, .saveFailed, .unavailable:
             "exclamationmark.bubble.fill"
         }
     }
@@ -63,8 +71,12 @@ enum MenuBarRecordingStatus: Equatable {
             "Ready to Record"
         case .recording:
             "Recording · \(Self.duration(liveElapsed))"
+        case .recordingNeedsAttention(let message):
+            "Recording Needs Attention · \(Self.duration(liveElapsed)) — \(message)"
         case .paused:
             "Paused · \(Self.duration(liveElapsed))"
+        case .startingMicrophone:
+            "Starting Microphone…"
         case .saving:
             "Saving… · \(Self.duration(liveElapsed))"
         case .saved(let duration):
@@ -97,6 +109,7 @@ struct MenuBarControlSnapshot: Equatable {
     static func make(
         presentationState: GlobalRecordingPresentationState,
         recorderPhase: MenuBarRecorderPhase,
+        pauseResumeAvailable: Bool = true,
         preferences: GlobalShortcutPreferences,
         registrationStatuses: [GlobalShortcutAction: GlobalShortcutRegistrationStatus]
     ) -> Self {
@@ -106,12 +119,14 @@ struct MenuBarControlSnapshot: Equatable {
             primaryTitle = "Start Recording"
         case .recording, .paused:
             primaryTitle = "Stop & Save Recording"
+        case .startingMicrophone:
+            primaryTitle = "Starting Microphone…"
         case .finalizing:
             primaryTitle = "Saving Recording…"
         }
 
         let pauseTitle = recorderPhase == .paused
-            ? "Resume Recording"
+            ? (pauseResumeAvailable ? "Resume Recording" : "Resume Unavailable — Save First")
             : "Pause Recording"
         let primaryShortcut = shortcutDisplay(
             for: .toggleRecording,
@@ -127,9 +142,11 @@ struct MenuBarControlSnapshot: Equatable {
         return Self(
             status: MenuBarRecordingStatus(presentationState),
             primaryActionTitle: "\(primaryTitle)    \(primaryShortcut)",
-            primaryActionEnabled: recorderPhase != .finalizing,
+            primaryActionEnabled: recorderPhase != .finalizing
+                && recorderPhase != .startingMicrophone,
             pauseActionTitle: "\(pauseTitle)    \(pauseShortcut)",
-            pauseActionEnabled: recorderPhase == .recording || recorderPhase == .paused,
+            pauseActionEnabled: recorderPhase == .recording ||
+                (recorderPhase == .paused && pauseResumeAvailable),
             registrationSummary: registrationSummary(
                 preferences: preferences,
                 statuses: registrationStatuses
@@ -284,6 +301,7 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
             _ = model.globalShortcutPreferences
             _ = model.globalShortcutService.statuses
             _ = model.recorder.state
+            _ = model.isRecordingStartInFlight
             _ = model.globalRecordingTransientState
             _ = model.phase
             _ = model.recorder.alertMessage
@@ -308,6 +326,7 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
         let snapshot = MenuBarControlSnapshot.make(
             presentationState: model.menuBarRecordingPresentationState,
             recorderPhase: recorderPhase,
+            pauseResumeAvailable: model.recorder.state != .paused || model.recorder.canResume,
             preferences: preferences,
             registrationStatuses: model.globalShortcutService.statuses
         )
@@ -329,11 +348,13 @@ final class MenuBarItemController: NSObject, NSMenuDelegate {
     }
 
     private var recorderPhase: MenuBarRecorderPhase {
-        switch model.recorder.state {
+        if model.isRecordingStartInFlight { return .startingMicrophone }
+        return switch model.recorder.state {
         case .idle: .idle
         case .recording: .recording
         case .paused: .paused
-        case .finalizing: .finalizing
+        case .finalizing:
+            model.recorder.isStartingMicrophone ? .startingMicrophone : .finalizing
         }
     }
 

@@ -6,6 +6,8 @@ import SwiftUI
 struct AboutCommands: Commands {
     static let windowID = "about"
 
+    let model: AppModel
+
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -13,6 +15,7 @@ struct AboutCommands: Commands {
             Button("About Transcride") {
                 openWindow(id: Self.windowID)
             }
+            .keyboardShortcut(model.menuShortcut(for: .showAbout))
         }
     }
 }

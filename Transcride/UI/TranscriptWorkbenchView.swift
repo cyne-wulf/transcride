@@ -249,6 +249,17 @@ struct TranscriptWorkbenchView: View {
                 }
             case .renameSpeakers:
                 if hasSpeakers, !isEditing, !isSaving { showingSpeakerRename = true }
+            case .finishEditing(let completion):
+                if !isEditing {
+                    completion(true)
+                } else if isSaving {
+                    completion(false)
+                } else {
+                    Task {
+                        await saveAndFinishEditing()
+                        completion(!isEditing)
+                    }
+                }
             case nil:
                 break
             }
@@ -282,6 +293,21 @@ struct TranscriptWorkbenchView: View {
                 }
             }
         }
+    }
+
+    /// Tooltip for the visible Edit button, reflecting the live (remappable)
+    /// Edit / Save Note shortcut instead of a hardcoded ⌘E.
+    private var editButtonHelp: String {
+        for slot in AppShortcutSlot.allCases {
+            guard let chord = model.appShortcutPreferences.chord(for: .editOrSaveNote, slot: slot),
+                  model.appShortcutPreferences.status(
+                      for: .editOrSaveNote, slot: slot,
+                      globalChords: model.configuredGlobalChords
+                  ) == .active
+            else { continue }
+            return "Edit the note (\(chord.glyphDescription))"
+        }
+        return "Edit the note"
     }
 
     private var noteToolbar: some View {
@@ -324,6 +350,15 @@ struct TranscriptWorkbenchView: View {
                       systemImage: copyConfirmed ? "checkmark" : "doc.on.doc")
             }
             .help("Copy this layer without frontmatter")
+
+            if canEditNote {
+                Button {
+                    beginEditing()
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                .help(editButtonHelp)
+            }
 
             if original != nil, isForked || isEditing {
                 TranscriptLayerControl(

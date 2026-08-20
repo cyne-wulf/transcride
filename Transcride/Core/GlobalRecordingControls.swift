@@ -14,58 +14,9 @@ enum GlobalShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable
     }
 }
 
-struct GlobalShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
-    let rawValue: UInt32
-
-    static let command = Self(rawValue: 1 << 0)
-    static let option = Self(rawValue: 1 << 1)
-    static let control = Self(rawValue: 1 << 2)
-    static let shift = Self(rawValue: 1 << 3)
-
-    static let requiredNonShift: Self = [.command, .option, .control]
-}
-
-struct GlobalShortcutChord: Codable, Hashable, Sendable {
-    var keyCode: UInt32
-    var modifiers: GlobalShortcutModifiers
-
-    var validation: GlobalShortcutValidation {
-        if keyCode == UInt32.max { return .modifierOnly }
-        if modifiers.intersection(.requiredNonShift).isEmpty { return .requiresNonShiftModifier }
-        return .valid
-    }
-
-    var glyphDescription: String {
-        var result = ""
-        if modifiers.contains(.control) { result += "⌃" }
-        if modifiers.contains(.option) { result += "⌥" }
-        if modifiers.contains(.shift) { result += "⇧" }
-        if modifiers.contains(.command) { result += "⌘" }
-        result += Self.keyLabel(for: keyCode)
-        return result
-    }
-
-    private static func keyLabel(for keyCode: UInt32) -> String {
-        let labels: [UInt32: String] = [
-            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
-            8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
-            16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",
-            23: "5", 24: "=", 25: "9", 26: "7", 27: "−", 28: "8", 29: "0",
-            30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P", 37: "L",
-            38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/",
-            45: "N", 46: "M", 47: ".", 49: "Space", 50: "`", 51: "⌫",
-            53: "Esc", 76: "↩", 123: "←", 124: "→", 125: "↓", 126: "↑"
-        ]
-        return labels[keyCode] ?? "Key (keyCode)"
-    }
-
-    static let defaultToggleRecording = Self(
-        keyCode: 15, modifiers: [.option]
-    )
-    static let defaultPauseResume = Self(
-        keyCode: 35, modifiers: [.option]
-    )
-}
+// GlobalShortcutModifiers and GlobalShortcutChord are typealiases of the
+// shared ShortcutModifiers/ShortcutChord types in AppShortcuts.swift; the
+// persisted wire format is unchanged.
 
 enum GlobalShortcutValidation: Equatable, Sendable {
     case valid
@@ -191,7 +142,7 @@ struct GlobalShortcutPreferences: Codable, Equatable, Sendable {
         for action: GlobalShortcutAction,
         chord: GlobalShortcutChord
     ) -> GlobalShortcutValidation {
-        let base = chord.validation
+        let base = chord.globalCaptureValidation
         guard base == .valid else { return base }
         if let duplicate = bindings.first(where: { otherAction, otherChord in
             otherAction != action && otherChord == chord
@@ -225,6 +176,8 @@ enum RecordingCommandAvailabilityState: Equatable, Sendable {
     case idleUnavailable(String)
     case recording
     case paused
+    case pausedResumeUnavailable(String)
+    case startingMicrophone
     case finalizing
 }
 
@@ -245,12 +198,18 @@ struct RecordingCommandGate: Equatable, Sendable {
         let disposition: RecordingCommandDisposition = switch (command, state) {
         case (.startNew, .idleReady), (.pauseResume, .recording),
              (.pauseResume, .paused), (.stopAndSave, .recording),
-             (.stopAndSave, .paused):
+             (.stopAndSave, .paused), (.stopAndSave, .pausedResumeUnavailable):
             .perform
+        case (.pauseResume, .pausedResumeUnavailable(let reason)):
+            .unavailable(reason)
         case (_, .idleUnavailable(let reason)):
             .unavailable(reason)
-        case (.startNew, .recording), (.startNew, .paused):
+        case (.startNew, .recording), (.startNew, .paused),
+             (.startNew, .pausedResumeUnavailable):
             .unavailable("A recording is already active.")
+        case (.startNew, .startingMicrophone), (.pauseResume, .startingMicrophone),
+             (.stopAndSave, .startingMicrophone):
+            .unavailable("The microphone is still starting.")
         case (.startNew, .finalizing), (.pauseResume, .finalizing),
              (.stopAndSave, .finalizing):
             .unavailable("The current recording is still being saved.")
@@ -268,11 +227,42 @@ struct RecordingCommandGate: Equatable, Sendable {
     }
 }
 
+enum RecordingStartAdmissionDecision: Equatable, Sendable {
+    case begin
+    case rejectAlreadyActive
+}
+
+enum RecordingStartAdmissionPolicy {
+    static func classify(recorderIsIdle: Bool) -> RecordingStartAdmissionDecision {
+        recorderIsIdle ? .begin : .rejectAlreadyActive
+    }
+}
+
+/// Serializes entry-edit recording workflows across their permission and
+/// filesystem awaits. RecorderService remains the final ownership backstop;
+/// this gate prevents a losing UI task from mutating the winner's extension or
+/// replacement session in its error path.
+struct RecordingWorkflowStartGate: Equatable, Sendable {
+    private(set) var isInFlight = false
+
+    mutating func begin() -> Bool {
+        guard !isInFlight else { return false }
+        isInFlight = true
+        return true
+    }
+
+    mutating func finish() {
+        isInFlight = false
+    }
+}
+
 enum GlobalRecordingPresentationState: Equatable, Sendable {
     case hidden
     case ready(startShortcut: String)
     case recording(elapsed: Double, pauseShortcut: String, stopShortcut: String)
+    case recordingNeedsAttention(elapsed: Double, message: String, stopShortcut: String)
     case paused(elapsed: Double, pauseShortcut: String, stopShortcut: String)
+    case startingMicrophone
     case saving(elapsed: Double)
     case saved(duration: Double, until: Date)
     case needsAttention(String)
@@ -283,7 +273,8 @@ enum GlobalRecordingPresentationState: Equatable, Sendable {
     /// indicator only accompanies a recording session into the background.
     var belongsToRecordingSession: Bool {
         switch self {
-        case .recording, .paused, .saving, .saved, .saveFailed:
+        case .recording, .recordingNeedsAttention, .paused, .startingMicrophone,
+             .saving, .saved, .saveFailed:
             true
         case .hidden, .ready, .needsAttention, .unavailable:
             false
@@ -292,7 +283,7 @@ enum GlobalRecordingPresentationState: Equatable, Sendable {
 
     var isCaptureActive: Bool {
         switch self {
-        case .recording, .paused, .saving:
+        case .recording, .recordingNeedsAttention, .paused, .startingMicrophone, .saving:
             true
         case .hidden, .ready, .saved, .needsAttention, .saveFailed, .unavailable:
             false
