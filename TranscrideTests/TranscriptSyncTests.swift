@@ -222,6 +222,63 @@ struct TranscriptWordMapTests {
         #expect(map.wordIndex(atTime: .nan) == nil)
     }
 
+    @Test func overlappingSpansAdvanceAtTheLaterWordsStart() {
+        // WhisperKit's alignment routinely overlaps neighbours by 50-200 ms.
+        // The highlight follows the onsets, so it moves the moment the next
+        // word begins instead of waiting out the previous word's end.
+        let map = TranscriptWordMap(transcript: transcript([
+            ("one", 1.0, 1.6), ("two", 1.5, 2.0), ("three", 1.9, 2.4),
+        ]))
+        #expect(map.wordIndex(atTime: 1.45) == 0)
+        #expect(map.wordIndex(atTime: 1.5) == 1)
+        #expect(map.wordIndex(atTime: 1.55) == 1)
+        #expect(map.wordIndex(atTime: 1.89) == 1)
+        #expect(map.wordIndex(atTime: 1.9) == 2)
+        // Past the last word: still nearest-previous, unchanged.
+        #expect(map.wordIndex(atTime: 9) == 2)
+        #expect(map.wordIndex(atTime: 0.99) == nil)
+    }
+
+    @Test func nonMonotonicEndsKeepTheOrderedStartSearchAndAgreeWithTheFallback() {
+        // Nested spans (an end running backwards) no longer cost a transcript
+        // its binary search — only the starts have to be ordered. The gate is
+        // private, so what is asserted here is the observable half: the
+        // ordered-start map and a map forced onto the linear fallback answer
+        // identically over the words they share.
+        let nested: [(String, Double, Double)] = [
+            ("alpha", 1.0, 3.0), ("beta", 1.2, 1.5), ("gamma", 2.0, 2.2),
+        ]
+        let ordered = TranscriptWordMap(transcript: transcript(nested))
+        // A trailing word whose start runs backwards makes the starts
+        // non-monotonic, which is the fallback's only remaining trigger.
+        let unordered = TranscriptWordMap(transcript: transcript(nested + [("delta", 1.9, 2.1)]))
+
+        for time in [1.0, 1.1, 1.25, 1.5, 1.6, 1.75, 1.99] {
+            #expect(ordered.wordIndex(atTime: time) == unordered.wordIndex(atTime: time))
+        }
+        #expect(ordered.wordIndex(atTime: 1.1) == 0)
+        // "beta" ended at 1.5 but nothing later has begun, so it stays lit
+        // rather than reverting to the still-open "alpha" span.
+        #expect(ordered.wordIndex(atTime: 1.6) == 1)
+        #expect(ordered.wordIndex(atTime: 2.05) == 2)
+        #expect(ordered.wordIndex(atTime: 5) == 2)
+    }
+
+    @Test func zeroWidthPinnedRunNeverStealsTheHighlight() {
+        // The d1aeb9f repair pins an unusable word to the seam between its
+        // touching neighbours. That zero-width span must never win the lookup
+        // against the real word starting at the same instant.
+        let map = TranscriptWordMap(
+            transcript: transcript([("a", 9.0, 10.0), ("b", 5.0, 5.0), ("c", 10.0, 11.0)]),
+            duration: 12
+        )
+        #expect(map.spans[1].startTime == 10.0)
+        #expect(map.spans[1].endTime == 10.0)
+        #expect(map.wordIndex(atTime: 9.5) == 0)
+        #expect(map.wordIndex(atTime: 10.0) == 2)
+        #expect(map.wordIndex(atTime: 10.5) == 2)
+    }
+
     @Test func editedMatchCuesByOccurrenceDespiteShiftedOffsets() {
         let map = TranscriptWordMap(transcript: transcript([
             ("alpha", 0, 0.4), ("beta", 0.5, 0.9), ("gamma", 1.0, 1.4),

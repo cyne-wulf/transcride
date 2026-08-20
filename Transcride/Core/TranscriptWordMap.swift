@@ -219,7 +219,10 @@ struct TranscriptWordMap: Equatable, Sendable {
     /// Labels are separator text: they never resolve to a word and never
     /// highlight, but the view styles them and routes clicks to rename.
     let speakerLabels: [TranscriptRendering.SpeakerLabel]
-    private let hasMonotonicTimings: Bool
+    /// Time lookup binary-searches start times, so only the starts have to be
+    /// ordered. Engine spans routinely overlap (and occasionally nest), and an
+    /// end that runs backwards no longer costs a long transcript its fast path.
+    private let hasMonotonicStartTimes: Bool
 
     init(
         transcript: TranscriptOriginal,
@@ -246,8 +249,8 @@ struct TranscriptWordMap: Equatable, Sendable {
         }
         spans = builtSpans
         speakerLabels = rendering.labels
-        hasMonotonicTimings = zip(builtSpans, builtSpans.dropFirst()).allSatisfy {
-            $0.startTime <= $1.startTime && $0.endTime <= $1.endTime
+        hasMonotonicStartTimes = zip(builtSpans, builtSpans.dropFirst()).allSatisfy {
+            $0.startTime <= $1.startTime
         }
     }
 
@@ -321,45 +324,40 @@ struct TranscriptWordMap: Equatable, Sendable {
         return spans[lower - 1].wordIndex
     }
 
-    /// Word active at an audio time. Inter-word gaps and time after the final
-    /// word resolve to the nearest previous word; time before the first word
-    /// has no mapping. Ranges are `[start, end)`.
+    /// Word active at an audio time: the latest word whose span has started.
+    ///
+    /// Engine spans routinely overlap — WhisperKit's DTW alignment emits
+    /// 50–200 ms overlaps — and word onsets are the trustworthy half of engine
+    /// timing (TDT emits at onsets; DTW and Apple Speech run-splitting make
+    /// ends the mushy end). Advancing at each word's start therefore tracks the
+    /// voice, whereas waiting for the previous word's end to pass leaves the
+    /// highlight a beat behind for the length of every overlap.
+    ///
+    /// Inter-word gaps and time after the final word resolve to the nearest
+    /// previous word; time before the first word has no mapping.
     func wordIndex(atTime time: TimeInterval) -> Int? {
         guard time.isFinite else { return nil }
-        guard hasMonotonicTimings else {
+        guard hasMonotonicStartTimes else {
             var previous: Span?
             for span in spans {
-                if time < span.startTime { return previous?.wordIndex }
-                if time < span.endTime { return span.wordIndex }
+                if time < span.startTime { break }
                 previous = span
             }
             return previous?.wordIndex
         }
 
-        var startLower = 0
-        var startUpper = spans.count
-        while startLower < startUpper {
-            let middle = startLower + (startUpper - startLower) / 2
+        var lower = 0
+        var upper = spans.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
             if spans[middle].startTime <= time {
-                startLower = middle + 1
+                lower = middle + 1
             } else {
-                startUpper = middle
+                upper = middle
             }
         }
-        guard startLower > 0 else { return nil }
-
-        var endLower = 0
-        var endUpper = startLower
-        while endLower < endUpper {
-            let middle = endLower + (endUpper - endLower) / 2
-            if spans[middle].endTime <= time {
-                endLower = middle + 1
-            } else {
-                endUpper = middle
-            }
-        }
-        let index = endLower < startLower ? endLower : startLower - 1
-        return spans[index].wordIndex
+        guard lower > 0 else { return nil }
+        return spans[lower - 1].wordIndex
     }
 
     func startTime(forWordAt wordIndex: Int) -> TimeInterval? {

@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 import Observation
 
@@ -19,6 +20,20 @@ final class PlayerService {
     /// Incremented by user-driven seeks (word clicks, waveform scrubs and
     /// transport skips). Transcript views use it to resume auto-follow.
     private(set) var seekRevision = 0
+    /// Media time the listener is currently hearing: `currentTime` less the
+    /// output device's latency, which is a few milliseconds when wired and
+    /// hundreds over Bluetooth. Karaoke highlighting reads this; the transport
+    /// (scrubber, playhead label, seeks, ranges) stays on `currentTime`, which
+    /// remains the single source of truth for where playback *is*.
+    var highlightTime: Double {
+        PlaybackLatencyCompensation.audibleTime(
+            transport: currentTime,
+            anchor: playbackAnchor,
+            latency: outputLatency,
+            rate: Double(speed),
+            isPlaying: isPlaying
+        )
+    }
     var skipIntervalSeconds: Int {
         PlaybackSkipInterval.seconds(forClipDuration: duration)
     }
@@ -45,6 +60,28 @@ final class PlayerService {
     private var playbackRangeEndObserver: Any?
     private(set) var playbackRange: ClosedRange<Double>?
     private var silenceRouter = SilenceGapRouter()
+
+    /// Media time of the last seek or resume. Nothing before it has reached the
+    /// audio device yet, so latency compensation never rewinds past it.
+    private var playbackAnchor: Double = 0
+    private var outputLatency: TimeInterval = 0
+    // Per-tick bookkeeping: nothing observes it, and it must not add
+    // observation traffic at playback cadence.
+    @ObservationIgnored private var ticksSinceLatencyRefresh = 0
+    /// Set while a seek is in flight so pre-seek observer ticks are dropped.
+    @ObservationIgnored private var pendingSeekTarget: Double?
+    @ObservationIgnored private var pendingSeekGeneration = 0
+    @ObservationIgnored private var ticksSincePendingSeek = 0
+
+    /// An observed time this close to the pending target already reflects the
+    /// seek, so the suppression can end without waiting for the callback.
+    private static let seekSettleTolerance: Double = 0.05
+    /// Backstop for a seek whose completion never fires and whose target the
+    /// render clock never reaches: about a second of ticks, then resume.
+    private static let pendingSeekTickLimit = 30
+    /// Device latency changes when the user switches output (AirPods
+    /// connecting mid-playback), so re-read it roughly every two seconds.
+    private static let latencyRefreshTickInterval = 60
 
     init() {
         skipSilence = UserDefaults.standard.bool(forKey: Self.skipSilencePreferenceKey)
@@ -73,6 +110,7 @@ final class PlayerService {
         player.actionAtItemEnd = .pause
         self.player = player
         duration = knownDuration ?? 0
+        refreshOutputLatency()
 
         Task { [weak self] in
             if let loaded = try? await item.asset.load(.duration).seconds,
@@ -89,8 +127,9 @@ final class PlayerService {
             Task { @MainActor [weak self] in
                 guard let self, self.player === player else { return }
                 let seconds = time.seconds
-                guard seconds.isFinite else { return }
+                guard seconds.isFinite, self.acceptsObservedTime(seconds) else { return }
                 self.currentTime = seconds
+                self.refreshOutputLatencyIfDue()
                 if self.isPlaying, self.skipSilence,
                    self.silenceRouter.selectedSourceIsReady,
                    let destination = SilenceGap.skipDestination(
@@ -124,6 +163,9 @@ final class PlayerService {
         speed = 1.0
         silenceRouter.clear()
         playbackRange = nil
+        playbackAnchor = 0
+        clearPendingSeek()
+        ticksSinceLatencyRefresh = 0
     }
 
     // MARK: - Transport
@@ -140,9 +182,12 @@ final class PlayerService {
                 seekInternally(to: playbackRange.lowerBound)
             }
         } else if duration > 0, currentTime >= duration - 0.05 {
-            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
-            currentTime = 0
+            seekInternally(to: 0)
         }
+        // Nothing before the resume point is in the device's buffers yet, and
+        // the output may have changed while playback was stopped.
+        playbackAnchor = currentTime
+        refreshOutputLatency()
         player.rate = speed
         isPlaying = true
     }
@@ -234,10 +279,50 @@ final class PlayerService {
             clamped = wholeFileClamped
         }
         currentTime = clamped
+        playbackAnchor = clamped
+        pendingSeekTarget = clamped
+        ticksSincePendingSeek = 0
+        pendingSeekGeneration &+= 1
+        let generation = pendingSeekGeneration
         player.seek(
             to: CMTime(seconds: clamped, preferredTimescale: 600),
             toleranceBefore: .zero, toleranceAfter: .zero
-        )
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.pendingSeekGeneration == generation else { return }
+                self.clearPendingSeek()
+            }
+        }
+    }
+
+    /// Observer ticks produced before an in-flight seek lands still carry the
+    /// pre-seek position. Applying one snaps the karaoke highlight back to the
+    /// word we just left — the visible flash around a silence skip or a word
+    /// click — so they are dropped until the seek is known to have taken.
+    private func acceptsObservedTime(_ seconds: Double) -> Bool {
+        guard let target = pendingSeekTarget else { return true }
+        ticksSincePendingSeek += 1
+        guard abs(seconds - target) <= Self.seekSettleTolerance
+                || ticksSincePendingSeek >= Self.pendingSeekTickLimit else { return false }
+        clearPendingSeek()
+        return true
+    }
+
+    private func clearPendingSeek() {
+        pendingSeekTarget = nil
+        ticksSincePendingSeek = 0
+    }
+
+    private func refreshOutputLatencyIfDue() {
+        ticksSinceLatencyRefresh += 1
+        guard ticksSinceLatencyRefresh >= Self.latencyRefreshTickInterval else { return }
+        refreshOutputLatency()
+    }
+
+    private func refreshOutputLatency() {
+        ticksSinceLatencyRefresh = 0
+        let measured = Self.outputLatencySeconds()
+        if measured != outputLatency { outputLatency = measured }
     }
 
     func skip(_ delta: Double) {
@@ -295,5 +380,92 @@ final class PlayerService {
             player.removeTimeObserver(playbackRangeEndObserver)
         }
         playbackRangeEndObserver = nil
+    }
+
+    // MARK: - Output latency
+
+    /// Latency of the current default output device, in seconds. AVPlayer's
+    /// clock reports what has been handed to the device, so this is the only
+    /// signal available for how long the device holds it before it is heard.
+    /// Every read is best-effort: any failure returns 0, which is exactly the
+    /// uncompensated behavior this replaces.
+    private static func outputLatencySeconds() -> TimeInterval {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        )
+        guard status == noErr, deviceID != AudioDeviceID(kAudioObjectUnknown) else { return 0 }
+
+        var sampleRate = Float64(0)
+        var rateSize = UInt32(MemoryLayout<Float64>.size)
+        var rateAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID, &rateAddress, 0, nil, &rateSize, &sampleRate
+        ) == noErr, sampleRate > 0 else { return 0 }
+
+        let frames = frameCount(deviceID, kAudioDevicePropertyLatency)
+            + frameCount(deviceID, kAudioDevicePropertySafetyOffset)
+            + frameCount(deviceID, kAudioDevicePropertyBufferFrameSize)
+            + outputStreamLatencyFrames(deviceID)
+        return Double(frames) / sampleRate
+    }
+
+    private static func frameCount(
+        _ deviceID: AudioDeviceID, _ selector: AudioObjectPropertySelector
+    ) -> UInt32 {
+        var value = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID, &address, 0, nil, &size, &value
+        ) == noErr else { return 0 }
+        return value
+    }
+
+    /// Some devices report their real transport delay on the stream rather than
+    /// the device, so the first output stream's latency is added too.
+    private static func outputStreamLatencyFrames(_ deviceID: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size = UInt32(0)
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioStreamID>.size) else { return 0 }
+        var streams = [AudioStreamID](
+            repeating: AudioStreamID(kAudioObjectUnknown),
+            count: Int(size) / MemoryLayout<AudioStreamID>.size
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID, &address, 0, nil, &size, &streams
+        ) == noErr, let stream = streams.first,
+              stream != AudioStreamID(kAudioObjectUnknown) else { return 0 }
+
+        var value = UInt32(0)
+        var valueSize = UInt32(MemoryLayout<UInt32>.size)
+        var latencyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioStreamPropertyLatency,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            stream, &latencyAddress, 0, nil, &valueSize, &value
+        ) == noErr else { return 0 }
+        return value
     }
 }

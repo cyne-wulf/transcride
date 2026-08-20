@@ -419,6 +419,22 @@ struct TranscriptWorkbenchView: View {
         .padding(.horizontal, 12)
     }
 
+    /// Trim, Compress and Replace mark the entry's alignment stale: the word
+    /// timings still describe the audio timeline that was edited away, so the
+    /// passive highlight is switched off until an authoritative transcription
+    /// lands. Clicks, speaker labels and search cues deliberately stay live.
+    ///
+    /// Two deliberate details. The raw scanned availability is read instead of
+    /// `AppModel.speechTranscriptAvailability(for:)`, whose `.regenerating`
+    /// answer masks staleness for queued entries — which is precisely the
+    /// post-edit window this has to catch. And a pending extension transcript
+    /// also reports `.stale` even though the original portion's timings are
+    /// still true, so those entries keep highlighting (already bounded by
+    /// `knownTranscriptDuration`).
+    private var karaokeTimingIsStale: Bool {
+        entry.speechTranscriptAvailability == .stale && extensionState == nil
+    }
+
     @ViewBuilder
     private var layerContent: some View {
         switch viewedLayer {
@@ -428,6 +444,7 @@ struct TranscriptWorkbenchView: View {
                     entryHasAudio: entry.hasAudio,
                     map: wordMap,
                     knownTranscriptDuration: extensionState?.knownTranscriptDuration,
+                    timingIsStale: karaokeTimingIsStale,
                     navigationHighlightRange: activeNavigationRange,
                     followingPaused: $followingPaused,
                     onWordClick: { wordIndex in
@@ -453,6 +470,7 @@ struct TranscriptWorkbenchView: View {
                 EditedTranscriptPlaybackView(
                     entryHasAudio: entry.hasAudio,
                     wordMap: wordMap,
+                    timingIsStale: karaokeTimingIsStale,
                     playbackMap: editedPlaybackMap,
                     text: body,
                     isEditable: isEditing && !isSaving,
@@ -763,18 +781,19 @@ private struct OriginalTranscriptPlaybackView: View {
     let entryHasAudio: Bool
     let map: TranscriptWordMap
     let knownTranscriptDuration: TimeInterval?
+    let timingIsStale: Bool
     let navigationHighlightRange: NSRange?
     @Binding var followingPaused: Bool
     let onWordClick: (Int) -> Void
     let onSpeakerLabelClick: (String) -> Void
 
     private var currentWordIndex: Int? {
-        guard entryHasAudio, model.player.url != nil else { return nil }
-        if let knownTranscriptDuration,
-           model.player.currentTime > knownTranscriptDuration {
+        guard entryHasAudio, !timingIsStale, model.player.url != nil else { return nil }
+        let time = model.player.highlightTime
+        if let knownTranscriptDuration, time > knownTranscriptDuration {
             return nil
         }
-        return map.wordIndex(atTime: model.player.currentTime)
+        return map.wordIndex(atTime: time)
     }
 
     var body: some View {
@@ -1081,6 +1100,7 @@ private struct EditedTranscriptPlaybackView: View {
 
     let entryHasAudio: Bool
     let wordMap: TranscriptWordMap?
+    let timingIsStale: Bool
     let playbackMap: EditedTranscriptPlaybackMap?
     let text: String
     let isEditable: Bool
@@ -1089,8 +1109,8 @@ private struct EditedTranscriptPlaybackView: View {
     let onUserEdit: (String) -> Void
 
     private var currentWordIndex: Int? {
-        guard entryHasAudio, model.player.url != nil else { return nil }
-        return wordMap?.wordIndex(atTime: model.player.currentTime)
+        guard entryHasAudio, !timingIsStale, model.player.url != nil else { return nil }
+        return wordMap?.wordIndex(atTime: model.player.highlightTime)
     }
 
     private var highlightRange: NSRange? {
@@ -1107,7 +1127,7 @@ private struct EditedTranscriptPlaybackView: View {
             navigationHighlightRange: navigationHighlightRange,
             boundaryStartTime: playbackMap?.boundaryStartTime,
             boundaryCueRange: playbackMap?.cueRange.map(NSRange.init),
-            playbackTime: model.player.currentTime,
+            playbackTime: model.player.highlightTime,
             isPlaying: model.player.isPlaying,
             seekRevision: model.player.seekRevision,
             onBeginEditing: onBeginEditing,
