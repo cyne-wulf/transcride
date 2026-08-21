@@ -354,8 +354,9 @@ actor VaultService {
     }
 
     /// Saves the user-edited summary body. Deliberately no transcript
-    /// hand-edited semantics and no search indexing — the summary is a
-    /// derived artifact with its own `hand_edited` flag.
+    /// hand-edited semantics — the summary is a derived artifact with its own
+    /// `hand_edited` flag — but it is a labeled search layer, so writes sync
+    /// the index like transcript saves do.
     func saveSummaryBody(_ body: String, atEntryPath relPath: RelativePath) throws -> SummaryDocument {
         let entryURL = rootURL.appendingRelativePath(relPath)
         let url = SummaryDocument.url(inEntry: entryURL)
@@ -364,6 +365,7 @@ actor VaultService {
         }
         summary.replaceBody(body, markHandEdited: true)
         try AtomicFile.write(summary.serialized(), to: url)
+        synchronizeSearchEntry(at: relPath)
         return summary
     }
 
@@ -374,6 +376,7 @@ actor VaultService {
         let url = SummaryDocument.url(inEntry: entryURL)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         try FileManager.default.removeItem(at: url)
+        synchronizeSearchEntry(at: relPath)
     }
 
     /// Installs a freshly generated summary. The atomic write is the
@@ -382,6 +385,7 @@ actor VaultService {
     func writeGeneratedSummary(_ summary: SummaryDocument, atEntryPath relPath: RelativePath) throws {
         let entryURL = rootURL.appendingRelativePath(relPath)
         try AtomicFile.write(summary.serialized(), to: SummaryDocument.url(inEntry: entryURL))
+        synchronizeSearchEntry(at: relPath)
     }
 
     /// Loads the entry's `waveform.json`, generating (and caching) it from the

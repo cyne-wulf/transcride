@@ -229,7 +229,7 @@ struct VaultSearchView: View {
                 ContentUnavailableView(
                     "Search the Vault",
                     systemImage: "text.magnifyingglass",
-                    description: Text("Original transcripts and truly edited Markdown layers are searchable.")
+                    description: Text("Original transcripts, truly edited Markdown layers, and AI summaries are searchable.")
                 )
             } else if let error = model.vaultSearchError {
                 ContentUnavailableView {
@@ -305,14 +305,14 @@ struct VaultSearchView: View {
 
     private func resultRow(_ hit: SearchHit) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Text(hit.matchKind == .title
-                 ? "Title"
-                 : (hit.layer == .edited ? "Edited" : "Original"))
+            Text(layerLabel(for: hit))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(hit.matchKind == .title
                                  ? AnyShapeStyle(.secondary)
                                  : hit.layer == .edited
                                  ? AnyShapeStyle(.tint)
+                                 : hit.layer == .summary
+                                 ? AnyShapeStyle(.purple)
                                  : AnyShapeStyle(.secondary))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
@@ -331,6 +331,15 @@ struct VaultSearchView: View {
         }
         .padding(.vertical, 7)
         .contentShape(Rectangle())
+    }
+
+    private func layerLabel(for hit: SearchHit) -> String {
+        if hit.matchKind == .title { return "Title" }
+        switch hit.layer {
+        case .edited: return "Edited"
+        case .original: return "Original"
+        case .summary: return "Summary"
+        }
     }
 
     private func highlightedSnippet(_ hit: SearchHit) -> Text {

@@ -157,6 +157,7 @@ final class AppModel {
 
     enum WorkbenchActionRequest {
         case editOrSave, copyAsMarkdown, toggleLayer, renameSpeakers
+        case showSummary, generateSummary
         /// Flush pending autosaves and leave edit mode, then report whether
         /// the note is safely saved (true when it was not being edited).
         /// Used by Move Note… so a move never races an unsaved edit.
@@ -172,7 +173,17 @@ final class AppModel {
         var isForked = false
         var hasSpeakers = false
         var viewedLayerIsOriginal = true
+        var showingSummary = false
     }
+
+    /// Which layer an entry was last viewed on, remembered per entry for the
+    /// app session only (PRD-9). Keyed by entry path and repointed on rename
+    /// alongside the other per-path state.
+    enum NoteLayerSelection {
+        case original, edited, summary
+    }
+
+    var sessionNoteLayers: [RelativePath: NoteLayerSelection] = [:]
 
     private(set) var entryActionRequest: EntryActionRequest?
     private(set) var entryActionRevision = 0
@@ -1007,6 +1018,7 @@ final class AppModel {
                 self.transcriptionQueue?.repointItems(from: entry.relativePath, to: newPath)
                 self.repointRecoveryArtifacts(from: entry.relativePath, to: newPath)
                 self.summaryController.repointItems(from: entry.relativePath, to: newPath)
+                self.repointSessionNoteLayer(from: entry.relativePath, to: newPath)
                 if self.selectedEntryID == entry.relativePath {
                     self.selectedEntryID = newPath
                 }
@@ -1025,6 +1037,7 @@ final class AppModel {
                 self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
                 self.repointRecoveryArtifacts(from: relPath, to: newPath)
                 self.summaryController.repointItems(from: relPath, to: newPath)
+                self.repointSessionNoteLayer(from: relPath, to: newPath)
                 if let selected = self.selectedEntryID,
                    selected == relPath || selected.hasPrefix(relPath + "/") {
                     self.selectedEntryID = newPath + selected.dropFirst(relPath.count)
@@ -1163,6 +1176,12 @@ final class AppModel {
             ? TranscriptNavigationRequest(hit: hit)
             : nil
         isVaultSearchPresented = false
+    }
+
+    private func repointSessionNoteLayer(from oldPath: RelativePath, to newPath: RelativePath) {
+        guard oldPath != newPath,
+              let selection = sessionNoteLayers.removeValue(forKey: oldPath) else { return }
+        sessionNoteLayers[newPath] = selection
     }
 
     func requestInNoteFind(withReplace: Bool = false) {
@@ -1364,6 +1383,8 @@ final class AppModel {
             return workbenchUIState.canEditNote || workbenchUIState.isEditing
         case .copyAsMarkdown:
             return workbenchUIState.hasContent
+        case .showSummary, .generateSummary:
+            return workbenchUIState.hasContent
         case .toggleLayer:
             return workbenchUIState.isForked && !workbenchUIState.isEditing
         case .retranscribe:
@@ -1522,6 +1543,16 @@ final class AppModel {
         case .toggleLayer:
             guard isAppCommandEnabled(action) else { return false }
             requestWorkbenchAction(.toggleLayer)
+            return true
+
+        case .showSummary:
+            guard isAppCommandEnabled(action) else { return false }
+            requestWorkbenchAction(.showSummary)
+            return true
+
+        case .generateSummary:
+            guard isAppCommandEnabled(action) else { return false }
+            requestWorkbenchAction(.generateSummary)
             return true
 
         case .retranscribe:
@@ -3111,6 +3142,9 @@ final class AppModel {
                     self.summaryController.repointItems(
                         from: originalPath, to: outcome.entryRelativePath
                     )
+                    self.repointSessionNoteLayer(
+                        from: originalPath, to: outcome.entryRelativePath
+                    )
                     if self.selectedEntryID == originalPath {
                         self.selectedEntryID = outcome.entryRelativePath
                     }
@@ -3601,6 +3635,7 @@ final class AppModel {
                 self.transcriptionQueue?.repointItems(from: path, to: newPath)
                 self.repointRecoveryArtifacts(from: path, to: newPath)
                 self.summaryController.repointItems(from: path, to: newPath)
+                self.repointSessionNoteLayer(from: path, to: newPath)
                 if self.selectedEntryID == path {
                     self.selectedEntryID = newPath
                 }

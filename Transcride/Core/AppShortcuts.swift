@@ -150,6 +150,8 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
     case editOrSaveNote
     case copyAsMarkdown
     case toggleLayer
+    case showSummary
+    case generateSummary
     case retranscribe
     case trimAudio
     case replaceAudio
@@ -212,7 +214,8 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
             .recordingFile
         case .toggleFavorite, .renameEntry, .duplicateEntry, .moveNote,
              .moveToRecentlyDeleted, .extendRecording, .editOrSaveNote,
-             .copyAsMarkdown, .toggleLayer, .retranscribe, .trimAudio,
+             .copyAsMarkdown, .toggleLayer, .showSummary, .generateSummary,
+             .retranscribe, .trimAudio,
              .replaceAudio, .compressAudio, .restoreOriginalAudio,
              .renameSpeakers, .deleteAudio, .showInfo, .revealInFinder,
              .exportMarkdown, .shareAudio, .openInObsidian:
@@ -250,6 +253,8 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
         case .editOrSaveNote: "Edit / Save Note"
         case .copyAsMarkdown: "Copy as Markdown"
         case .toggleLayer: "Toggle Original / Edited Layer"
+        case .showSummary: "Show Summary"
+        case .generateSummary: "Generate Summary…"
         case .retranscribe: "Retranscribe…"
         case .trimAudio: "Trim Audio…"
         case .replaceAudio: "Replace Audio"
@@ -431,7 +436,8 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
             AppShortcutBinding(primary: .init(keyCode: 125, modifiers: [.option]))
         case .showKeyboardShortcuts:
             AppShortcutBinding(primary: .init(keyCode: 44, modifiers: [.command, .shift]))
-        case .renameEntry, .duplicateEntry, .toggleLayer, .retranscribe,
+        case .renameEntry, .duplicateEntry, .toggleLayer, .showSummary,
+             .generateSummary, .retranscribe,
              .compressAudio, .restoreOriginalAudio, .renameSpeakers,
              .deleteAudio, .revealInFinder, .shareAudio, .openInObsidian,
              .sortByDate, .sortByDuration, .sortByTitle, .sortByRecentlyEdited,

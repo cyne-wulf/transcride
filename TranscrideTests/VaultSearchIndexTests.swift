@@ -208,6 +208,95 @@ struct VaultSearchIndexTests {
         #expect(try index?.search("recover edited").first?.layer == .edited)
     }
 
+    // MARK: - Summary layer (PRD-9)
+
+    private func writeSummary(_ body: String, inEntry entryURL: URL) throws {
+        let summary = SummaryDocument.make(
+            body: body,
+            modelID: "test-model",
+            sourceLayer: .original,
+            fingerprint: "fp",
+            generated: Date(timeIntervalSince1970: 0)
+        )
+        try AtomicFile.write(summary.serialized(), to: SummaryDocument.url(inEntry: entryURL))
+    }
+
+    @Test func summarySidecarIndexesAsItsOwnLabeledLayer() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let path = try createEntry(
+            in: f.vault, suffix: "20", title: "Standup",
+            edited: "everyone shared a status", original: "everyone shared a status"
+        )
+        try writeSummary(
+            "\n## Summary\n\nA zebrawood discussion.\n",
+            inEntry: f.vault.appendingRelativePath(path)
+        )
+
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+        let hits = try index.search("zebrawood")
+        #expect(hits.count == 1)
+        #expect(hits.first?.layer == .summary)
+        #expect(hits.first?.entryPath == path)
+        #expect(hits.first?.matchKind == .content)
+    }
+
+    @Test func summaryHitsRankAfterTranscriptLayers() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let path = try createEntry(
+            in: f.vault, suffix: "21", title: "Ranked",
+            edited: "the quokka appears edited", original: "the quokka appears original"
+        )
+        try writeSummary("\nA quokka summary.\n", inEntry: f.vault.appendingRelativePath(path))
+
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+        let layers = try index.search("quokka").map(\.layer)
+        #expect(layers == [.edited, .original, .summary])
+    }
+
+    @Test func summaryEditsAndDeletionReindexTheEntry() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let path = try createEntry(
+            in: f.vault, suffix: "22", title: "Lifecycle",
+            edited: "plain body", original: "plain body"
+        )
+        let entryURL = f.vault.appendingRelativePath(path)
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+        #expect(try index.search("axolotl").isEmpty)
+
+        try writeSummary("\nAn axolotl summary.\n", inEntry: entryURL)
+        try index.upsertEntry(at: path)
+        #expect(try index.search("axolotl").first?.layer == .summary)
+
+        try writeSummary("\nA capybara summary.\n", inEntry: entryURL)
+        try index.upsertEntry(at: path)
+        #expect(try index.search("axolotl").isEmpty)
+        #expect(try index.search("capybara").first?.layer == .summary)
+
+        try FileManager.default.removeItem(at: SummaryDocument.url(inEntry: entryURL))
+        try index.upsertEntry(at: path)
+        #expect(try index.search("capybara").isEmpty)
+    }
+
+    /// The entry fingerprint covers the summary sidecar, so a summary written
+    /// while the index was closed is picked up by reconcile() on next launch.
+    @Test func reconcilePicksUpASummaryWrittenWhileTheIndexWasCold() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let path = try createEntry(
+            in: f.vault, suffix: "23", title: "Cold",
+            edited: "cold body", original: "cold body"
+        )
+        let index = try VaultSearchIndex(vaultRoot: f.vault, databaseURL: f.database)
+        #expect(try index.search("pangolin").isEmpty)
+
+        try writeSummary("\nA pangolin summary.\n", inEntry: f.vault.appendingRelativePath(path))
+        try index.reconcile()
+        #expect(try index.search("pangolin").first?.layer == .summary)
+    }
+
     // MARK: - Reconcile
 
     /// A filesystem modification date is nanosecond-precise and does not

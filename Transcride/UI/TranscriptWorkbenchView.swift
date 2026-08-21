@@ -152,14 +152,18 @@ struct TranscriptWorkbenchView: View {
             isEditing: isEditing,
             isForked: isForked && original != nil,
             hasSpeakers: hasSpeakers,
-            viewedLayerIsOriginal: viewedLayer == .original
+            viewedLayerIsOriginal: viewedLayer == .original,
+            showingSummary: showingSummary
         )
     }
 
+    /// The transcript layer on screen. Since the three-segment selector,
+    /// the Edited segment is selectable on an unedited entry too: it shows
+    /// the generated Markdown projection (click-to-edit), and only a saved
+    /// change actually forks the note.
     private var viewedLayer: Layer {
         if original == nil { return .edited }
         if isEditing { return .edited }
-        if !isForked { return .original }
         return activeLayer
     }
 
@@ -188,10 +192,24 @@ struct TranscriptWorkbenchView: View {
                 // only a genuine selection change resets the summary UI.
                 if !EntryIdentity.sameEntry(oldPath, newPath) {
                     resetSummaryUI()
+                    applyRememberedLayerSelection()
                 }
             }
             .onDisappear {
                 flushSummarySaveOnDisappear()
+            }
+            // VoiceOver progress announcements (PRD-9): generation start,
+            // failure, and completion. `summaryRevision` bumps only on a
+            // successful generation, so cancellation stays silent.
+            .onChange(of: summaryPhase.isGenerating) { _, generating in
+                if generating {
+                    AccessibilityNotification.Announcement("Generating summary").post()
+                } else if case .failed = summaryPhase {
+                    AccessibilityNotification.Announcement("Summary generation failed").post()
+                }
+            }
+            .onChange(of: model.summaryController.summaryRevision) { _, _ in
+                AccessibilityNotification.Announcement("Summary ready").post()
             }
             .confirmationDialog(
                 "Replace your edited summary?",
@@ -325,7 +343,7 @@ struct TranscriptWorkbenchView: View {
             cueSearchNavigationIfPossible()
         }
         .onAppear {
-            if isForked { activeLayer = .edited }
+            applyRememberedLayerSelection()
         }
         // Mirror this view's capabilities up so menu-bar items enable and
         // retitle truthfully; the state itself stays view-local.
@@ -348,6 +366,10 @@ struct TranscriptWorkbenchView: View {
                 }
             case .renameSpeakers:
                 if hasSpeakers, !isEditing, !isSaving { showingSpeakerRename = true }
+            case .showSummary:
+                if !isSaving { toggleSummary() }
+            case .generateSummary:
+                if !isSaving { handleGenerateSummaryCommand() }
             case .finishEditing(let completion):
                 if !isEditing {
                     completion(true)
@@ -496,19 +518,6 @@ struct TranscriptWorkbenchView: View {
             }
             .help("Copy this layer without frontmatter")
 
-            if document != nil || original != nil {
-                Button {
-                    toggleSummary()
-                } label: {
-                    Label(showingSummary ? "Transcript" : "Summary",
-                          systemImage: showingSummary ? "text.quote" : "sparkles")
-                }
-                .disabled(isEditing || isSaving)
-                .help(showingSummary
-                      ? "Back to the transcript"
-                      : "Show the AI summary of this recording")
-            }
-
             if canEditNote {
                 Button {
                     beginEditing()
@@ -518,41 +527,88 @@ struct TranscriptWorkbenchView: View {
                 .help(editButtonHelp)
             }
 
-            if !showingSummary, original != nil, isForked || isEditing {
-                if isForked {
-                    Button {
-                        showingDiscardEditsConfirm = true
-                    } label: {
-                        Label("Discard Edits", systemImage: "trash")
-                    }
-                    .disabled(isSaving)
-                    .help("Delete the edited copy and return to the original transcript")
+            if !showingSummary, original != nil, isForked {
+                Button {
+                    showingDiscardEditsConfirm = true
+                } label: {
+                    Label("Discard Edits", systemImage: "trash")
                 }
+                .disabled(isSaving)
+                .help("Delete the edited copy and return to the original transcript")
+            }
+
+            if document != nil || original != nil {
                 TranscriptLayerControl(
                     layer: activeLayer,
                     isEditing: isEditing,
                     isSaving: isSaving,
-                    onSelectOriginal: {
-                        if isEditing {
-                            Task { await saveAndFinishEditing(returningTo: .original) }
-                        } else {
-                            activeLayer = .original
-                        }
-                    },
-                    onSelectEdited: { activeLayer = .edited },
-                    onSave: { Task { await saveAndFinishEditing() } }
+                    summarySelected: showingSummary,
+                    onSelectOriginal: { selectTranscriptLayer(.original) },
+                    onSelectEdited: { selectTranscriptLayer(.edited) },
+                    onSave: { Task { await saveAndFinishEditing() } },
+                    onSelectSummary: { selectSummaryLayer() }
                 )
                 .fixedSize()
                 .help(isEditing
                       ? "Save to finish editing — or click Original to finish and view the original"
-                      : "Switch between the immutable engine output and your edited note")
-            } else if isEditing {
-                Button("Save") {
-                    Task { await saveAndFinishEditing() }
-                }
-                .disabled(isSaving)
-                .help("Save changes and finish editing")
+                      : "Switch between the engine output, your edited note, and the AI summary")
             }
+        }
+    }
+
+    /// Selector action for the two transcript segments. Leaving the Summary
+    /// layer flushes any pending summary edit first; selecting Original while
+    /// editing keeps the long-standing save-and-land-on-original behavior.
+    private func selectTranscriptLayer(_ layer: Layer) {
+        leaveSummaryLayer()
+        if isEditing {
+            if layer == .original {
+                Task { await saveAndFinishEditing(returningTo: .original) }
+            }
+            // Selecting Edited while editing is the Save segment's job.
+        } else {
+            activeLayer = layer
+        }
+        rememberLayerSelection(layer == .original ? .original : .edited)
+    }
+
+    private func selectSummaryLayer() {
+        guard !showingSummary else { return }
+        if isEditing {
+            Task {
+                await saveAndFinishEditing()
+                guard !isEditing else { return }
+                showingSummary = true
+                rememberLayerSelection(.summary)
+            }
+            return
+        }
+        showingSummary = true
+        rememberLayerSelection(.summary)
+    }
+
+    private func leaveSummaryLayer() {
+        guard showingSummary else { return }
+        finishSummaryEditing()
+        showingSummary = false
+    }
+
+    /// Session-scoped, per-entry layer memory (PRD-9): reopening an entry
+    /// restores the layer it was last viewed on, without persisting anything.
+    private func rememberLayerSelection(_ selection: AppModel.NoteLayerSelection) {
+        model.sessionNoteLayers[entry.relativePath] = selection
+    }
+
+    private func applyRememberedLayerSelection() {
+        switch model.sessionNoteLayers[entry.relativePath] {
+        case .summary:
+            showingSummary = true
+        case .edited:
+            activeLayer = .edited
+        case .original:
+            activeLayer = .original
+        case nil:
+            if isForked { activeLayer = .edited }
         }
     }
 
@@ -711,10 +767,12 @@ struct TranscriptWorkbenchView: View {
             VStack(spacing: 12) {
                 ProgressView(value: fraction)
                     .frame(maxWidth: 240)
+                    .accessibilityLabel("Summary generation progress")
                 Text(total > 1 ? "Summarizing… (part \(part) of \(total))" : "Summarizing…")
                 Button("Cancel") {
                     model.summaryController.cancel(for: entry.relativePath)
                 }
+                .accessibilityLabel("Cancel summary generation")
             }
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -847,17 +905,51 @@ struct TranscriptWorkbenchView: View {
         }
     }
 
+    /// Menu "Show Summary" / "Show Transcript". Unlike the MVP toolbar
+    /// button, selecting Summary never auto-generates: the layer is
+    /// selectable before generation and shows the empty state with an
+    /// explicit Generate Summary action (PRD-9).
     private func toggleSummary() {
         if showingSummary {
-            finishSummaryEditing()
-            showingSummary = false
+            leaveSummaryLayer()
+            rememberLayerSelection(viewedLayer == .original ? .original : .edited)
         } else {
+            selectSummaryLayer()
+        }
+    }
+
+    /// Menu "Generate Summary…": shows the Summary layer and starts (or
+    /// restarts) generation, honoring the hand-edit confirmation. With no
+    /// model downloaded it lands on the empty state, which owns download.
+    private func handleGenerateSummaryCommand() {
+        guard document != nil || original != nil else { return }
+        if isEditing {
+            Task {
+                await saveAndFinishEditing()
+                guard !isEditing else { return }
+                handleGenerateSummaryCommand()
+            }
+            return
+        }
+        if !showingSummary {
             showingSummary = true
-            // The button's promise is "press → summary": generate right away
-            // when the model is ready and no summary exists yet. The other
-            // states land in the empty-state pane with explicit actions.
-            if summaryDocument == nil, summaryPhase == .idle,
-               model.modelManager.state(forModelInfoID: preferredSummaryModel.id).isDownloaded {
+            rememberLayerSelection(.summary)
+        }
+        switch summaryPhase {
+        case .generating:
+            return
+        case .failed:
+            model.summaryController.clearFailure(for: entry.relativePath)
+            startSummaryGeneration()
+        case .idle:
+            guard model.modelManager.state(
+                forModelInfoID: preferredSummaryModel.id
+            ).isDownloaded else { return }
+            if summaryDocument?.handEdited == true {
+                showingRegenerateConfirm = true
+            } else if summaryDocument != nil {
+                regenerateSummary()
+            } else {
                 startSummaryGeneration()
             }
         }
@@ -1228,14 +1320,23 @@ struct TranscriptWorkbenchView: View {
         findQuery = ""
         replaceQuery = ""
         findMatches = []
-        searchNavigationRange = NSRange(request.hit.matchRange)
         switch request.hit.layer {
         case .original:
+            searchNavigationRange = NSRange(request.hit.matchRange)
+            leaveSummaryLayer()
             activeLayer = .original
             isEditing = false
         case .edited:
+            searchNavigationRange = NSRange(request.hit.matchRange)
+            leaveSummaryLayer()
             activeLayer = .edited
             isEditing = false
+        case .summary:
+            // A summary hit opens the Summary layer and never cues audio —
+            // its text has no time coordinates.
+            searchNavigationRange = nil
+            isEditingSummary = false
+            showingSummary = true
         }
         cueSearchNavigationIfPossible()
     }
@@ -1254,6 +1355,8 @@ struct TranscriptWorkbenchView: View {
         case .edited:
             guard let body = document?.body else { return }
             time = map.startTime(forMatch: request.hit.matchRange, inEditedBody: body)
+        case .summary:
+            return
         }
         guard let time else { return }
         model.player.pause()
@@ -1285,34 +1388,49 @@ struct TranscriptWorkbenchView: View {
     }
 }
 
-/// A two-segment layer control whose Edited segment becomes the commit action
-/// while the Markdown surface owns text focus; Original then commits too and
-/// lands on the original layer. A custom control is used because a segmented
-/// Picker does not reliably invoke an already-selected segment.
+/// The three-segment Original / Edited / Summary layer control. The Edited
+/// segment becomes the commit action while the Markdown surface owns text
+/// focus; Original then commits too and lands on the original layer. A custom
+/// control is used because a segmented Picker does not reliably invoke an
+/// already-selected segment.
 private struct TranscriptLayerControl: View {
     let layer: TranscriptWorkbenchView.Layer
     let isEditing: Bool
     let isSaving: Bool
+    let summarySelected: Bool
     let onSelectOriginal: () -> Void
     let onSelectEdited: () -> Void
     let onSave: () -> Void
+    let onSelectSummary: () -> Void
 
     var body: some View {
         HStack(spacing: 1) {
-            segment("Original", selected: !isEditing && layer == .original) {
+            segment(
+                "Original",
+                selected: !summarySelected && !isEditing && layer == .original
+            ) {
                 onSelectOriginal()
             }
             .disabled(isSaving)
 
-            segment(isEditing ? "Save" : "Edited", selected: isEditing || layer == .edited) {
+            segment(
+                isEditing ? "Save" : "Edited",
+                selected: !summarySelected && (isEditing || layer == .edited)
+            ) {
                 if isEditing { onSave() } else { onSelectEdited() }
             }
             .disabled(isSaving)
+
+            segment("Summary", selected: summarySelected) {
+                onSelectSummary()
+            }
+            .disabled(isSaving)
+            .accessibilityLabel("AI Summary")
         }
         .padding(2)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Transcript Layer")
+        .accessibilityLabel("Note Layer")
     }
 
     private func segment(

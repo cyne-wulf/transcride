@@ -149,6 +149,12 @@ struct AppCommands: Commands {
                     ? "Show Edited Layer" : "Show Original Layer",
                 .toggleLayer
             )
+            commandButton(
+                model.workbenchUIState.showingSummary
+                    ? "Show Transcript" : "Show Summary",
+                .showSummary
+            )
+            commandButton("Generate Summary…", .generateSummary)
 
             Divider()
 

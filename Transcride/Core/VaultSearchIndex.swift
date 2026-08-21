@@ -4,8 +4,15 @@ import SQLite3
 enum SearchLayer: String, Codable, Hashable, Sendable {
     case edited
     case original
+    case summary
 
-    var rank: Int { self == .edited ? 0 : 1 }
+    var rank: Int {
+        switch self {
+        case .edited: 0
+        case .original: 1
+        case .summary: 2
+        }
+    }
 }
 
 struct SearchRecord: Equatable, Sendable {
@@ -436,8 +443,9 @@ final class VaultSearchIndex: @unchecked Sendable {
 
     /// Identity of everything `recordsForEntry` reads: the markdown file's
     /// name, size and modification date, and the same for the original
-    /// transcript. The entry folder's own name is the key these are stored
-    /// under, so a rename is a different row rather than a missed change.
+    /// transcript and the summary sidecar. The entry folder's own name is the
+    /// key these are stored under, so a rename is a different row rather than
+    /// a missed change.
     private static func fingerprint(at entryURL: URL) -> String {
         func stamp(_ url: URL?) -> String {
             guard let url,
@@ -449,7 +457,9 @@ final class VaultSearchIndex: @unchecked Sendable {
             return "\(url.lastPathComponent)|\(modified.timeIntervalSince1970)|\(size)"
         }
         let markdownURL = TranscriptFile.url(inEntry: entryURL)
-        return stamp(markdownURL) + "::" + stamp(TranscriptOriginal.url(inEntry: entryURL))
+        return stamp(markdownURL)
+            + "::" + stamp(TranscriptOriginal.url(inEntry: entryURL))
+            + "::" + stamp(SummaryDocument.url(inEntry: entryURL))
     }
 
     private func storedFingerprintsUnlocked() throws -> [RelativePath: String] {
@@ -512,6 +522,14 @@ final class VaultSearchIndex: @unchecked Sendable {
                 layer: .original,
                 title: title,
                 content: TranscriptMarkdown.body(from: original, speakerNames: speakerNames)
+            ))
+        }
+        // The AI summary is a derived layer with its own labeled records so a
+        // hit can say it came from a summary and never claim an audio time.
+        if let summary = try? SummaryDocument.load(from: SummaryDocument.url(inEntry: entryURL)),
+           !summary.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            records.append(SearchRecord(
+                entryPath: relativePath, layer: .summary, title: title, content: summary.body
             ))
         }
         return records

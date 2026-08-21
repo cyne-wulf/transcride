@@ -13,11 +13,20 @@ struct ExportMarkdownSheet: View {
     let original: TranscriptOriginal?
     let document: FrontmatterDocument?
 
-    @State private var layer: TranscriptWorkbenchView.Layer = .original
+    private enum ExportLayer: String, CaseIterable, Identifiable {
+        case original = "Original"
+        case edited = "Edited"
+        case summary = "Summary"
+
+        var id: Self { self }
+    }
+
+    @State private var layer: ExportLayer = .original
     @State private var includeSpeakerLabels = true
     @State private var includeTimestamps = false
     @State private var exportError: String?
     @State private var exportedFileURL: URL?
+    @State private var summaryBody: String?
 
     private var isForked: Bool {
         guard let document else { return false }
@@ -46,6 +55,26 @@ struct ExportMarkdownSheet: View {
             layer = isForked ? .edited : .original
             if original == nil { layer = .edited }
         }
+        .task {
+            let body = await model.loadSummary(for: entry)?.body
+            let hasSummary = body?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            summaryBody = hasSummary ? body : nil
+            // Export follows the workbench: viewing the Summary preselects it.
+            if hasSummary, model.workbenchUIState.showingSummary {
+                layer = .summary
+            }
+        }
+    }
+
+    /// Layers worth offering: Edited only once truly forked (before that the
+    /// body is just the generated projection of Original), Summary once one
+    /// exists. A single available layer needs no picker.
+    private var availableLayers: [ExportLayer] {
+        var layers: [ExportLayer] = []
+        if original != nil { layers.append(.original) }
+        if document != nil, isForked || original == nil { layers.append(.edited) }
+        if summaryBody != nil { layers.append(.summary) }
+        return layers
     }
 
     @ViewBuilder
@@ -53,9 +82,9 @@ struct ExportMarkdownSheet: View {
         Text("Export Markdown")
             .font(.headline)
 
-        if isForked, original != nil {
+        if availableLayers.count > 1 {
             Picker("Layer", selection: $layer) {
-                ForEach(TranscriptWorkbenchView.Layer.allCases) { layer in
+                ForEach(availableLayers) { layer in
                     Text(layer.rawValue).tag(layer)
                 }
             }
@@ -72,7 +101,11 @@ struct ExportMarkdownSheet: View {
             .disabled(!optionsApply)
             .help("Prefix each paragraph with its audio time, like [1:24]")
 
-        if layer == .edited, isForked {
+        if layer == .summary {
+            Text("The AI summary exports exactly as written.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if layer == .edited, isForked {
             Text("The edited note exports exactly as written; options apply when exporting the Original layer.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -141,6 +174,9 @@ struct ExportMarkdownSheet: View {
         case .edited:
             guard let document else { return nil }
             return MarkdownExport.editedContent(body: document.body)
+        case .summary:
+            guard let summaryBody else { return nil }
+            return MarkdownExport.editedContent(body: summaryBody)
         }
     }
 

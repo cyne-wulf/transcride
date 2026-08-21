@@ -127,6 +127,8 @@ struct KeyboardShortcutsView: View {
         .extendRecording: "Starts extending the selected audio entry; press again to finish and append. Typing in an editor still works normally.",
         .editOrSaveNote: "Starts editing the Markdown layer; while editing, saves and finishes.",
         .copyAsMarkdown: "Copies the viewed layer without frontmatter.",
+        .showSummary: "Shows the local AI summary layer; press again for the transcript.",
+        .generateSummary: "Generates (or regenerates) the AI summary. Everything runs on this Mac.",
         .trimAudio: "Starts trimming the selected audio clip; press again or Esc to cancel without changing it.",
         .replaceAudio: "Starts Replace Audio for the selected clip. Typing in an editor still works normally.",
         .showInfo: "Created date, duration, engine, and location.",

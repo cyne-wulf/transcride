@@ -18,7 +18,7 @@ struct AppShortcutsTests {
     @Test func catalogCoversEveryTranscrideCommandGroup() {
         let byCategory = Dictionary(grouping: AppShortcutAction.allCases, by: \.category)
         #expect(byCategory[.recordingFile]?.count == 5)
-        #expect(byCategory[.notesEntry]?.count == 21)
+        #expect(byCategory[.notesEntry]?.count == 23)
         #expect(byCategory[.playback]?.count == 19)
         #expect(byCategory[.libraryView]?.count == 13)
         #expect(byCategory[.appHelp]?.count == 2)
