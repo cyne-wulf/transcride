@@ -998,7 +998,10 @@ struct TranscriptWorkbenchView: View {
             summaryNeedsSave = false
             let entry = entry
             Task {
-                if let saved = await model.saveSummaryBody(body, for: entry) {
+                // Same guard as applySummaryEdit: never clobber an edit the
+                // user made (by re-entering editing) while this save flew.
+                if let saved = await model.saveSummaryBody(body, for: entry),
+                   summaryDocument?.body == body {
                     summaryDocument = saved
                 }
             }
@@ -1010,7 +1013,13 @@ struct TranscriptWorkbenchView: View {
     @MainActor
     private func reloadSummary() async {
         guard !isEditingSummary else { return }
-        summaryDocument = await model.loadSummary(for: entry)
+        let loaded = await model.loadSummary(for: entry)
+        // The reload runs under `.task(id: summaryReloadKey)`, which cancels
+        // it when the entry (or revision) changes; the awaits above and below
+        // still resume, so honor the cancellation before every state write —
+        // a stale reload must not repopulate the next entry's summary.
+        guard !Task.isCancelled else { return }
+        summaryDocument = loaded
         // A generation that just finished reveals its result — including
         // after the AI title rename tears down and recreates this view.
         if summaryDocument != nil,
@@ -1022,10 +1031,12 @@ struct TranscriptWorkbenchView: View {
         let orig = original
         // SHA256 over the whole source text — off the main actor so a long
         // transcript never stutters the UI.
-        currentSourceFingerprint = await Task.detached(priority: .utility) {
+        let fingerprint = await Task.detached(priority: .utility) {
             SummarySourceSelector.source(document: doc, original: orig)
                 .map { SummaryFingerprint.fingerprint(of: $0.text) }
         }.value
+        guard !Task.isCancelled else { return }
+        currentSourceFingerprint = fingerprint
     }
 
     private func resetSummaryUI() {
@@ -1035,6 +1046,10 @@ struct TranscriptWorkbenchView: View {
         isEditingSummary = false
         showingSummary = false
         showingRegenerateConfirm = false
+        // A destructive confirmation opened for the previous entry must not
+        // act on the newly selected one.
+        showingDeleteSummaryConfirm = false
+        showingDiscardEditsConfirm = false
         // The reload for the new entry is asynchronous; holding the previous
         // entry's summary here could render it as the new entry's content.
         summaryDocument = nil
