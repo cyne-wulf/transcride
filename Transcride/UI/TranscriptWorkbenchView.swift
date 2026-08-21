@@ -198,18 +198,16 @@ struct TranscriptWorkbenchView: View {
             .onDisappear {
                 flushSummarySaveOnDisappear()
             }
-            // VoiceOver progress announcements (PRD-9): generation start,
-            // failure, and completion. `summaryRevision` bumps only on a
-            // successful generation, so cancellation stays silent.
+            // VoiceOver progress announcements (PRD-9): generation start and
+            // failure for this entry; completion is announced where the
+            // per-entry reveal is consumed (`reloadSummary`), so another
+            // entry's generation never announces here.
             .onChange(of: summaryPhase.isGenerating) { _, generating in
                 if generating {
                     AccessibilityNotification.Announcement("Generating summary").post()
                 } else if case .failed = summaryPhase {
                     AccessibilityNotification.Announcement("Summary generation failed").post()
                 }
-            }
-            .onChange(of: model.summaryController.summaryRevision) { _, _ in
-                AccessibilityNotification.Announcement("Summary ready").post()
             }
             .confirmationDialog(
                 "Replace your edited summary?",
@@ -1018,6 +1016,7 @@ struct TranscriptWorkbenchView: View {
         if summaryDocument != nil,
            model.summaryController.consumeReveal(for: entry.relativePath) {
             showingSummary = true
+            AccessibilityNotification.Announcement("Summary ready").post()
         }
         let doc = document
         let orig = original
@@ -1036,6 +1035,10 @@ struct TranscriptWorkbenchView: View {
         isEditingSummary = false
         showingSummary = false
         showingRegenerateConfirm = false
+        // The reload for the new entry is asynchronous; holding the previous
+        // entry's summary here could render it as the new entry's content.
+        summaryDocument = nil
+        currentSourceFingerprint = nil
     }
 
     private func beginEditing() {

@@ -125,7 +125,11 @@ final class SummaryGenerationController {
             // The rename runs only after the job released its slot, so the
             // repoint it triggers cannot strand a finished job under a new
             // path and block future generations.
-            if let proposedTitle {
+            // The cancellation check also fences a vault switch: `reset()`
+            // cancels this task, and a write that slipped through between
+            // checkpoints must not run the title callback against whatever
+            // vault is current by then.
+            if let proposedTitle, !Task.isCancelled {
                 await self.onTitleProposed?(token.path, proposedTitle, previousTitle)
             }
         }
@@ -141,20 +145,41 @@ final class SummaryGenerationController {
         if case .failed = phase(for: path) { phases[path] = .idle }
     }
 
-    /// Follows an entry rename so phase state and the running job stay
-    /// attached to the entry under its new path.
+    /// Follows an entry rename or a folder rename/move so phase state and
+    /// running jobs stay attached to entries under their new paths.
+    /// Prefix-aware like `TranscriptionQueue.repointItems`: moving a folder
+    /// repoints every descendant entry.
     func repointItems(from oldPath: RelativePath, to newPath: RelativePath) {
         guard oldPath != newPath else { return }
-        if let phase = phases.removeValue(forKey: oldPath) {
-            phases[newPath] = phase
+        func repointed(_ path: RelativePath) -> RelativePath? {
+            if path == oldPath { return newPath }
+            if path.hasPrefix(oldPath + "/") { return newPath + path.dropFirst(oldPath.count) }
+            return nil
         }
-        if let job = jobs.removeValue(forKey: oldPath) {
-            job.path = newPath
-            jobs[newPath] = job
+        for (path, phase) in phases {
+            guard let moved = repointed(path) else { continue }
+            phases.removeValue(forKey: path)
+            phases[moved] = phase
         }
-        if pendingReveal == oldPath {
-            pendingReveal = newPath
+        for (path, job) in jobs {
+            guard let moved = repointed(path) else { continue }
+            jobs.removeValue(forKey: path)
+            job.path = moved
+            jobs[moved] = job
         }
+        if let pending = pendingReveal, let moved = repointed(pending) {
+            pendingReveal = moved
+        }
+    }
+
+    /// Cancels every job and clears all per-entry state. Called when the
+    /// active vault changes: entry paths are only meaningful within one
+    /// vault, and no completion from the old vault may reach the new one.
+    func reset() {
+        for job in jobs.values { job.task?.cancel() }
+        jobs = [:]
+        phases = [:]
+        pendingReveal = nil
     }
 
     /// True exactly once when `path` names the entry whose generation just

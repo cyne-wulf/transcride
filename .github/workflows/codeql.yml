@@ -45,6 +45,8 @@ jobs:
           -project Transcride.xcodeproj
           -scheme Transcride
           -destination 'platform=macOS,arch=arm64'
+          -skipPackagePluginValidation
+          -skipMacroValidation
           CODE_SIGNING_ALLOWED=NO
           build
 

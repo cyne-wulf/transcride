@@ -92,12 +92,13 @@ actor SummarizationEngine: ModelManaging {
             // weight materialization, so that cost lands here — where the UI
             // already says the model is being fetched — and "downloaded"
             // means "runnable".
-            let loaded = try await loadContainer { fraction in
+            // The verified container is deliberately not kept: weights stay
+            // resident only around a generation, never after a download alone.
+            _ = try await loadContainer { fraction in
                 progress(.downloading(fraction))
             }
             try Task.checkCancellation()
             progress(.preparing)
-            container = loaded
             try Data().write(to: completionMarker)
         } catch is CancellationError {
             throw TranscriptionError.cancelled

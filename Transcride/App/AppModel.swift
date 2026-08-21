@@ -609,6 +609,10 @@ final class AppModel {
         vaultSearchResults = []
         vaultSearchError = nil
         transcriptNavigationRequest = nil
+        // Per-entry layer memory and summary jobs are keyed by relative
+        // path, which is only meaningful within one vault.
+        sessionNoteLayers = [:]
+        summaryController.reset()
         phase = .ready
 
         transcriptionQueue?.shutdown()
@@ -1178,10 +1182,22 @@ final class AppModel {
         isVaultSearchPresented = false
     }
 
+    /// Prefix-aware like the queue and summary-controller repoints: a moved
+    /// folder carries every descendant entry's remembered layer along.
     private func repointSessionNoteLayer(from oldPath: RelativePath, to newPath: RelativePath) {
-        guard oldPath != newPath,
-              let selection = sessionNoteLayers.removeValue(forKey: oldPath) else { return }
-        sessionNoteLayers[newPath] = selection
+        guard oldPath != newPath else { return }
+        for (path, selection) in sessionNoteLayers {
+            let moved: RelativePath
+            if path == oldPath {
+                moved = newPath
+            } else if path.hasPrefix(oldPath + "/") {
+                moved = newPath + path.dropFirst(oldPath.count)
+            } else {
+                continue
+            }
+            sessionNoteLayers.removeValue(forKey: path)
+            sessionNoteLayers[moved] = selection
+        }
     }
 
     func requestInNoteFind(withReplace: Bool = false) {
