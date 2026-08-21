@@ -993,11 +993,14 @@ final class AppModel {
         await perform("renameFolder [\(relPath)] -> \(newName)") { service in
             let newPath = try await service.renameFolder(at: relPath, to: newName)
             await MainActor.run {
-                // Every entry beneath the folder just changed path: the queue
-                // and any launch-captured recovery record must follow, or a
-                // running transcription lands on a path that no longer exists.
+                // Every entry beneath the folder just changed path: the queue,
+                // any launch-captured recovery record, running summary jobs,
+                // and remembered layer selections must follow, or a running
+                // job lands on a path that no longer exists.
                 self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
                 self.repointRecoveryArtifacts(from: relPath, to: newPath)
+                self.summaryController.repointItems(from: relPath, to: newPath)
+                self.repointSessionNoteLayer(from: relPath, to: newPath)
                 if let selected = self.selectedEntryID,
                    selected.hasPrefix(relPath + "/") {
                     self.selectedEntryID = newPath + selected.dropFirst(relPath.count)
@@ -1864,6 +1867,8 @@ final class AppModel {
                 await refresh {
                     self.transcriptionQueue?.repointItems(from: entryPath, to: newPath)
                     self.repointRecoveryArtifacts(from: entryPath, to: newPath)
+                    self.summaryController.repointItems(from: entryPath, to: newPath)
+                    self.repointSessionNoteLayer(from: entryPath, to: newPath)
                     if self.selectedEntryID == entryPath {
                         self.selectedEntryID = newPath
                     }
