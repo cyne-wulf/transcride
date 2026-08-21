@@ -46,12 +46,15 @@ final class ModelManager {
     /// download/delete surface without being a transcription engine.
     private func managing(forID id: String) async -> (any ModelManaging)? {
         if id == ModelCatalog.speakerDiarization.id { return DiarizationEngine.shared }
+        if let summarizer = SummarizationEngine.engine(forModelInfoID: id) { return summarizer }
         return await EngineRegistry.shared.engine(forModelInfoID: id)
     }
 
     /// Re-checks every managed model's on-disk state.
     func refresh() async {
-        for info in ModelCatalog.available + [ModelCatalog.speakerDiarization] {
+        let models = ModelCatalog.available + [ModelCatalog.speakerDiarization]
+            + SummaryModelCatalog.available
+        for info in models {
             await refreshModel(info.id)
         }
     }

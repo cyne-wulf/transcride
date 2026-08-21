@@ -186,6 +186,7 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
 
     // Library & View
     case findInNote
+    case findAndReplaceInNote
     case searchVault
     case previousFolder
     case nextFolder
@@ -222,7 +223,8 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
              .playbackJump8, .playbackJump9,
              .speedDown, .speedUp, .speedReset, .toggleSkipSilence, .enterZenMode:
             .playback
-        case .findInNote, .searchVault, .previousFolder, .nextFolder,
+        case .findInNote, .findAndReplaceInNote, .searchVault,
+             .previousFolder, .nextFolder,
              .sortByDate, .sortByDuration, .sortByTitle, .sortByRecentlyEdited,
              .goToVaultRoot, .goToFavorites, .goToRecentlyDeleted,
              .showTranscriptionQueue:
@@ -280,6 +282,7 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
         case .toggleSkipSilence: "Toggle Skip Silence"
         case .enterZenMode: "Enter Zen Mode"
         case .findInNote: "Find in Note…"
+        case .findAndReplaceInNote: "Find and Replace in Note…"
         case .searchVault: "Search Vault…"
         case .previousFolder: "Previous Folder"
         case .nextFolder: "Next Folder"
@@ -418,6 +421,8 @@ enum AppShortcutAction: String, CaseIterable, Codable, Identifiable, Sendable {
             AppShortcutBinding(primary: .init(keyCode: 6, modifiers: []))
         case .findInNote:
             AppShortcutBinding(primary: .init(keyCode: 3, modifiers: [.command]))
+        case .findAndReplaceInNote:
+            AppShortcutBinding(primary: .init(keyCode: 3, modifiers: [.command, .option]))
         case .searchVault:
             AppShortcutBinding(primary: .init(keyCode: 3, modifiers: [.command, .shift]))
         case .previousFolder:

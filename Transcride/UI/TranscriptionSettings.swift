@@ -118,6 +118,35 @@ private struct ModelRow: View {
     }
 }
 
+/// Settings → Transcription → AI Summary: the summary-model picker and the
+/// same management rows the transcription models use (PRD-9). The default is
+/// RAM-adaptive unless the user picks a model explicitly.
+struct AISummaryModelsSection: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage(SummaryModelCatalog.defaultModelPreferenceKey) private var defaultSummaryModelID = ""
+
+    var body: some View {
+        Section("AI Summary") {
+            Picker("Summary Model", selection: $defaultSummaryModelID) {
+                Text(automaticLabel).tag("")
+                ForEach(SummaryModelCatalog.available) { info in
+                    Text(info.displayName).tag(info.id)
+                }
+            }
+            Text("Summaries are generated entirely on this Mac by a local Gemma model — nothing leaves the machine. Automatic picks the model that fits this Mac's memory.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(SummaryModelCatalog.available) { info in
+                ModelRow(info: info)
+            }
+        }
+    }
+
+    private var automaticLabel: String {
+        "Automatic — \(SummaryModelCatalog.automaticModel().displayName)"
+    }
+}
+
 /// Settings → Custom Vocabulary: edits `<vault>/vocabulary.txt` in place —
 /// every add/edit/delete persists immediately (VOC-1).
 struct VocabularySection: View {

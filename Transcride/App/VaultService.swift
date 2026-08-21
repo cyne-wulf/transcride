@@ -346,6 +346,44 @@ actor VaultService {
         return editable.document
     }
 
+    // MARK: - Summary sidecar
+
+    func loadSummary(atEntryPath relPath: RelativePath) throws -> SummaryDocument? {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        return try SummaryDocument.load(from: SummaryDocument.url(inEntry: entryURL))
+    }
+
+    /// Saves the user-edited summary body. Deliberately no transcript
+    /// hand-edited semantics and no search indexing — the summary is a
+    /// derived artifact with its own `hand_edited` flag.
+    func saveSummaryBody(_ body: String, atEntryPath relPath: RelativePath) throws -> SummaryDocument {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        let url = SummaryDocument.url(inEntry: entryURL)
+        guard var summary = try SummaryDocument.load(from: url) else {
+            throw VaultError.notFound("Summary for \(relPath)")
+        }
+        summary.replaceBody(body, markHandEdited: true)
+        try AtomicFile.write(summary.serialized(), to: url)
+        return summary
+    }
+
+    /// Removes the summary sidecar entirely. A missing file is a no-op — the
+    /// intended end state (no summary) already holds.
+    func deleteSummary(atEntryPath relPath: RelativePath) throws {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        let url = SummaryDocument.url(inEntry: entryURL)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    /// Installs a freshly generated summary. The atomic write is the
+    /// safety contract: failure or cancellation upstream never reaches this
+    /// call, and a crash mid-write leaves the prior summary in place.
+    func writeGeneratedSummary(_ summary: SummaryDocument, atEntryPath relPath: RelativePath) throws {
+        let entryURL = rootURL.appendingRelativePath(relPath)
+        try AtomicFile.write(summary.serialized(), to: SummaryDocument.url(inEntry: entryURL))
+    }
+
     /// Loads the entry's `waveform.json`, generating (and caching) it from the
     /// audio file when missing or unreadable — so deleting the file in Finder
     /// simply causes a rebuild on next open (PLY-3).

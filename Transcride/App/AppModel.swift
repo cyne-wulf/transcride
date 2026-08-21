@@ -59,6 +59,7 @@ final class AppModel {
     let player = PlayerService()
     let inputDevices = AudioInputDevices()
     let modelManager = ModelManager()
+    let summaryController = SummaryGenerationController()
     let liveTranscriber = LiveTranscriber()
     let globalShortcutService = GlobalShortcutService()
 
@@ -141,6 +142,7 @@ final class AppModel {
     private(set) var vaultSearchError: String?
     private(set) var transcriptNavigationRequest: TranscriptNavigationRequest?
     private(set) var inNoteFindRequestRevision = 0
+    private(set) var inNoteFindRequestWantsReplace = false
 
     // MARK: - Menu-bar command routing
     //
@@ -606,6 +608,10 @@ final class AppModel {
         transcriptionQueue = queue
         TranscriptionSeam.queue = queue
 
+        summaryController.onTitleProposed = { [weak self] path, title, previousTitle in
+            await self?.applySummaryTitle(path, title, previousSummaryTitle: previousTitle)
+        }
+
         let recordingRecovery = await service.recoverInterruptedRecordings()
         for outcome in recordingRecovery.recovered {
             logRecoveredMicrophoneFailure(
@@ -1000,6 +1006,7 @@ final class AppModel {
             await MainActor.run {
                 self.transcriptionQueue?.repointItems(from: entry.relativePath, to: newPath)
                 self.repointRecoveryArtifacts(from: entry.relativePath, to: newPath)
+                self.summaryController.repointItems(from: entry.relativePath, to: newPath)
                 if self.selectedEntryID == entry.relativePath {
                     self.selectedEntryID = newPath
                 }
@@ -1017,6 +1024,7 @@ final class AppModel {
             await MainActor.run {
                 self.transcriptionQueue?.repointItems(from: relPath, to: newPath)
                 self.repointRecoveryArtifacts(from: relPath, to: newPath)
+                self.summaryController.repointItems(from: relPath, to: newPath)
                 if let selected = self.selectedEntryID,
                    selected == relPath || selected.hasPrefix(relPath + "/") {
                     self.selectedEntryID = newPath + selected.dropFirst(relPath.count)
@@ -1157,8 +1165,9 @@ final class AppModel {
         isVaultSearchPresented = false
     }
 
-    func requestInNoteFind() {
+    func requestInNoteFind(withReplace: Bool = false) {
         guard selectedEntry != nil else { return }
+        inNoteFindRequestWantsReplace = withReplace
         inNoteFindRequestRevision &+= 1
     }
 
@@ -1392,7 +1401,7 @@ final class AppModel {
             return player.url != nil
         case .enterZenMode:
             return ready && !recorder.isZenMode
-        case .findInNote:
+        case .findInNote, .findAndReplaceInNote:
             return ready && entry != nil && !isVaultSearchPresented
         case .showAbout, .showKeyboardShortcuts:
             return true
@@ -1642,6 +1651,11 @@ final class AppModel {
         case .findInNote:
             guard !isVaultSearchPresented else { return false }
             requestInNoteFind()
+            return selectedEntry != nil
+
+        case .findAndReplaceInNote:
+            guard !isVaultSearchPresented else { return false }
+            requestInNoteFind(withReplace: true)
             return selectedEntry != nil
 
         case .searchVault:
@@ -3094,6 +3108,9 @@ final class AppModel {
                     self.repointRecoveryArtifacts(
                         from: originalPath, to: outcome.entryRelativePath
                     )
+                    self.summaryController.repointItems(
+                        from: originalPath, to: outcome.entryRelativePath
+                    )
                     if self.selectedEntryID == originalPath {
                         self.selectedEntryID = outcome.entryRelativePath
                     }
@@ -3490,6 +3507,108 @@ final class AppModel {
         } catch {
             errorMessage = "Could not save the transcript: \(error.localizedDescription)"
             return nil
+        }
+    }
+
+    // MARK: - Summary sidecar
+
+    func loadSummary(for entry: Entry) async -> SummaryDocument? {
+        guard let service else { return nil }
+        return try? await service.loadSummary(atEntryPath: entry.relativePath)
+    }
+
+    /// Saves the user-edited summary body. No vault rescan — the sidecar is
+    /// invisible to the entry list.
+    func saveSummaryBody(_ body: String, for entry: Entry) async -> SummaryDocument? {
+        guard let service else { return nil }
+        do {
+            let saved = try await service.saveSummaryBody(body, atEntryPath: entry.relativePath)
+            summaryController.noteSaved()
+            return saved
+        } catch {
+            errorMessage = "Could not save the summary: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Deletes the summary sidecar. The revision bump makes any other view
+    /// keyed on it reload to the no-summary state.
+    func deleteSummary(for entry: Entry) async -> Bool {
+        guard let service else { return false }
+        do {
+            try await service.deleteSummary(atEntryPath: entry.relativePath)
+            summaryController.noteSaved()
+            return true
+        } catch {
+            errorMessage = "Could not delete the summary: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Starts summary generation for the entry the workbench has loaded.
+    func generateSummary(
+        for entry: Entry,
+        document: FrontmatterDocument?,
+        original: TranscriptOriginal?
+    ) {
+        guard let service else { return }
+        summaryController.generate(
+            entryPath: entry.relativePath,
+            document: document,
+            original: original,
+            using: service
+        )
+    }
+
+    /// Retries a failed summary from the queue popover, where the workbench's
+    /// loaded document/original aren't at hand — re-read them from the vault.
+    func retrySummary(forEntryAt path: RelativePath) async {
+        guard let service else { return }
+        summaryController.clearFailure(for: path)
+        let content = await service.readTranscriptContent(atEntryPath: path, duration: nil)
+        summaryController.generate(
+            entryPath: path,
+            document: content.edited,
+            original: content.original,
+            using: service
+        )
+    }
+
+    /// Applies an AI-proposed entry title after summary generation (PRD-9):
+    /// best-effort, and only while the entry's current title is
+    /// machine-derived — a human rename is never overwritten. Mirrors the
+    /// transcription auto-title path (`entryTranscribed`): the rescan and the
+    /// selection remap land in one main-actor turn.
+    private func applySummaryTitle(
+        _ path: RelativePath,
+        _ title: String,
+        previousSummaryTitle: String?
+    ) async {
+        guard let service else { return }
+        guard !liveRecordingBlocks(path) else { return }
+        let content = await service.readTranscriptContent(atEntryPath: path, duration: nil)
+        let currentTitle = content.edited?.title
+        guard currentTitle != title,
+              SummaryTitlePolicy.entryTitleIsMachineDerived(
+                  currentTitle: currentTitle,
+                  original: content.original,
+                  previousSummaryTitle: previousSummaryTitle
+              )
+        else { return }
+        do {
+            let newPath = try await service.renameEntry(at: path, toTitle: title)
+            await refresh {
+                self.transcriptionQueue?.repointItems(from: path, to: newPath)
+                self.repointRecoveryArtifacts(from: path, to: newPath)
+                self.summaryController.repointItems(from: path, to: newPath)
+                if self.selectedEntryID == path {
+                    self.selectedEntryID = newPath
+                }
+            }
+            refreshVaultSearchIfVisible()
+        } catch {
+            // A title collision or rename race must never fail the summary.
+            DebugLog.append("summary title rename FAILED [\(path)] -> \(title): \(error)")
         }
     }
 

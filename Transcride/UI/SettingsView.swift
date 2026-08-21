@@ -255,6 +255,7 @@ private struct TranscriptionSettingsPane: View {
     var body: some View {
         Form {
             TranscriptionModelsSection()
+            AISummaryModelsSection()
             VocabularySection()
         }
         .formStyle(.grouped)

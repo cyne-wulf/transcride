@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownUI
 import SwiftUI
 
 /// AppKit styling shared by the immutable and safely mapped edited transcript
@@ -90,11 +91,22 @@ struct TranscriptWorkbenchView: View {
     @State private var findQuery = ""
     @State private var findMatches: [NSRange] = []
     @State private var findMatchIndex = 0
+    @State private var showingReplace = false
+    @State private var replaceQuery = ""
     @State private var searchNavigationRange: NSRange?
     @State private var handledNavigationRequestID: UUID?
     @State private var showingSpeakerRename = false
     @State private var forkOverride: Bool?
     @State private var editedPlaybackMap: EditedTranscriptPlaybackMap?
+    @State private var showingSummary = false
+    @State private var summaryDocument: SummaryDocument?
+    @State private var isEditingSummary = false
+    @State private var summaryNeedsSave = false
+    @State private var pendingSummarySave: Task<Void, Never>?
+    @State private var showingRegenerateConfirm = false
+    @State private var showingDiscardEditsConfirm = false
+    @State private var showingDeleteSummaryConfirm = false
+    @State private var currentSourceFingerprint: String?
     @FocusState private var findFieldFocused: Bool
 
     /// User-chosen display names for machine speaker ids (TRN-6), from the
@@ -114,7 +126,21 @@ struct TranscriptWorkbenchView: View {
     /// The menu-bar Edit Note command remains available even though editing a
     /// forked note is normally re-entered by clicking its text directly.
     private var canEditNote: Bool {
-        document != nil && !isEditing && (viewedLayer == .edited || !isForked)
+        document != nil && !isEditing && !showingSummary
+            && (viewedLayer == .edited || !isForked)
+    }
+
+    private var summaryPhase: SummaryGenerationController.Phase {
+        model.summaryController.phase(for: entry.relativePath)
+    }
+
+    /// The stored fingerprint no longer matching the current source text
+    /// means the transcript changed since generation: keep the summary
+    /// readable, mark it out of date, never regenerate automatically.
+    private var summaryIsStale: Bool {
+        guard let stored = summaryDocument?.sourceFingerprint,
+              let current = currentSourceFingerprint else { return false }
+        return stored != current
     }
 
     /// Snapshot of what this workbench can do, mirrored into AppModel for the
@@ -145,6 +171,78 @@ struct TranscriptWorkbenchView: View {
     }
 
     var body: some View {
+        // Two separately type-checked halves: the pre-existing workbench
+        // chain and the summary lifecycle. One combined expression exceeds
+        // the compiler's type-check budget.
+        workbenchCore
+            .task(id: summaryReloadKey) {
+                await reloadSummary()
+            }
+            .task(id: showingSummary) {
+                if showingSummary {
+                    await model.modelManager.refreshModel(preferredSummaryModel.id)
+                }
+            }
+            .onChange(of: entry.relativePath) { oldPath, newPath in
+                // A title rename keeps the entry (and the visible summary);
+                // only a genuine selection change resets the summary UI.
+                if !EntryIdentity.sameEntry(oldPath, newPath) {
+                    resetSummaryUI()
+                }
+            }
+            .onDisappear {
+                flushSummarySaveOnDisappear()
+            }
+            .confirmationDialog(
+                "Replace your edited summary?",
+                isPresented: $showingRegenerateConfirm
+            ) {
+                Button("Regenerate", role: .destructive) { regenerateSummary() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You edited this summary by hand. Regenerating replaces your edits with a fresh AI summary.")
+            }
+            .confirmationDialog(
+                "Discard your edits?",
+                isPresented: $showingDiscardEditsConfirm
+            ) {
+                Button("Discard Edits", role: .destructive) {
+                    Task { await discardEdits() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This deletes the edited copy of this note and returns to the original transcript. This can't be undone.")
+            }
+            .confirmationDialog(
+                "Delete this summary?",
+                isPresented: $showingDeleteSummaryConfirm
+            ) {
+                Button("Delete Summary", role: .destructive) {
+                    Task { await deleteSummary() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This deletes the AI summary for this entry. You can generate a new one at any time.")
+            }
+    }
+
+    private var summaryReloadKey: String {
+        "\(String(describing: entry.relativePath))|\(model.summaryController.summaryRevision)|\(loadedContentRevision)"
+    }
+
+    private func flushSummarySaveOnDisappear() {
+        let pendingSummarySave = pendingSummarySave
+        pendingSummarySave?.cancel()
+        if summaryNeedsSave, let body = summaryDocument?.body {
+            let entry = entry
+            Task {
+                await pendingSummarySave?.value
+                _ = await model.saveSummaryBody(body, for: entry)
+            }
+        }
+    }
+
+    private var workbenchCore: some View {
         VStack(spacing: 0) {
             // The action row spans the whole pane so its trailing controls sit
             // in the window's top-right corner (master PRD §7); the note
@@ -174,14 +272,15 @@ struct TranscriptWorkbenchView: View {
             VStack(spacing: 0) {
                 if showingFind {
                     findBar
-                        .frame(height: 42)
+                        .frame(height: showingReplace ? 76 : 42)
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
 
                 ZStack(alignment: .topTrailing) {
                     layerContent
 
-                    if followingPaused, viewedLayer == .original, model.player.isPlaying {
+                    if followingPaused, viewedLayer == .original, !showingSummary,
+                       model.player.isPlaying {
                         Button {
                             followingPaused = false
                         } label: {
@@ -217,7 +316,7 @@ struct TranscriptWorkbenchView: View {
         .onChange(of: findQuery) { _, _ in updateFindMatches(resetSelection: true) }
         .onChange(of: document?.body) { _, _ in updateFindMatches() }
         .onChange(of: model.inNoteFindRequestRevision) { _, _ in
-            toggleFindBar()
+            toggleFindBar(withReplace: model.inNoteFindRequestWantsReplace)
         }
         .task(id: model.transcriptNavigationRequest?.id) {
             handleNavigationRequestIfNeeded()
@@ -312,7 +411,17 @@ struct TranscriptWorkbenchView: View {
 
     private var noteToolbar: some View {
         HStack(spacing: 8) {
-            if viewedLayer == .original {
+            if showingSummary {
+                Label("AI Summary", systemImage: "sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if summaryIsStale {
+                    Label("Out of date", systemImage: "clock.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .help("The transcript changed since this summary was generated")
+                }
+            } else if viewedLayer == .original {
                 Label("Synced to audio", systemImage: "waveform.badge.magnifyingglass")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -325,7 +434,41 @@ struct TranscriptWorkbenchView: View {
 
             Spacer()
 
-            if hasSpeakers {
+            if showingSummary, summaryDocument != nil, !summaryPhase.isGenerating {
+                if isEditingSummary {
+                    Button("Save") {
+                        finishSummaryEditing()
+                    }
+                    .help("Save the summary and finish editing")
+                } else {
+                    Button {
+                        isEditingSummary = true
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    .help("Edit the summary — edits save independently of the transcript")
+
+                    Button {
+                        if summaryDocument?.handEdited == true {
+                            showingRegenerateConfirm = true
+                        } else {
+                            regenerateSummary()
+                        }
+                    } label: {
+                        Label("Regenerate", systemImage: "arrow.clockwise")
+                    }
+                    .help("Generate a fresh summary, replacing this one")
+
+                    Button {
+                        showingDeleteSummaryConfirm = true
+                    } label: {
+                        Label("Delete Summary", systemImage: "trash")
+                    }
+                    .help("Delete this summary")
+                }
+            }
+
+            if !showingSummary, hasSpeakers {
                 Button {
                     showingSpeakerRename = true
                 } label: {
@@ -335,13 +478,15 @@ struct TranscriptWorkbenchView: View {
                 .help("Rename Speaker 1, Speaker 2, … — or click a label in the transcript")
             }
 
-            Button {
-                model.requestInNoteFind()
-            } label: {
-                Label("Find", systemImage: "magnifyingglass")
+            if !showingSummary {
+                Button {
+                    model.requestInNoteFind()
+                } label: {
+                    Label("Find", systemImage: "magnifyingglass")
+                }
+                .accessibilityLabel(showingFind ? "Close Find" : "Find in Note")
+                .help(showingFind ? "Close Find (⌘F)" : "Find in Note (⌘F)")
             }
-            .accessibilityLabel(showingFind ? "Close Find" : "Find in Note")
-            .help(showingFind ? "Close Find (⌘F)" : "Find in Note (⌘F)")
 
             Button {
                 copyCurrentLayer()
@@ -350,6 +495,19 @@ struct TranscriptWorkbenchView: View {
                       systemImage: copyConfirmed ? "checkmark" : "doc.on.doc")
             }
             .help("Copy this layer without frontmatter")
+
+            if document != nil || original != nil {
+                Button {
+                    toggleSummary()
+                } label: {
+                    Label(showingSummary ? "Transcript" : "Summary",
+                          systemImage: showingSummary ? "text.quote" : "sparkles")
+                }
+                .disabled(isEditing || isSaving)
+                .help(showingSummary
+                      ? "Back to the transcript"
+                      : "Show the AI summary of this recording")
+            }
 
             if canEditNote {
                 Button {
@@ -360,18 +518,33 @@ struct TranscriptWorkbenchView: View {
                 .help(editButtonHelp)
             }
 
-            if original != nil, isForked || isEditing {
+            if !showingSummary, original != nil, isForked || isEditing {
+                if isForked {
+                    Button {
+                        showingDiscardEditsConfirm = true
+                    } label: {
+                        Label("Discard Edits", systemImage: "trash")
+                    }
+                    .disabled(isSaving)
+                    .help("Delete the edited copy and return to the original transcript")
+                }
                 TranscriptLayerControl(
                     layer: activeLayer,
                     isEditing: isEditing,
                     isSaving: isSaving,
-                    onSelectOriginal: { activeLayer = .original },
+                    onSelectOriginal: {
+                        if isEditing {
+                            Task { await saveAndFinishEditing(returningTo: .original) }
+                        } else {
+                            activeLayer = .original
+                        }
+                    },
                     onSelectEdited: { activeLayer = .edited },
                     onSave: { Task { await saveAndFinishEditing() } }
                 )
                 .fixedSize()
                 .help(isEditing
-                      ? "Save changes and finish editing"
+                      ? "Save to finish editing — or click Original to finish and view the original"
                       : "Switch between the immutable engine output and your edited note")
             } else if isEditing {
                 Button("Save") {
@@ -384,39 +557,70 @@ struct TranscriptWorkbenchView: View {
     }
 
     private var findBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("Find in \(viewedLayer.rawValue)", text: $findQuery)
-                .textFieldStyle(.roundedBorder)
-                .focused($findFieldFocused)
-                .onSubmit { cycleFind(forward: true) }
-            Text(findQuery.isEmpty ? "" : findMatches.isEmpty
-                 ? "No matches"
-                 : "\(findMatchIndex + 1) of \(findMatches.count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 70, alignment: .trailing)
-            Button { cycleFind(forward: false) } label: {
-                Image(systemName: "chevron.up")
+        VStack(spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Find in \(viewedLayer.rawValue)", text: $findQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($findFieldFocused)
+                    .onSubmit { cycleFind(forward: true) }
+                Text(findQuery.isEmpty ? "" : findMatches.isEmpty
+                     ? "No matches"
+                     : "\(findMatchIndex + 1) of \(findMatches.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 70, alignment: .trailing)
+                Button { cycleFind(forward: false) } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .disabled(findMatches.isEmpty)
+                .help("Previous Match")
+                Button { cycleFind(forward: true) } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .disabled(findMatches.isEmpty)
+                .help("Next Match")
+                Toggle("Replace", isOn: $showingReplace)
+                    .toggleStyle(.button)
+                    .disabled(!canReplace)
+                    .help(canReplace
+                          ? "Show the replace field"
+                          : "Replace needs an editable note")
+                Button {
+                    closeFindBar()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .keyboardShortcut(.cancelAction)
+                .help("Close Find")
             }
-            .disabled(findMatches.isEmpty)
-            .help("Previous Match")
-            Button { cycleFind(forward: true) } label: {
-                Image(systemName: "chevron.down")
+            if showingReplace {
+                HStack(spacing: 8) {
+                    Image(systemName: "pencil")
+                        .foregroundStyle(.secondary)
+                    TextField("Replace in Edited", text: $replaceQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { replaceCurrentMatch() }
+                    Button("Replace") { replaceCurrentMatch() }
+                        .disabled(!canReplace || findMatches.isEmpty)
+                        .help("Replace the current match and move to the next")
+                    Button("All") { replaceAllMatches() }
+                        .disabled(!canReplace || findMatches.isEmpty)
+                        .help("Replace every match in the edited note")
+                }
             }
-            .disabled(findMatches.isEmpty)
-            .help("Next Match")
-            Button {
-                closeFindBar()
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .keyboardShortcut(.cancelAction)
-            .help("Close Find")
         }
         .controlSize(.small)
         .padding(.horizontal, 12)
+    }
+
+    /// Replace mutates the note body, so it is only offered where editing is:
+    /// never for the AI summary and never without a Markdown document. The
+    /// original layer stays immutable — replacing from there drops into the
+    /// normal editing flow on the edited layer first.
+    private var canReplace: Bool {
+        document != nil && !showingSummary && !isSaving
     }
 
     /// Trim, Compress and Replace mark the entry's alignment stale: the word
@@ -437,6 +641,15 @@ struct TranscriptWorkbenchView: View {
 
     @ViewBuilder
     private var layerContent: some View {
+        if showingSummary {
+            summaryContent
+        } else {
+            transcriptLayerContent
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptLayerContent: some View {
         switch viewedLayer {
         case .original:
             if let wordMap {
@@ -489,6 +702,250 @@ struct TranscriptWorkbenchView: View {
         }
     }
 
+    // MARK: - AI summary (PRD-9 MVP)
+
+    @ViewBuilder
+    private var summaryContent: some View {
+        switch summaryPhase {
+        case .generating(let part, let total, let fraction):
+            VStack(spacing: 12) {
+                ProgressView(value: fraction)
+                    .frame(maxWidth: 240)
+                Text(total > 1 ? "Summarizing… (part \(part) of \(total))" : "Summarizing…")
+                Button("Cancel") {
+                    model.summaryController.cancel(for: entry.relativePath)
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("Summary Failed", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("Try Again") {
+                    model.summaryController.clearFailure(for: entry.relativePath)
+                    startSummaryGeneration()
+                }
+            }
+
+        case .idle:
+            if summaryDocument != nil {
+                if isEditingSummary {
+                    MarkdownBodyEditor(
+                        text: summaryDocument?.body ?? "",
+                        isEditable: true,
+                        highlightRange: nil,
+                        navigationHighlightRange: nil,
+                        boundaryStartTime: nil,
+                        boundaryCueRange: nil,
+                        playbackTime: 0,
+                        isPlaying: false,
+                        seekRevision: 0,
+                        onBeginEditing: {},
+                        onUserEdit: { applySummaryEdit($0) }
+                    )
+                } else {
+                    renderedSummary
+                }
+            } else {
+                summaryEmptyState
+            }
+        }
+    }
+
+    /// Read mode: rendered markdown via MarkdownUI. Clicking the text
+    /// drops into the raw editor, matching the note's click-to-edit feel;
+    /// the toolbar Edit button is the discoverable path.
+    private var renderedSummary: some View {
+        ScrollView {
+            Markdown(summaryDocument?.body ?? "")
+                .markdownTheme(.transcride)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 20)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { isEditingSummary = true }
+        }
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.72))
+    }
+
+    private var preferredSummaryModel: TranscriptionModelInfo {
+        SummaryModelCatalog.preferredModel()
+    }
+
+    /// The pre-generation states mirror the Settings model row so the first
+    /// summary can be produced without leaving the workbench.
+    @ViewBuilder
+    private var summaryEmptyState: some View {
+        let modelInfo = preferredSummaryModel
+        switch model.modelManager.state(forModelInfoID: modelInfo.id) {
+        case .checking:
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .notDownloaded:
+            ContentUnavailableView {
+                Label("Summary Model Needed", systemImage: "sparkles")
+            } description: {
+                Text("\(modelInfo.displayName) (\(modelInfo.downloadSizeDescription)) runs entirely on this Mac. Download it once to generate summaries.")
+            } actions: {
+                Button("Download Model") {
+                    model.modelManager.download(modelInfo.id)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+        case .downloading(let fraction):
+            VStack(spacing: 12) {
+                ProgressView(value: fraction)
+                    .frame(maxWidth: 240)
+                Text("Downloading \(modelInfo.displayName)… \(Int(fraction * 100))%")
+                Button("Cancel") {
+                    model.modelManager.cancelDownload(modelInfo.id)
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .preparing:
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Preparing model… (first-time setup, can take a few minutes)")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .downloaded:
+            ContentUnavailableView {
+                Label("No Summary Yet", systemImage: "sparkles")
+            } description: {
+                Text("Generate a local AI summary of this recording. Nothing leaves this Mac.")
+            } actions: {
+                Button("Generate Summary") {
+                    startSummaryGeneration()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("Model Unavailable", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("Retry Download") {
+                    model.modelManager.download(modelInfo.id)
+                }
+            }
+        }
+    }
+
+    private func toggleSummary() {
+        if showingSummary {
+            finishSummaryEditing()
+            showingSummary = false
+        } else {
+            showingSummary = true
+            // The button's promise is "press → summary": generate right away
+            // when the model is ready and no summary exists yet. The other
+            // states land in the empty-state pane with explicit actions.
+            if summaryDocument == nil, summaryPhase == .idle,
+               model.modelManager.state(forModelInfoID: preferredSummaryModel.id).isDownloaded {
+                startSummaryGeneration()
+            }
+        }
+    }
+
+    private func startSummaryGeneration() {
+        isEditingSummary = false
+        model.generateSummary(for: entry, document: document, original: original)
+    }
+
+    private func regenerateSummary() {
+        pendingSummarySave?.cancel()
+        summaryNeedsSave = false
+        startSummaryGeneration()
+    }
+
+    private func applySummaryEdit(_ newBody: String) {
+        guard isEditingSummary, var summary = summaryDocument, newBody != summary.body
+        else { return }
+        summary.replaceBody(newBody, markHandEdited: true)
+        summaryDocument = summary
+        summaryNeedsSave = true
+
+        pendingSummarySave?.cancel()
+        let entry = entry
+        pendingSummarySave = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(600))
+                guard !Task.isCancelled else { return }
+                if let saved = await model.saveSummaryBody(newBody, for: entry),
+                   summaryDocument?.body == newBody {
+                    summaryDocument = saved
+                    summaryNeedsSave = false
+                }
+            } catch is CancellationError {
+                // A newer keystroke replaced this pending write.
+            } catch {
+                // `saveSummaryBody` presents file-system errors centrally.
+            }
+        }
+    }
+
+    private func finishSummaryEditing() {
+        guard isEditingSummary else { return }
+        pendingSummarySave?.cancel()
+        pendingSummarySave = nil
+        if summaryNeedsSave, let body = summaryDocument?.body {
+            summaryNeedsSave = false
+            let entry = entry
+            Task {
+                if let saved = await model.saveSummaryBody(body, for: entry) {
+                    summaryDocument = saved
+                }
+            }
+        }
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        isEditingSummary = false
+    }
+
+    @MainActor
+    private func reloadSummary() async {
+        guard !isEditingSummary else { return }
+        summaryDocument = await model.loadSummary(for: entry)
+        // A generation that just finished reveals its result — including
+        // after the AI title rename tears down and recreates this view.
+        if summaryDocument != nil,
+           model.summaryController.consumeReveal(for: entry.relativePath) {
+            showingSummary = true
+        }
+        let doc = document
+        let orig = original
+        // SHA256 over the whole source text — off the main actor so a long
+        // transcript never stutters the UI.
+        currentSourceFingerprint = await Task.detached(priority: .utility) {
+            SummarySourceSelector.source(document: doc, original: orig)
+                .map { SummaryFingerprint.fingerprint(of: $0.text) }
+        }.value
+    }
+
+    private func resetSummaryUI() {
+        pendingSummarySave?.cancel()
+        pendingSummarySave = nil
+        summaryNeedsSave = false
+        isEditingSummary = false
+        showingSummary = false
+        showingRegenerateConfirm = false
+    }
+
     private func beginEditing() {
         guard let document else { return }
         editingStartedForked = isForked
@@ -498,8 +955,11 @@ struct TranscriptWorkbenchView: View {
         isEditing = true
     }
 
+    /// `returningTo: .original` lands on the original layer even when the
+    /// note stays forked — the layer control's Original segment doubles as
+    /// "finish editing and show the original".
     @MainActor
-    private func saveAndFinishEditing() async {
+    private func saveAndFinishEditing(returningTo: Layer? = nil) async {
         guard isEditing, !isSaving, let document else { return }
         isSaving = true
 
@@ -539,8 +999,58 @@ struct TranscriptWorkbenchView: View {
             editedPlaybackMap = nil
         } else {
             await rebuildEditedPlaybackMap()
-            activeLayer = .edited
+            activeLayer = (returningTo == .original && original != nil) ? .original : .edited
             forkOverride = true
+        }
+    }
+
+    /// Deletes the edited layer: rewrites the note body to the regenerated
+    /// original and clears `hand_edited`, un-forking the entry. Keystrokes
+    /// autosave, so a true discard must rewrite the file — dropping view
+    /// state alone would resurrect the edits on the next load.
+    @MainActor
+    private func discardEdits() async {
+        guard let original, document != nil, !isSaving else { return }
+        isSaving = true
+
+        let pendingSave = pendingSave
+        pendingSave?.cancel()
+        self.pendingSave = nil
+        await pendingSave?.value
+
+        let regenerated = "\n" + TranscriptMarkdown.body(from: original, speakerNames: speakerNames) + "\n"
+        if let saved = await model.saveTranscriptBody(
+            regenerated,
+            markHandEdited: false,
+            clearHandEdited: true,
+            for: entry
+        ) {
+            document = saved
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            isEditing = false
+            needsSave = false
+            editStartBody = nil
+            editingDidChange = false
+            editingStartedForked = false
+            activeLayer = .original
+            forkOverride = false
+            editedPlaybackMap = nil
+        }
+        isSaving = false
+    }
+
+    /// Deletes the summary sidecar and returns to the transcript. The pending
+    /// debounced save must die first, or it fires after the delete and throws
+    /// "summary not found".
+    @MainActor
+    private func deleteSummary() async {
+        pendingSummarySave?.cancel()
+        pendingSummarySave = nil
+        summaryNeedsSave = false
+        isEditingSummary = false
+        if await model.deleteSummary(for: entry) {
+            summaryDocument = nil
+            showingSummary = false
         }
     }
 
@@ -609,7 +1119,12 @@ struct TranscriptWorkbenchView: View {
             findMatchIndex = 0
             return
         }
-        let source = findSource as NSString
+        let matches = Self.matchRanges(of: query, in: findSource as NSString)
+        findMatches = matches
+        if resetSelection || !matches.indices.contains(findMatchIndex) { findMatchIndex = 0 }
+    }
+
+    private static func matchRanges(of query: String, in source: NSString) -> [NSRange] {
         var matches: [NSRange] = []
         var searchRange = NSRange(location: 0, length: source.length)
         while searchRange.length > 0 {
@@ -620,16 +1135,22 @@ struct TranscriptWorkbenchView: View {
             guard next > found.location else { break }
             searchRange = NSRange(location: next, length: source.length - next)
         }
-        findMatches = matches
-        if resetSelection || !matches.indices.contains(findMatchIndex) { findMatchIndex = 0 }
+        return matches
     }
 
-    private func toggleFindBar() {
+    private func toggleFindBar(withReplace: Bool = false) {
         if showingFind {
+            // ⌥⌘F on an open find-only bar expands it instead of closing.
+            if withReplace, !showingReplace, canReplace {
+                showingReplace = true
+                findFieldFocused = true
+                return
+            }
             closeFindBar()
             return
         }
         showingFind = true
+        showingReplace = withReplace && canReplace
         searchNavigationRange = nil
         updateFindMatches(resetSelection: true)
         findFieldFocused = true
@@ -637,10 +1158,49 @@ struct TranscriptWorkbenchView: View {
 
     private func closeFindBar() {
         showingFind = false
+        showingReplace = false
         findQuery = ""
+        replaceQuery = ""
         findMatches = []
         findMatchIndex = 0
         findFieldFocused = false
+    }
+
+    /// Both replace actions target `document.body` — the only mutable text.
+    /// When invoked while viewing the immutable original, this first enters
+    /// the standard editing flow (which shows the edited layer) and recomputes
+    /// the matches against the edited body, so the ranges being replaced are
+    /// exactly the ones on screen.
+    private func replaceCurrentMatch() {
+        guard canReplace else { return }
+        if !isEditing { beginEditing() }
+        updateFindMatches()
+        guard isEditing, let body = document?.body,
+              findMatches.indices.contains(findMatchIndex) else { return }
+        let target = findMatches[findMatchIndex]
+        let newBody = (body as NSString).replacingCharacters(in: target, with: replaceQuery)
+        applyUserEdit(newBody)
+        // Land on the match after the replacement, skipping any new hit the
+        // replacement text itself introduced inside the replaced span (e.g.
+        // replacing "cat" with "cats" must not select the same spot forever).
+        let query = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        let boundary = target.location + replaceQuery.utf16.count
+        let updated = Self.matchRanges(of: query, in: newBody as NSString)
+        findMatches = updated
+        findMatchIndex = updated.firstIndex { $0.location >= boundary } ?? 0
+    }
+
+    private func replaceAllMatches() {
+        guard canReplace else { return }
+        if !isEditing { beginEditing() }
+        updateFindMatches()
+        guard isEditing, let body = document?.body, !findMatches.isEmpty else { return }
+        let newBody = NSMutableString(string: body)
+        for range in findMatches.reversed() {
+            newBody.replaceCharacters(in: range, with: replaceQuery)
+        }
+        applyUserEdit(newBody as String)
     }
 
     private func cycleFind(forward: Bool) {
@@ -664,7 +1224,9 @@ struct TranscriptWorkbenchView: View {
         }
         handledNavigationRequestID = request.id
         showingFind = false
+        showingReplace = false
         findQuery = ""
+        replaceQuery = ""
         findMatches = []
         searchNavigationRange = NSRange(request.hit.matchRange)
         switch request.hit.layer {
@@ -700,11 +1262,15 @@ struct TranscriptWorkbenchView: View {
 
     private func copyCurrentLayer() {
         let markdown: String
-        switch viewedLayer {
-        case .original:
-            markdown = wordMap?.renderedText ?? ""
-        case .edited:
-            markdown = document?.body.trimmingCharacters(in: .newlines) ?? ""
+        if showingSummary {
+            markdown = summaryDocument?.body.trimmingCharacters(in: .newlines) ?? ""
+        } else {
+            switch viewedLayer {
+            case .original:
+                markdown = wordMap?.renderedText ?? ""
+            case .edited:
+                markdown = document?.body.trimmingCharacters(in: .newlines) ?? ""
+            }
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(markdown, forType: .string)
@@ -720,8 +1286,9 @@ struct TranscriptWorkbenchView: View {
 }
 
 /// A two-segment layer control whose Edited segment becomes the commit action
-/// while the Markdown surface owns text focus. A custom control is used because
-/// a segmented Picker does not reliably invoke an already-selected segment.
+/// while the Markdown surface owns text focus; Original then commits too and
+/// lands on the original layer. A custom control is used because a segmented
+/// Picker does not reliably invoke an already-selected segment.
 private struct TranscriptLayerControl: View {
     let layer: TranscriptWorkbenchView.Layer
     let isEditing: Bool
@@ -735,7 +1302,7 @@ private struct TranscriptLayerControl: View {
             segment("Original", selected: !isEditing && layer == .original) {
                 onSelectOriginal()
             }
-            .disabled(isEditing || isSaving)
+            .disabled(isSaving)
 
             segment(isEditing ? "Save" : "Edited", selected: isEditing || layer == .edited) {
                 if isEditing { onSave() } else { onSelectEdited() }

@@ -115,6 +115,7 @@ struct AppCommands: Commands {
             Divider()
             Menu("Find") {
                 commandButton("Find in Note…", .findInNote)
+                commandButton("Find and Replace…", .findAndReplaceInNote)
                 commandButton("Search Vault…", .searchVault)
             }
         }

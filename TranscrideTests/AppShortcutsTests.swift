@@ -20,7 +20,7 @@ struct AppShortcutsTests {
         #expect(byCategory[.recordingFile]?.count == 5)
         #expect(byCategory[.notesEntry]?.count == 21)
         #expect(byCategory[.playback]?.count == 19)
-        #expect(byCategory[.libraryView]?.count == 12)
+        #expect(byCategory[.libraryView]?.count == 13)
         #expect(byCategory[.appHelp]?.count == 2)
         for action in AppShortcutAction.allCases {
             #expect(!action.title.isEmpty)

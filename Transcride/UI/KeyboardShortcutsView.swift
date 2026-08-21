@@ -143,6 +143,7 @@ struct KeyboardShortcutsView: View {
         .toggleSkipSilence: "Turns automatic silence skipping on or off throughout the app.",
         .enterZenMode: "Distraction-free recording. Space starts recording, then pauses and resumes it. Esc asks before discarding an active recording.",
         .findInNote: "Return and ⇧Return cycle matches; matches follow the viewed layer.",
+        .findAndReplaceInNote: "Opens Find with a replace field. Replacing edits the Edited layer — the Original stays immutable.",
         .searchVault: "Every transcript, with fuzzy matching and filters.",
         .previousFolder: "Moves through the far-left sidebar without taking focus from the clip list.",
         .nextFolder: "Moves through the far-left sidebar without taking focus from the clip list.",

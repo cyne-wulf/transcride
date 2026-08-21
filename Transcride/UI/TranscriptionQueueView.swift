@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Always-discoverable toolbar button + popover for the transcription queue
-/// (TRN-3). Active work appears as a filling progress ring around the item
+/// Always-discoverable toolbar button + popover for AI activity (TRN-3 +
+/// PRD-9): queued transcriptions and running summary generations share the
+/// one ring. Active work appears as a filling progress ring around the item
 /// count; the idle popover explains that nothing is waiting. Each row shows
 /// the entry, model, and state, with retry and remove/cancel actions.
 struct TranscriptionQueueButton: View {
@@ -11,14 +12,31 @@ struct TranscriptionQueueButton: View {
 
     @State private var showingQueue = false
 
+    /// Summary jobs with visible state (generating or failed), stable order.
+    private var summaryJobs: [(path: RelativePath, phase: SummaryGenerationController.Phase)] {
+        model.summaryController.phases
+            .filter { $0.value != .idle }
+            .sorted { $0.key < $1.key }
+            .map { (path: $0.key, phase: $0.value) }
+    }
+
     /// The running item's progress; nil while everything is still waiting.
+    /// Transcription wins the ring when both kinds of work are active — it's
+    /// the longer job; a summary's fraction fills in otherwise.
     private var runningFraction: Double? {
-        guard let running = queue.items.first(where: { $0.state == .running }) else { return nil }
-        return queue.progressByItemID[running.id] ?? 0
+        if let running = queue.items.first(where: { $0.state == .running }) {
+            return queue.progressByItemID[running.id] ?? 0
+        }
+        return summaryJobs.lazy.compactMap { $0.phase.fraction }.first
     }
 
     private var hasFailure: Bool {
         queue.items.contains { $0.state == .failed }
+            || summaryJobs.contains { $0.phase.isFailed }
+    }
+
+    private var itemCount: Int {
+        queue.items.count + summaryJobs.count
     }
 
     var body: some View {
@@ -27,14 +45,14 @@ struct TranscriptionQueueButton: View {
             showingQueue.toggle()
         } label: {
             if hasFailure {
-                Label("Transcription Queue", systemImage: "exclamationmark.circle.fill")
+                Label("AI Queue", systemImage: "exclamationmark.circle.fill")
                     .foregroundStyle(.red)
             } else {
-                QueueProgressRing(fraction: runningFraction, count: queue.items.count)
+                QueueProgressRing(fraction: runningFraction, count: itemCount)
             }
         }
-        .accessibilityLabel("Transcription queue")
-        .help("Transcription queue")
+        .accessibilityLabel("Transcription and summary queue")
+        .help("Transcription and summary queue")
         .onChange(of: model.queuePopoverRequestRevision) { _, _ in
             // View → Transcription Queue opens the same toolbar popover.
             onOpen()
@@ -78,19 +96,33 @@ private struct TranscriptionQueuePopover: View {
     @Environment(AppModel.self) private var model
     let queue: TranscriptionQueue
 
+    /// Summary jobs with visible state (generating or failed), stable order.
+    private var summaryJobs: [(path: RelativePath, phase: SummaryGenerationController.Phase)] {
+        model.summaryController.phases
+            .filter { $0.value != .idle }
+            .sorted { $0.key < $1.key }
+            .map { (path: $0.key, phase: $0.value) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Transcription Queue")
+            Text("AI Queue")
                 .font(.headline)
                 .padding(.bottom, 8)
-            if queue.items.isEmpty {
-                Text("Nothing waiting for transcription.")
+            if queue.items.isEmpty, summaryJobs.isEmpty {
+                Text("Nothing waiting for transcription or summarizing.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(queue.items) { item in
                     itemRow(item)
-                    if item.id != queue.items.last?.id {
+                    if item.id != queue.items.last?.id || !summaryJobs.isEmpty {
+                        Divider().padding(.vertical, 8)
+                    }
+                }
+                ForEach(summaryJobs, id: \.path) { job in
+                    summaryRow(job.path, phase: job.phase)
+                    if job.path != summaryJobs.last?.path {
                         Divider().padding(.vertical, 8)
                     }
                 }
@@ -98,6 +130,57 @@ private struct TranscriptionQueuePopover: View {
         }
         .padding(14)
         .frame(width: 340, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func summaryRow(_ path: RelativePath, phase: SummaryGenerationController.Phase) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.snapshot?.entry(withID: path)?.displayTitle ?? path.lastComponent)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                Text("\(SummaryModelCatalog.preferredModel().displayName) · summary")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                switch phase {
+                case .generating(let part, let total, let fraction):
+                    HStack(spacing: 6) {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                            .controlSize(.small)
+                        if total > 1 {
+                            Text("Part \(part) of \(total)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize()
+                        }
+                    }
+                case .failed(let message):
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Button("Retry") {
+                        Task { await model.retrySummary(forEntryAt: path) }
+                    }
+                    .controlSize(.small)
+                case .idle:
+                    EmptyView()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                if phase.isGenerating {
+                    model.summaryController.cancel(for: path)
+                } else {
+                    model.summaryController.clearFailure(for: path)
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(phase.isGenerating ? "Cancel summary" : "Dismiss")
+        }
     }
 
     @ViewBuilder
