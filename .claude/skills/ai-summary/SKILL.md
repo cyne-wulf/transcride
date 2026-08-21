@@ -133,7 +133,8 @@ commands are later-in-milestone work.
 ## Rendered markdown
 
 - Read mode renders via **MarkdownUI 2.4.1** (`gonzalezreal/swift-markdown-ui`,
-  UI layer only): `Markdown(body).markdownTheme(.gitHub).textSelection(.enabled)`
+  UI layer only): `Markdown(body).markdownTheme(.transcride).textSelection(.enabled)`
+  (the custom theme lives in `Transcride/UI/SummaryMarkdownTheme.swift`)
   in a ScrollView (insets 22/20 matching the raw editor); double-click enters
   the raw `MarkdownBodyEditor`, Save returns to rendered. MarkdownUI is
   maintenance-mode but stable; its successor Textual was 0.1.0 (not adopted).
