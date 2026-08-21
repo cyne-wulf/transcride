@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+
+  # Review every new push to an open pull request instead of pausing after a
+  # fixed number of incremental reviews.
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    drafts: false
+
+  # This project is generated from project.yml; the generated Xcode project
+  # must not be edited or treated as the source of truth.
+  path_filters:
+    - "!Transcride.xcodeproj/**"
+
+  path_instructions:
+    - path: "Transcride/**/*.swift"
+      instructions: |
+        Focus on correctness and regressions rather than formatting preferences.
+        Pay particular attention to Swift concurrency and actor isolation, audio
+        capture and recovery guarantees, atomic vault-file mutations, and keeping
+        UI work on the main actor. Flag changes that bypass the existing AppModel
+        intent paths or VaultService durability boundaries.
+    - path: "TranscrideTests/**/*.swift"
+      instructions: |
+        Check that tests are deterministic, exercise meaningful behavior and
+        failure paths, and preserve the production invariants documented in the
+        repository guidance and milestone requirements.

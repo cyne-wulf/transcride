@@ -1,8 +1,9 @@
 # Milestone 8 handoff
 
 > Assume you are a fresh model with zero context beyond this document and the
-> next milestone's PRD, whichever it turns out to be. PRD-9 was removed from
-> the roadmap at milestone-8 closeout; no successor milestone is defined yet.
+> next milestone's PRD. The original PRD-9 (editor workbench) was removed from
+> the roadmap at milestone-8 closeout; PRD-10 was later renamed to `PRD-9.md`
+> (Local AI Summary Layer) and is the successor milestone.
 
 ## State summary
 
@@ -18,8 +19,9 @@ microphone-failure ledger, a 34-finding audit-fix program, power-loss
 durability barriers with an adversarial-audit remediation pass, Zen-mode
 spacebar control, and an explicit permission-status section in Settings.
 The full suite is green: 565 unit tests (61 suites) + 68 integration tests
-(7 suites). PRD-9 (the editor workbench) was removed from the roadmap at
-closeout; the next milestone is not yet defined.
+(7 suites). The original PRD-9 (the editor workbench) was removed from the
+roadmap at closeout; the next milestone is PRD-9.md, the Local AI Summary
+Layer renamed from PRD-10.
 
 ## Build, run, test
 

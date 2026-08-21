@@ -25,9 +25,9 @@ notes are Markdown, audio uses ordinary media formats, timed transcripts are JSO
 and entry/folder names are human-readable. The SQLite search index and waveform
 files are derived caches.
 
-No next milestone is currently defined: PRD-9 was removed from the roadmap at
-milestone-8 closeout. When the next milestone is specified, read
-`milestone-8-handoff.md` first and follow the milestone gate in
+The next milestone is milestone 9 (`PRD-9.md`, Local AI Summary Layer — renamed
+from PRD-10 after the original PRD-9 editor workbench was removed at milestone-8
+closeout). Read `milestone-8-handoff.md` first and follow the milestone gate in
 `CLAUDE.md`/`AGENTS.md`.
 
 ## Architecture
@@ -283,8 +283,10 @@ by occurrence ordinal; user-authored text absent from the original has no time c
   two-permission status section, both at user request.
 - Quit-and-recover now preserves an active Mac-audio sidecar so recovery can mix
   it, matching crash recovery.
-- PRD-9 was removed from the roadmap at closeout; the milestone-8 handoff is
-  `milestone-8-handoff.md` rather than a `PRD-9-start-here.md`.
+- The original PRD-9 (editor workbench) was removed from the roadmap at closeout;
+  the milestone-8 handoff is `milestone-8-handoff.md` rather than a
+  `PRD-9-start-here.md`. PRD-10 was later renamed to `PRD-9.md` (Local AI Summary
+  Layer) and pulled forward as milestone 9.
 
 ## Known issues and technical debt
 
@@ -337,12 +339,14 @@ The detailed post-v1 sequence is already written:
   from the menu bar, system-wide shortcuts, and a background indicator over the
   single-recorder contract, plus the shortcut remapper, Quick Move, universal
   recording, failure ledger, and durability additions logged above.
-- PRD-9 (editor workbench for note structure and presentation) was removed from
-  the roadmap at milestone-8 closeout; its content is not planned.
-- `PRD-10.md`: a third Original / Edited / Summary layer backed by a basic,
-  local-only summarization model. The implementation must benchmark below 8 GB peak
-  resident memory, store Summary as a separate derived Markdown artifact, preserve
-  both transcript layers, and mark summaries stale rather than regenerating silently.
+- The original PRD-9 (editor workbench for note structure and presentation) was
+  removed from the roadmap at milestone-8 closeout; its content is not planned.
+- `PRD-9.md` (milestone 9, renamed from PRD-10): a third Original / Edited / Summary
+  layer backed by a basic, local-only summarization model (MLX Swift + Gemma 3 QAT
+  4-bit, RAM-adaptive 1B/4B default). Summaries are user-editable derived artifacts.
+  The implementation must benchmark below 8 GB peak resident memory, store Summary
+  as a separate derived Markdown artifact, preserve both transcript layers, and mark
+  summaries stale rather than regenerating silently.
 - `PRD-20.md`: a far-horizon, versioned `transcride` CLI and agent interface. The
   root command self-describes the supported media/vault contract and current vault;
   `transcride import <audio-file>` uses the canonical import/transcription path; and
@@ -361,7 +365,7 @@ at mutation time; unavailable speech timing blocks before rendering or swapping.
 
 Master-PRD/post-program items still deferred: cloud engines (implement the existing
 engine protocol), sync (coordinate external mutations through `VaultService` and
-search invalidation), AI chapters/action items/chat beyond the scoped PRD-10 Summary
+search invalidation), AI chapters/action items/chat beyond the scoped PRD-9 Summary
 layer (new derived artifacts must never replace the Markdown source of truth), the
 PRD-20 CLI/agent interface, iOS capture, plugins, localization, and an auto-update
 framework. Transcride remains local-only and telemetry-free unless the product
